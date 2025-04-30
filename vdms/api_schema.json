@@ -1,0 +1,1035 @@
+/**
+ * @section LICENSE
+ *
+ * The MIT License
+ *
+ * @copyright Copyright (c) 2017 Intel Corporation
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction,
+ * including without limitation the rights to use, copy, modify,
+ * merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ *
+ */
+
+ {
+  "description": "VDMS API",
+  "type": "array",
+  "minItems": 1,
+  "items": {
+    "type": "object",
+    "anyOf": [
+      { "$ref": "#/definitions/AddEntityTop" },
+      { "$ref": "#/definitions/UpdateEntityTop" },
+      { "$ref": "#/definitions/FindEntityTop" },
+
+      { "$ref": "#/definitions/AddConnectionTop" },
+      { "$ref": "#/definitions/UpdateConnectionTop" },
+      { "$ref": "#/definitions/FindConnectionTop" },
+
+      { "$ref": "#/definitions/AddImageTop" },
+      { "$ref": "#/definitions/UpdateImageTop" },
+      { "$ref": "#/definitions/FindImageTop" },
+
+      { "$ref": "#/definitions/AddDescriptorSetTop" },
+      { "$ref": "#/definitions/FindDescriptorSetTop" },
+      { "$ref": "#/definitions/AddDescriptorTop" },
+      { "$ref": "#/definitions/ClassifyDescriptorTop" },
+      { "$ref": "#/definitions/FindDescriptorTop" },
+      { "$ref": "#/definitions/DeleteExpiredTop" },
+
+      { "$ref": "#/definitions/AddBoundingBoxTop" },
+      { "$ref": "#/definitions/UpdateBoundingBoxTop" },
+      { "$ref": "#/definitions/FindBoundingBoxTop" },
+
+      { "$ref": "#/definitions/AddVideoTop" },
+      { "$ref": "#/definitions/UpdateVideoTop" },
+      { "$ref": "#/definitions/FindVideoTop" },
+      { "$ref": "#/definitions/FindFramesTop" },
+
+      { "$ref": "#/definitions/AddBlobTop" },
+      { "$ref": "#/definitions/UpdateBlobTop" },
+      { "$ref": "#/definitions/FindBlobTop" },
+
+      { "$ref": "#/definitions/NeoAddTop" },
+      { "$ref": "#/definitions/NeoFindTop" },
+
+      { "$ref": "#/definitions/NeoAddDescriptorSetTop" },
+      { "$ref": "#/definitions/NeoFindDescriptorSetTop" },
+      { "$ref": "#/definitions/NeoAddDescriptorTop" },
+      { "$ref": "#/definitions/NeoClassifyDescriptorTop" },
+      { "$ref": "#/definitions/NeoFindDescriptorTop" }
+    ]
+  },
+  "uniqueItems": false,
+
+  "definitions": {
+
+    // misc
+    "propertyArray": {
+      "type": "array",
+      "items": {"type" : "object"},
+      "minimum" : 1
+    },
+
+    "positiveInt": {
+      "type": "integer",
+      "minimum": 1
+    },
+
+    "nonNegativeInt": {
+      "type": "integer",
+      "minimum": 0
+    },
+
+    "nonNegativeIntArray": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 0},
+      "minimum": 1
+    },
+
+    "positiveDouble": {
+      "type": "double",
+      "minimum": 0.0
+    },
+
+    "stringArray":  {
+      "type": "array",
+      "items": {"type": "string"},
+      "minimum": 1
+    },
+
+    "blob":  {
+      "type": "boolean"
+    },
+
+    "refInt": {
+      "type": "integer",
+      "minimum": 1,
+      "maximun": 10000
+    },
+
+    "imgFormatString": {
+      "type": "string",
+	"enum": ["png", "jpg", "bin"]
+    },
+
+    "metricFormatString": {
+      "type": "string",
+      "enum": ["L2", "IP"]
+    },
+
+    "engineFormatString": {
+      "type": "string",
+      "enum": ["FaissFlat", "FaissHNSWFlat", "FaissIVFFlat", "TileDBDense", "TileDBSparse", "Flinng"]
+    },
+
+    "vidCodecString": {
+      "type": "string",
+      "enum": ["xvid", "h264", "h263"]
+    },
+
+    "vidContainerString": {
+      "type": "string",
+      "enum": ["mp4", "avi", "mov"]
+    },
+
+    "unitString": {
+      "type": "string",
+      "enum": ["frames", "seconds"]
+    },
+
+
+    "edgeDirectionString": {
+      "type": "string",
+      "enum": ["in", "out", "any"]
+    },
+
+    "sortOrder": {
+      "type": "string",
+      "enum": ["ascending", "descending"]
+    },
+
+    "sortBlock": {
+      "type": "object",
+      "properties": {
+        "key":    { "type": "string" },
+        "order":  { "$ref": "#/definitions/sortOrder" }
+      },
+      "required": ["key"],
+      "additionalProperties": false
+    },
+
+    "oneOfSort": {
+      "oneOf": [ {"type": "string" },
+                 {"$ref": "#/definitions/sortBlock" }]
+    },
+
+    // Blocks
+
+    "blockLink": {
+      "type": "object",
+      "properties": {
+        "ref":         { "$ref": "#/definitions/refInt" },
+        "direction":   { "$ref": "#/definitions/edgeDirectionString" },
+        "class":       { "type": "string" },
+        "properties":  { "type": "object" },
+        "constraints": { "type": "object" }
+      },
+      "required": ["ref"],
+      "additionalProperties": false
+    },
+
+    "blockResults": {
+      "type": "object",
+      "properties": {
+        "list":       { "type": "array" },
+        "average":    { "type": "string" },
+        "count":      { "type": "string" },
+        "sum":        { "type": "string" },
+        "limit":      { "$ref": "#/definitions/positiveInt" },
+        "sort":       { "$ref": "#/definitions/oneOfSort"},
+        "blob":       { "$ref": "#/definitions/blob" }
+      },
+      "additionalProperties": false
+    },
+
+    "blockImageOperations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "anyOf": [
+          { "$ref": "#/definitions/operationThreshold" },
+          { "$ref": "#/definitions/operationResize" },
+          { "$ref": "#/definitions/operationCrop" },
+          { "$ref": "#/definitions/operationFlip" },
+          { "$ref": "#/definitions/operationRotate" },
+          { "$ref": "#/definitions/operationUser" },
+          { "$ref": "#/definitions/operationSyncRemote" },
+          { "$ref": "#/definitions/operationRemote" },
+          { "$ref": "#/definitions/operationCustom" }
+        ]
+      },
+      "uniqueItems": false
+    },
+
+    "blockVideoOperations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "anyOf": [
+          { "$ref": "#/definitions/operationThreshold" },
+          { "$ref": "#/definitions/operationResize" },
+          { "$ref": "#/definitions/operationCrop" },
+          { "$ref": "#/definitions/operationInterval" },
+          { "$ref": "#/definitions/operationUser" },
+          { "$ref": "#/definitions/operationRemote" },
+          { "$ref": "#/definitions/operationSyncRemote" }
+        ]
+      },
+      "uniqueItems": false
+    },
+
+    "blockFrameOperations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "anyOf": [
+          { "$ref": "#/definitions/operationThreshold" },
+          { "$ref": "#/definitions/operationResize" },
+          { "$ref": "#/definitions/operationCrop" },
+          { "$ref": "#/definitions/operationFlip" },
+          { "$ref": "#/definitions/operationRotate" },
+          { "$ref": "#/definitions/operationInterval" }
+        ]
+      },
+      "uniqueItems": false
+    },
+
+    // Operations
+
+    "operationInterval": {
+      "type": "object",
+      "properties": {
+        "type":  { "enum": [ "interval" ] },
+        "start": { "$ref": "#/definitions/nonNegativeInt" },
+        "stop":  { "$ref": "#/definitions/nonNegativeInt" },
+        "step":  { "$ref": "#/definitions/positiveInt" }
+      },
+      "required": ["type", "start", "stop"],
+      "additionalProperties": false
+    },
+
+    "operationThreshold": {
+      "type": "object",
+      "properties": {
+        "type":  { "enum": [ "threshold" ] },
+        "value": { "$ref": "#/definitions/nonNegativeInt" }
+        },
+      "required": ["type", "value"],
+      "additionalProperties": false
+    },
+
+    "operationCustom": {
+      "type": "object",
+      "properties": {
+        "type":  { "enum": [ "custom" ] }
+        },
+      "required": ["type"],
+      "additionalProperties": true
+    },
+
+    "operationResize": {
+      "type": "object",
+      "properties": {
+        "type":   { "enum": [ "resize" ] },
+        "height": { "$ref": "#/definitions/positiveInt" },
+        "width":  { "$ref": "#/definitions/positiveInt" }
+        },
+      "required": ["type", "height", "width"],
+      "additionalProperties": false
+    },
+
+    "operationCrop": {
+      "type": "object",
+      "properties": {
+        "type":   { "enum": [ "crop" ] },
+        "x":      { "$ref": "#/definitions/nonNegativeInt" },
+        "y":      { "$ref": "#/definitions/nonNegativeInt" },
+        "height": { "$ref": "#/definitions/positiveInt" },
+        "width":  { "$ref": "#/definitions/positiveInt" }
+        },
+      "required": ["type", "x", "y", "height", "width"],
+      "additionalProperties": false
+    },
+
+    "operationFlip": {
+      "type": "object",
+      "properties": {
+        "type":   { "enum": [ "flip" ] },
+        "code":   { "type": "integer" }
+      },
+      "required": ["type", "code"],
+      "additionalProperties": false
+    },
+
+    "operationRotate": {
+      "type": "object",
+      "properties": {
+        "type":   { "enum": [ "rotate" ] },
+        "angle":  { "type": "number" },
+        "resize": { "type": "boolean" }
+      },
+      "required": ["type", "angle", "resize"],
+      "additionalProperties": false
+    },
+
+    "operationSyncRemote" : {
+      "type": "object",
+      "properties": {
+        "type":   { "enum": [ "syncremoteOp" ] },
+        "url":   { "type": [ "string" ] },
+        "options":   { "type": [ "object" ] }
+      },
+      "required": ["type", "url"],
+      "additionalProperties": false
+    },
+
+    "operationRemote" : {
+      "type": "object",
+      "properties": {
+        "type":   { "enum": [ "remoteOp" ] },
+        "url":   { "type": [ "string" ] },
+        "options":   { "type": [ "object" ] }
+      },
+      "required": ["type", "url"],
+      "additionalProperties": false
+    },
+
+    "operationUser" : {
+      "type": "object",
+      "properties": {
+        "type":   { "enum": [ "userOp" ] },
+        "options":   { "type": [ "object" ] }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+
+    // Shapes
+
+    "shapeRectangle": {
+      "type": "object",
+      "properties": {
+        "x":      { "$ref": "#/definitions/nonNegativeInt" },
+        "y":      { "$ref": "#/definitions/nonNegativeInt" },
+        "w":      { "$ref": "#/definitions/positiveInt" },
+        "h":      { "$ref": "#/definitions/positiveInt" }
+      },
+      "required": ["x", "y", "w", "h"],
+      "additionalProperties": false
+    },
+
+    // Top-Level Commands (needed for the Schema)
+
+    "AddEntityTop": {
+      "properties": {
+        "AddEntity" : { "type": "object", "$ref": "#/definitions/AddEntity" }
+      },
+      "additionalProperties": false
+    },
+
+    "UpdateEntityTop": {
+      "properties": {
+        "UpdateEntity" : { "type": "object", "$ref": "#/definitions/UpdateEntity" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindEntityTop": {
+      "properties": {
+        "FindEntity" : { "type": "object", "$ref": "#/definitions/FindEntity" }
+      },
+      "additionalProperties": false
+    },
+
+    "AddConnectionTop": {
+      "properties": {
+        "AddConnection" : { "type": "object", "$ref": "#/definitions/AddConnection" }
+      },
+      "additionalProperties": false
+    },
+
+    "UpdateConnectionTop": {
+      "properties": {
+        "UpdateConnection" : { "type": "object", "$ref": "#/definitions/UpdateConnection" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindConnectionTop": {
+      "properties": {
+        "FindConnection" : { "type": "object", "$ref": "#/definitions/FindConnection" }
+      },
+      "additionalProperties": false
+    },
+
+    "AddImageTop": {
+      "properties": {
+        "AddImage" : { "type": "object", "$ref": "#/definitions/AddImage" }
+      },
+      "additionalProperties": false
+    },
+
+    "UpdateImageTop": {
+      "properties": {
+        "UpdateImage" : { "type": "object", "$ref": "#/definitions/UpdateImage" }
+      },
+      "additionalProperties": false
+    },
+
+   "FindImageTop": {
+      "properties": {
+        "FindImage" : { "type": "object", "$ref": "#/definitions/FindImage" }
+      },
+      "additionalProperties": false
+    },
+
+    "AddDescriptorTop": {
+      "properties": {
+        "AddDescriptor" : { "type": "object",
+                            "$ref": "#/definitions/AddDescriptor" }
+      },
+      "additionalProperties": false
+    },
+
+    "NeoAddDescriptorTop": {
+      "properties": {
+        "NeoAddDescriptor" : { "type": "object",
+          "$ref": "#/definitions/NeoAddDescriptor" }
+      },
+      "additionalProperties": false
+    },
+
+    "AddDescriptorSetTop": {
+      "properties": {
+        "AddDescriptorSet" : { "type": "object",
+                               "$ref": "#/definitions/AddDescriptorSet" }
+      },
+      "additionalProperties": false
+    },
+
+    "NeoAddDescriptorSetTop": {
+      "properties": {
+        "NeoAddDescriptorSet" : { "type": "object",
+          "$ref": "#/definitions/NeoAddDescriptorSet" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindDescriptorSetTop": {
+      "properties": {
+        "FindDescriptorSet" : { "type": "object",
+                               "$ref": "#/definitions/FindDescriptorSet" }
+      },
+      "additionalProperties": false
+    },
+
+    "NeoFindDescriptorSetTop": {
+      "properties": {
+        "NeoFindDescriptorSet" : { "type": "object",
+          "$ref": "#/definitions/NeoFindDescriptorSet" }
+      },
+      "additionalProperties": false
+    },
+
+    "DeleteExpiredTop": {
+      "properties": {
+        "DeleteExpired" : { "type": "object", "$ref": "#/definitions/DeleteExpired" }
+      },
+      "additionalProperties": false
+    },
+
+
+    "ClassifyDescriptorTop": {
+      "properties": {
+        "ClassifyDescriptor" : { "type": "object", "$ref": "#/definitions/ClassifyDescriptor" }
+      },
+      "additionalProperties": false
+    },
+
+    "NeoClassifyDescriptorTop": {
+      "properties": {
+        "NeoClassifyDescriptor" : { "type": "object", "$ref": "#/definitions/NeoClassifyDescriptor" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindDescriptorTop": {
+      "properties": {
+        "FindDescriptor" : { "type": "object", "$ref": "#/definitions/FindDescriptor" }
+      },
+      "additionalProperties": false
+    },
+
+    "NeoFindDescriptorTop": {
+      "properties": {
+        "NeoFindDescriptor" : { "type": "object", "$ref": "#/definitions/NeoFindDescriptor" }
+      },
+      "additionalProperties": false
+    },
+
+    "AddBoundingBoxTop": {
+      "properties": {
+        "AddBoundingBox" : { "type": "object", "$ref": "#/definitions/AddBoundingBox" }
+      },
+      "additionalProperties": false
+    },
+
+    "UpdateBoundingBoxTop": {
+      "properties": {
+        "UpdateBoundingBox" : { "type": "object", "$ref": "#/definitions/UpdateBoundingBox" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindBoundingBoxTop": {
+      "properties": {
+        "FindBoundingBox" : { "type": "object", "$ref": "#/definitions/FindBoundingBox" }
+      },
+      "additionalProperties": false
+    },
+
+    "AddBlobTop": {
+      "properties": {
+        "AddBlob" : { "type": "object", "$ref": "#/definitions/AddBlob" }
+      },
+      "additionalProperties": false
+    },
+    "UpdateBlobTop": {
+      "properties": {
+        "UpdateBlob" : { "type": "object", "$ref": "#/definitions/UpdateBlob" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindBlobTop": {
+      "properties": {
+        "FindBlob" : { "type": "object", "$ref": "#/definitions/FindBlob" }
+      },
+      "additionalProperties": false
+    },
+
+    "AddVideoTop": {
+      "properties": {
+        "AddVideo" : { "type": "object", "$ref": "#/definitions/AddVideo" }
+      },
+      "additionalProperties": false
+    },
+
+    "UpdateVideoTop": {
+      "properties": {
+        "UpdateVideo" : { "type": "object", "$ref": "#/definitions/UpdateVideo" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindVideoTop": {
+      "properties": {
+        "FindVideo" : { "type": "object", "$ref": "#/definitions/FindVideo" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindFramesTop": {
+      "properties": {
+        "FindFrames" : { "type": "object", "$ref": "#/definitions/FindFrames" }
+      },
+      "additionalProperties": false
+    },
+
+    "NeoAddTop": {
+      "properties": {
+        "NeoAdd" : { "type": "object", "$ref": "#/definitions/NeoAdd" }
+      },
+      "additionalProperties": false
+    },
+
+    "NeoFindTop": {
+      "properties": {
+        "NeoFind" : { "type": "object", "$ref": "#/definitions/NeoFind" }
+      },
+      "additionalProperties": false
+    },
+
+    // Commands
+
+    "NeoAdd": {
+      "properties": {
+        "cypher": { "type": "string"},
+        "target_data_type" : {"type" : "string"},
+        "target_format" : {"type": "string"},
+        "operations": { "$ref": "#/definitions/blockImageOperations" }
+      },
+      "required": ["cypher"],
+      "additionalProperties": false
+    },
+
+    "NeoFind": {
+      "properties": {
+        "cypher": { "type": "string" },
+        "target_data_type" : {"type" : "string"},
+        "target_format" : {"type": "string"},
+        "operations": { "$ref": "#/definitions/blockImageOperations" },
+        "results":     { "$ref": "#/definitions/blockResults" }
+      },
+      "required": ["cypher"],
+      "additionalProperties": false
+    },
+
+    "AddEntity": {
+      "properties": {
+        "class":       { "type": "string" },
+        "_ref":        { "$ref": "#/definitions/refInt" },
+        "link":        { "$ref": "#/definitions/blockLink" },
+        "blob":        { "$ref": "#/definitions/blob" },
+        "properties":  { "type": "object" },
+        "constraints": { "type": "object" }
+      },
+      "required": ["class"],
+      "additionalProperties": false
+    },
+
+    "UpdateEntity": {
+      "properties": {
+        "class":        { "type": "string" },
+        "_ref":         { "$ref": "#/definitions/refInt" },
+        "properties":   { "type": "object" },
+        "remove_props": { "$ref": "#/definitions/stringArray" },
+        "constraints":  { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+
+    "AddConnection": {
+      "properties": {
+        "class":      { "type": "string" },
+        "ref1":       { "$ref": "#/definitions/refInt" },
+        "ref2":       { "$ref": "#/definitions/refInt" },
+        "properties": { "type": "object" }
+      },
+      "required": ["class", "ref1", "ref2"],
+      "additionalProperties": false
+    },
+
+    "UpdateConnection": {
+      "properties": {
+        "class":        { "type": "string" },
+        "_ref":         { "$ref": "#/definitions/refInt" },
+        "ref1":         { "$ref": "#/definitions/refInt" },
+        "ref2":         { "$ref": "#/definitions/refInt" },
+        "properties":   { "type": "object" },
+        "remove_props": { "$ref": "#/definitions/stringArray" },
+        "constraints":  { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindEntity": {
+      "properties": {
+        "class":       { "type": "string" },
+        "_ref":        { "$ref": "#/definitions/refInt" },
+        "link":        { "$ref": "#/definitions/blockLink" },
+        "constraints": { "type": "object" },
+        "results":     { "$ref": "#/definitions/blockResults" },
+        "unique":      { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindConnection": {
+      "properties": {
+        "class":       { "type": "string" },
+        "_ref":        { "$ref": "#/definitions/refInt" },
+        "ref1":        { "$ref": "#/definitions/refInt" },
+        "ref2":        { "$ref": "#/definitions/refInt" },
+        "constraints": { "type": "object" },
+        "results":     { "type": "object" },
+        "unique":      { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+
+    "AddImage": {
+      "properties": {
+        "_ref":       { "$ref": "#/definitions/refInt" },
+        "from_file_path":   { "type": "string"},
+        "is_local_file":    { "type": "boolean"},
+        "format":     { "$ref": "#/definitions/imgFormatString" },
+        "link":       { "$ref": "#/definitions/blockLink" },
+        "operations": { "$ref": "#/definitions/blockImageOperations" },
+        "properties": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+
+    "UpdateImage": {
+      "properties": {
+        "_ref":         { "$ref": "#/definitions/refInt" },
+        "properties":   { "type": "object" },
+        "remove_props": { "$ref": "#/definitions/stringArray" },
+        "unique":       { "type": "boolean" },
+        "constraints":  { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindImage": {
+      "properties": {
+        "_ref":        { "$ref": "#/definitions/refInt" },
+        "link":        { "$ref": "#/definitions/blockLink" },
+        "operations":  { "$ref": "#/definitions/blockImageOperations" },
+        "format":      { "$ref": "#/definitions/imgFormatString" },
+        "constraints": { "type": "object" },
+        "metaconstraints":    { "type": "object" },
+        "results":     { "$ref": "#/definitions/blockResults" },
+        "unique":      { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+
+    "AddDescriptorSet": {
+      "properties": {
+        "name":       { "type": "string" },
+        "dimensions": { "$ref": "#/definitions/refInt" },
+        "metric":     { "$ref": "#/definitions/metricFormatString" },
+        "engine":     { "$ref": "#/definitions/engineFormatString" },
+        "link":       { "$ref": "#/definitions/blockLink" },
+        "properties": { "type": "object" },
+        "flinng_num_rows":{ "$ref": "#/definitions/refInt" },
+        "flinng_cells_per_row":{ "$ref": "#/definitions/refInt" },
+        "flinng_num_hash_tables":{ "$ref": "#/definitions/refInt" },
+        "flinng_hashes_per_table":{ "$ref": "#/definitions/refInt" },
+        "flinng_sub_hash_bits":{ "$ref": "#/definitions/refInt" },
+        "flinng_cut_off":{ "$ref": "#/definitions/refInt" }
+      },
+      "required": ["name", "dimensions"],
+      "additionalProperties": false
+    },
+
+    "NeoAddDescriptorSet": {
+      "properties": {
+        "name":       { "type": "string" },
+        "dimensions": { "$ref": "#/definitions/refInt" },
+        "metric":     { "$ref": "#/definitions/metricFormatString" },
+        "engine":     { "$ref": "#/definitions/engineFormatString" },
+        "link":       { "$ref": "#/definitions/blockLink" },
+        "properties": { "type": "object" },
+        "flinng_num_rows":{ "$ref": "#/definitions/refInt" },
+        "flinng_cells_per_row":{ "$ref": "#/definitions/refInt" },
+        "flinng_num_hash_tables":{ "$ref": "#/definitions/refInt" },
+        "flinng_hashes_per_table":{ "$ref": "#/definitions/refInt" },
+        "flinng_sub_hash_bits":{ "$ref": "#/definitions/refInt" },
+        "flinng_cut_off":{ "$ref": "#/definitions/refInt" }
+      },
+      "required": ["name", "dimensions"],
+      "additionalProperties": false
+    },
+
+    "FindDescriptorSet": {
+      "properties": {
+        "_ref":        { "$ref": "#/definitions/refInt" },
+        "results":     { "$ref": "#/definitions/blockResults" },
+        "set":       { "type": "string" },
+        "storeIndex" : { "type": "boolean" },
+        "constraints": { "type": "object" },
+        "link":       { "$ref": "#/definitions/blockLink" }
+
+        },
+        "required": ["set"],
+
+      "additionalProperties": false
+    },
+
+    "NeoFindDescriptorSet": {
+      "properties": {
+        "_ref":        { "$ref": "#/definitions/refInt" },
+        "results":     { "$ref": "#/definitions/blockResults" },
+        "set":       { "type": "string" },
+        "storeIndex" : { "type": "boolean" },
+        "constraints": { "type": "object" },
+        "link":       { "$ref": "#/definitions/blockLink" }
+
+      },
+      "required": ["set"],
+
+      "additionalProperties": false
+    },
+
+    "AddDescriptor": {
+      "properties": {
+        "set":        { "type": "string" },
+        "label":      { "type": "string" },
+        "_ref":       { "$ref": "#/definitions/refInt" },
+        "link":       { "$ref": "#/definitions/blockLink" },
+        "properties": { "type": "object" },
+        "batch_properties": {"$ref": "#/definitions/propertyArray"}
+      },
+      "required": ["set"],
+      "additionalProperties": false
+    },
+
+    "NeoAddDescriptor": {
+      "properties": {
+        "set":        { "type": "string" },
+        "label":      { "type": "string" },
+        "properties": { "type": "object" },
+        "batch_properties": {"$ref": "#/definitions/propertyArray"}
+      },
+      "required": ["set"],
+      "additionalProperties": false
+    },
+
+    "ClassifyDescriptor": {
+      "properties": {
+        "set":         { "type": "string" },
+        "_ref":        { "$ref": "#/definitions/refInt" },
+        "k_neighbors": { "$ref": "#/definitions/positiveInt" }
+      },
+      "required": ["set"],
+      "additionalProperties": false
+    },
+
+    "NeoClassifyDescriptor": {
+      "properties": {
+        "set":         { "type": "string" },
+        "k_neighbors": { "$ref": "#/definitions/positiveInt" }
+      },
+      "required": ["set"],
+      "additionalProperties": false
+    },
+
+    "FindDescriptor": {
+      "properties": {
+        "set":         { "type": "string" },
+        "_ref":        { "$ref": "#/definitions/refInt" },
+        "k_neighbors": { "$ref": "#/definitions/positiveInt" },
+        "results":     { "$ref": "#/definitions/blockResults" },
+        "link":        { "$ref": "#/definitions/blockLink" },
+        "constraints": { "type": "object" },
+        "properties":  { "type": "object" }
+      },
+      "required": ["set"],
+      "additionalProperties": false
+    },
+
+    "NeoFindDescriptor": {
+      "properties": {
+        "set":         { "type": "string" },
+        "_ref":        { "$ref": "#/definitions/refInt" },
+        "k_neighbors": { "$ref": "#/definitions/positiveInt" },
+        "results":     { "$ref": "#/definitions/blockResults" },
+        "constraints": { "type": "object" }
+      },
+      "required": ["set"],
+      "additionalProperties": false
+    },
+
+
+    "AddBoundingBox": {
+      "properties": {
+        "_ref":       { "$ref": "#/definitions/refInt" },
+        "rectangle":  { "$ref": "#/definitions/shapeRectangle" },
+        "image":      { "$ref": "#/definitions/refInt" },
+        "link":       { "$ref": "#/definitions/blockLink" },
+        "properties": { "type": "object" }
+      },
+      "required": ["rectangle"],
+      "additionalProperties": false
+    },
+
+    "UpdateBoundingBox": {
+      "properties": {
+        "_ref":         { "$ref": "#/definitions/refInt" },
+        "rectangle":    { "$ref": "#/definitions/shapeRectangle" },
+        "properties":   { "type": "object" },
+        "remove_props": { "$ref": "#/definitions/stringArray" },
+        "unique":       { "type": "boolean" },
+        "constraints":  { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindBoundingBox": {
+      "properties": {
+        "_ref":        { "$ref": "#/definitions/refInt" },
+        "rectangle":   { "$ref": "#/definitions/shapeRectangle" },
+        "image":       { "$ref": "#/definitions/refInt" },
+        "link":        { "$ref": "#/definitions/blockLink" },
+        "constraints": { "type": "object" },
+        "format":      { "$ref": "#/definitions/imgFormatString" },
+        "results":     { "$ref": "#/definitions/blockResults" },
+        "unique":      { "type": "boolean" }
+      },
+      "not": {
+        "anyOf": [ {"required": ["image", "link"] } ]
+      },
+      "additionalProperties": false
+    },
+
+    "AddBlob": {
+      "properties": {
+        "_ref":             { "$ref": "#/definitions/refInt" },
+        "from_server_file": { "type": "string"},
+        "from_file_path": { "type": "string"},
+        "link":             { "$ref": "#/definitions/blockLink" },
+        "properties":       { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+
+    "UpdateBlob": {
+      "properties": {
+        "_ref":         { "$ref": "#/definitions/refInt" },
+        "properties":   { "type": "object" },
+        "remove_props": { "$ref": "#/definitions/stringArray" },
+        "constraints":  { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindBlob": {
+      "properties": {
+        "_ref":        { "$ref": "#/definitions/refInt" },
+        "link":        { "$ref": "#/definitions/blockLink" },
+        "constraints": { "type": "object" },
+        "results":     { "$ref": "#/definitions/blockResults" },
+        "unique":      { "type": "boolean" }
+      },
+
+      "additionalProperties": false
+    },
+
+
+
+    "AddVideo": {
+      "properties": {
+        "_ref":             { "$ref": "#/definitions/refInt" },
+        "index_frames":     { "type": "boolean" },
+        "from_server_file": { "type": "string"},
+        "from_file_path":   { "type": "string"},
+        "is_local_file":    { "type": "boolean"},
+        "codec":            { "$ref": "#/definitions/vidCodecString" },
+        "container":        { "$ref": "#/definitions/vidContainerString" },
+        "link":             { "$ref": "#/definitions/blockLink" },
+        "operations":       { "$ref": "#/definitions/blockVideoOperations" },
+        "properties":       { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+
+    "UpdateVideo": {
+      "properties": {
+        "_ref":         { "$ref": "#/definitions/refInt" },
+        "properties":   { "type": "object" },
+        "remove_props": { "$ref": "#/definitions/stringArray" },
+        "constraints":  { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+
+    "FindVideo": {
+      "properties": {
+        "_ref":             { "$ref": "#/definitions/refInt" },
+        "link":             { "$ref": "#/definitions/blockLink" },
+        "operations":       { "$ref": "#/definitions/blockVideoOperations" },
+        "codec":            { "$ref": "#/definitions/vidCodecString" },
+        "container":        { "$ref": "#/definitions/vidContainerString" },
+        "constraints":      { "type": "object" },
+        "metaconstraints":  { "type": "object" },
+        "frameconstraints": { "type": "object" },
+        "results":          { "$ref": "#/definitions/blockResults" },
+        "unique":           { "type": "boolean" }
+      },
+
+      "additionalProperties": false
+    },
+
+    "FindFrames": {
+      "properties": {
+        "frames":      { "$ref": "#/definitions/nonNegativeIntArray" },
+        "_ref":        { "$ref": "#/definitions/refInt" },
+        "link":        { "$ref": "#/definitions/blockLink" },
+        "operations":  { "$ref": "#/definitions/blockFrameOperations" },
+        "format":      { "$ref": "#/definitions/imgFormatString" },
+        "constraints": { "type": "object" },
+        "results":     { "$ref": "#/definitions/blockResults" },
+        "unique":      { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+
+    "DeleteExpired": {
+      "properties": {
+        "results":     { "$ref": "#/definitions/blockResults" }
+      },
+      "additionalProperties": false
+    }
+
+  }
+}

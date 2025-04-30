@@ -9,8 +9,9 @@
         environment:
             DBHOST: "vdms-service"
             VDHOST: "http://video-service:8080"
-            no_proxy: "video-service,${no_proxy}"
-            NO_PROXY: "video-service,${NO_PROXY}"
+            no_proxy: "vdms-service,video-service,${no_proxy}"
+            NO_PROXY: "vdms-service,video-service,${NO_PROXY}"
+            `DEBUG': "defn(`DEBUG')"
         secrets:
             - source: self_crt
               target: /var/run/secrets/self.crt
@@ -31,3 +32,5 @@
             placement:
                 constraints:
                     - node.role==manager
+        depends_on:
+            - vdms-service

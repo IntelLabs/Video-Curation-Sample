@@ -1,9 +1,9 @@
 
-The sample can be deployed with either docker-compose (v1.20+ required) or docker swarm. The deployment uses the same configuration script.   
+The sample can be deployed with either docker-compose (v1.20+ required) or docker swarm. The deployment uses the same configuration script.
 
 ### Docker-Compose Deployment
 
-This is as simple as 
+This is as simple as
 
 ```
 make start_docker_compose
@@ -12,16 +12,16 @@ make stop_docker_compose
 
 ### Docker Swam Deployment
 
-Follow the [instructions](https://docs.docker.com/engine/swarm/swarm-tutorial/create-swarm) to create a swarm. Then setup the swarm as follows:     
+Follow the [instructions](https://docs.docker.com/engine/swarm/swarm-tutorial/create-swarm) to create a swarm. Then setup the swarm as follows:
 
-- Optionally, only required by `make update`, setup password-less acess from the swarm manager to each swarm node:   
+- Optionally, only required by `make update`, setup password-less acess from the swarm manager to each swarm node:
 
 ```
 ssh-keygen
 ssh-copy-id <worker>
 ```
 
-Start/stop services as follows:   
+Start/stop services as follows:
 
 ```
 make update # optional for private registry
@@ -35,6 +35,6 @@ The command `make update` uploads the sample images to each worker node. If you 
 
 ---
 
-### See Also 
+### See Also
 
-- [Utility Scripts](../../doc/script.md)   
+- [Utility Scripts](../../doc/script.md)

@@ -21,7 +21,7 @@ function search(block) {
     apiHost.search(queries).then(function (data) {
         rh.removeClass("wip");
         rc.empty();
-        
+
         $.each(data.response, function (ignored, data1) {
             var segment=$(".template .result-segment").clone();
             segment.find("span").text(data1.name+": "+data1.time.toFixed(3)+"-"+(data1.time+data1.duration).toFixed(3)+"s");

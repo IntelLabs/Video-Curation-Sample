@@ -8,8 +8,10 @@ EXP_TYPE=compose
 REGISTRY=None
 NCPU=0
 NCURATIONS=1
+NSTREAMS=1
 IN_SOURCE=stream
-SOURCE="-DSTREAM_URL="udp://localhost:8088" -DIN_SOURCE=${IN_SOURCE}"
+SOURCE="-DSTREAM_URL="rtp://127.0.0.1:8088" -DIN_SOURCE=${IN_SOURCE}"
+DEBUG="0"
 
 DIR=$(dirname $(readlink -f "$0"))
 BUILD_DIR=$DIR/build
@@ -19,14 +21,16 @@ LONG_LIST=(
     "type"
     "registry"
     "ncurations"
+    "nstreams"
     "ncpu"
     "source"
+    "debug"
 )
 
 OPTS=$(getopt \
     --longoptions "$(printf "%s:," "${LONG_LIST[@]}")" \
     --name "$(basename "$0")" \
-    --options "hi:t:r:n:c:s:" \
+    --options "hdi:t:r:n:v:c:s:" \
     -- "$@"
 )
 
@@ -53,8 +57,10 @@ script_usage()
         -t or --type        optional    Deployment method (compose, k8) [Default: compose]
         -r or --registry    optional    Registry [Default: None]
         -n or --ncurations  optional    Number of ingestion containers [Default: 1]
+        -v or --nstreams    optional    Number of video streams [Default: 1]
         -c or --ncpu        optional    Number CPUs for each ingestion container [Default: 0]
         -s or --source      optional    Input source type (videos, stream) [Default: stream]
+        -d or --debug       optional    '1' to enable debug messages, otherwise '0'
 
 EOF
 }
@@ -62,16 +68,18 @@ EOF
 while true; do
     case "$1" in
         -h) script_usage; exit 0 ;;
+        -d | --debug) shift; DEBUG="1" ;;
         -i | --ingestion) shift; INGESTION=$1; shift ;;
         -t | --type) shift; EXP_TYPE="$1"; shift ;;
         -r | --registry) shift; REGISTRY="$1"; shift ;;
         -n | --ncurations) shift; NCURATIONS=$1; shift ;;
+        -v | --nstreams) shift; NSTREAMS=$1; shift ;;
         -c | --ncpu) shift; NCPU=$1; shift ;;
         -s | --source)
             shift;
             IN_SOURCE="$1";
             if [ $IN_SOURCE == "stream" ]; then
-                SOURCE="-DSTREAM_URL="udp://localhost:8088" -DIN_SOURCE=${IN_SOURCE}";
+                SOURCE="-DSTREAM_URL="rtp://127.0.0.1:8088" -DIN_SOURCE=${IN_SOURCE}";
 
             elif [ $IN_SOURCE == "videos" ]; then
                 SOURCE="-DIN_SOURCE=${IN_SOURCE}";
@@ -95,9 +103,9 @@ done
 cd $BUILD_DIR
 
 if [ $REGISTRY == "None" ]; then
-    cmake -DINGESTION=$INGESTION $SOURCE -DNCPU=$NCPU -DNCURATIONS=$NCURATIONS ..
+    cmake -DINGESTION=$INGESTION $SOURCE -DNCPU=$NCPU -DNCURATIONS=$NCURATIONS -DNSTREAMS=$NSTREAMS -DDEBUG=$DEBUG ..
 else
-    cmake -DREGISTRY=$REGISTRY -DINGESTION=$INGESTION $SOURCE -DNCPU=$NCPU -DNCURATIONS=$NCURATIONS ..
+    cmake -DREGISTRY=$REGISTRY -DINGESTION=$INGESTION $SOURCE -DNCPU=$NCPU -DNCURATIONS=$NCURATIONS -DNSTREAMS=$NSTREAMS -DDEBUG=$DEBUG ..
 fi
 
 make

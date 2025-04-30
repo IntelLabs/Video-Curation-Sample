@@ -2,10 +2,8 @@
     stream-service:
         image: defn(`REGISTRY_PREFIX')lcc_stream:stream
         ports:
-            - target: 8088
-              published: 30009
-              protocol: udp
-              mode: host
+            - "30009-30109:8088/tcp"
+            - "30009-30109:8088/udp"
         environment:
             KKHOST: "kafka-service:9092"
             VDHOST: "http://video-service:8080"
@@ -24,3 +22,5 @@
         networks:
             - appnet
         restart: always
+        deploy:
+            replicas: defn(`NSTREAMS')

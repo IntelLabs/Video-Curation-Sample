@@ -68,14 +68,14 @@ docker node ls >/dev/null 2>/dev/null && (
     done
 ) || echo -n ""
 
-kubectl get nodes >/dev/null 2>/dev/null && (
-    echo "Updating Kubernetes nodes..."
-    for id in $(kubectl get nodes --selector='!node-role.kubernetes.io/master' 2> /dev/null | grep ' Ready ' | cut -f1 -d' '); do
-        nodeip="$(kubectl describe node $id | grep InternalIP | sed -E 's/[^0-9]+([0-9.]+)$/\1/')"
-        labels="$(kubectl describe node $id | awk '/Annotations:/{lf=0}/Labels:/{sub("Labels:","",$0);lf=1}lf==1{sub("=",":",$1);print$1}')"
+# kubectl get nodes >/dev/null 2>/dev/null && (
+#     echo "Updating Kubernetes nodes..."
+#     for id in $(kubectl get nodes --selector='!node-role.kubernetes.io/master' 2> /dev/null | grep ' Ready ' | cut -f1 -d' '); do
+#         nodeip="$(kubectl describe node $id | grep InternalIP | sed -E 's/[^0-9]+([0-9.]+)$/\1/')"
+#         labels="$(kubectl describe node $id | awk '/Annotations:/{lf=0}/Labels:/{sub("Labels:","",$0);lf=1}lf==1{sub("=",":",$1);print$1}')"
 
-        for image in $(awk -v labels="$labels" -f "$DIR/scan-yaml.awk" "${DIR}/../deployment/kubernetes"/*.yaml); do
-            transfer_image $image "$id" "$nodeip" "$labels"
-        done
-    done
-) || echo -n ""
+#         for image in $(awk -v labels="$labels" -f "$DIR/scan-yaml.awk" "${DIR}/../deployment/kubernetes"/*.yaml); do
+#             transfer_image $image "$id" "$nodeip" "$labels"
+#         done
+#     done
+# ) || echo -n ""

@@ -1,6 +1,6 @@
 
     vdms-service:
-        image: intellabs/vdms:latest
+        image: defn(`REGISTRY_PREFIX')lcc_vdms:stream
         ports:
             - target: 55555
               published: 55555
@@ -11,4 +11,9 @@
         networks:
             - appnet
         restart: always
+        healthcheck:
+            disable: true
+        environment:
+            OVERRIDE_print_high_level_timing: "true"
+
 

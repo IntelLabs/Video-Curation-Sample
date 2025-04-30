@@ -1,3 +1,13 @@
+define(`PROFILE_DEFAULT', `')
+
+define(`PROFILE_GPU',
+        `runtime: nvidia
+        deploy:
+            resources:
+                reservations:
+                    devices:
+                        - driver: nvidia
+                          capabilities: [gpu]')
 
     video-service:
         image: defn(`REGISTRY_PREFIX')lcc_video:stream
@@ -7,17 +17,23 @@
             KKHOST: "kafka-service:9092"
             SHOST: "http://stream-service:8080"
             ZKHOST: "zookeeper-service:2181"
-            `INGESTION': "defn(`INGESTION')"
+            DBHOST: "vdms-service"
+            `DEBUG': "defn(`DEBUG')"
+            `DEVICE': "defn(`DEVICE')"
             `IN_SOURCE': "defn(`IN_SOURCE')"
+            `INGESTION': "defn(`INGESTION')"
             http_proxy: "${http_proxy}"
             HTTP_PROXY: "${HTTP_PROXY}"
             https_proxy: "${https_proxy}"
             HTTPS_PROXY: "${HTTPS_PROXY}"
-            no_proxy: "stream-service,${no_proxy}"
-            NO_PROXY: "stream-service,${NO_PROXY}"
+            no_proxy: "stream-service,vdms-service,${no_proxy}"
+            NO_PROXY: "stream-service,vdms-service,${NO_PROXY}"
         volumes:
             - /etc/localtime:/etc/localtime:ro
             - stream-content:/var/www/streams
         networks:
             - appnet
         restart: always
+        depends_on:
+            - vdms-service
+        ifdef(`GPU', PROFILE_GPU, PROFILE_DEFAULT)

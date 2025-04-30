@@ -9,17 +9,35 @@ if (NOT DEFINED REGISTRY)
 elseif (NOT ${REGISTRY} MATCHES "/$")
     set(REGISTRY "${REGISTRY}/")
 endif()
+
 if (NOT DEFINED PLATFORM)
     set(PLATFORM "Xeon")
 endif()
+
 if (NOT DEFINED NSTREAMS)
     set(NSTREAMS 1)
 endif()
+
 if (NOT DEFINED NCURATIONS)
     set(NCURATIONS 1)
 endif()
+
 if (NOT DEFINED INGESTION)
     set(INGESTION "object,face")
+endif()
+
+if (NOT DEFINED DEVICE)
+    set(DEVICE "CPU")
+endif()
+
+if (NOT DEFINED DEBUG)
+    set(DEBUG "0")
+endif()
+
+if(DEVICE MATCHES "CPU")
+    set(NVIDIA_VISIBLE_DEVICES "all")
+else()
+    set(NVIDIA_VISIBLE_DEVICES "none")
 endif()
 
 if (NOT DEFINED IN_SOURCE)
@@ -64,6 +82,6 @@ endforeach()
 execute_process(COMMAND printf "\n\nThis script will build third party components licensed under various open source licenses into your container images. The terms under which those components may be used and distributed can be found with the license document that is provided with those components. Please familiarize yourself with those terms to ensure your distribution of those components complies with the terms of those licenses.\n\n")
 
 execute_process(COMMAND printf "PLATFORM=${PLATFORM}, NSTREAMS=${NSTREAMS}, NCURATIONS=${NCURATIONS}, INGESTION=${INGESTION}\n")
-execute_process(COMMAND printf "IN_SOURCE=${IN_SOURCE}, STREAM_URL=${STREAM_URL}, NCPU=${NCPU}\n")
+execute_process(COMMAND printf "IN_SOURCE=${IN_SOURCE}, STREAM_URL=${STREAM_URL}, NCPU=${NCPU}, DEVICE=${DEVICE}, DEBUG=${DEBUG}\n")
 execute_process(COMMAND printf "REGISTRY=${REGISTRY}\n\n")
 

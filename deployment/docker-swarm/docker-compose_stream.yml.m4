@@ -9,7 +9,6 @@ include(frontend.m4)
 include(vdms.m4)
 include(stream.m4)
 include(video_stream.m4)
-include(ingest.m4)
 include(secret.m4)
 include(network.m4)
 

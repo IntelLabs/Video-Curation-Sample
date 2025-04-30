@@ -25,6 +25,13 @@ function draw_analytics(video, data) {
             svg.empty();
             if (tid in timed) {
                 $.each(timed[tid], function (ignord,v) {
+                    // data.width = 640 and data.height = 360/640
+                    // svg.width() = 676.188 and svg.height() = 566
+                    // var targetW=640;
+                    // var targetH=360;
+                    // console.log("targetW: "+targetW+" targetH: "+targetH);
+                    console.log("data.width: "+data.width+" data.height: "+data.height);
+                    console.log("svg.width(): "+svg.width()+" svg.height(): "+svg.height());
                     var sx=svg.width()/data.width;
                     var sy=svg.height()/data.height;
                     var sxy=Math.min(sx,sy);
@@ -39,6 +46,20 @@ function draw_analytics(video, data) {
                                 var xmax=v1.detection.bounding_box.x_max*sw;
                                 var ymin=v1.detection.bounding_box.y_min*sh;
                                 var ymax=v1.detection.bounding_box.y_max*sh;
+                                // var max_x_size=data.width;
+                                var max_x_size=sw;
+                                // var max_x_size=svg.width();
+                                if (sxoff+xmax > max_x_size){
+                                    xmax=max_x_size;
+                                }
+                                // var max_y_size=data.height;
+                                var max_y_size=sh;
+                                // var max_y_size=svg.height();
+                                if (syoff+ymax > max_y_size){
+                                    ymax=max_y_size;
+                                }
+                                console.log("xmin: "+xmin+" xmax: "+xmax);
+                                console.log("ymin: "+ymin+" ymax: "+ymax);
                                 if (xmin!=xmax && ymin!=ymax) {
                                     svg.append($(document.createElementNS(svg.attr('xmlns'),"rect")).attr({
                                         x:sxoff+xmin,

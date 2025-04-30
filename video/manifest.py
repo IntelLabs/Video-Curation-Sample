@@ -1,15 +1,16 @@
 #!/usr/bin/python3
 
-from tornado import web, gen
-from tornado.concurrent import run_on_executor
-from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import unquote
 import os
+from concurrent.futures import ThreadPoolExecutor
+
+from tornado import gen, web
+from tornado.concurrent import run_on_executor
+
 
 class ManifestHandler(web.RequestHandler):
     def __init__(self, app, request, **kwargs):
         super(ManifestHandler, self).__init__(app, request, **kwargs)
-        self.executor= ThreadPoolExecutor(2)
+        self.executor = ThreadPoolExecutor(2)
 
     def check_origin(self, origin):
         return True
@@ -20,6 +21,6 @@ class ManifestHandler(web.RequestHandler):
 
     @gen.coroutine
     def get(self):
-        manifest=yield self._manifest()
-        self.write("\n".join(manifest)+"\n")
-        self.set_status(200,'OK')
+        manifest = yield self._manifest()
+        self.write("\n".join(manifest) + "\n")
+        self.set_status(200, "OK")
