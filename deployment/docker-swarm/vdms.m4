@@ -15,5 +15,3 @@
             disable: true
         environment:
             OVERRIDE_print_high_level_timing: "true"
-
-

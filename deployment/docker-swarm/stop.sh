@@ -15,11 +15,11 @@ docker_compose)
         exit 0
     fi
 
-    if [ "$DEVICE" == "GPU" ]; then
-        docker compose -f "$yml" -p lcc --profile $DEVICE --compatibility down -v
-    else
-        docker compose -f "$yml" -p lcc --compatibility down -v
-    fi
+    # if [ "$DEVICE" == "GPU" ]; then
+    #     docker compose -f "$yml" -p lcc --compatibility down -v
+    # else
+    docker compose -f "$yml" -p lcc --compatibility down -v
+    # fi
     ;;
 *)
     docker stack services lcc

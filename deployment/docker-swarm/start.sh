@@ -23,11 +23,13 @@ docker_compose)
 
     shift
     . "$DIR/build.sh"
-    if [ "$DEVICE" == "GPU" ]; then
-        docker compose -f "$yml" -p lcc --profile $DEVICE --compatibility up
-    else
-        docker compose -f "$yml" -p lcc --compatibility up
-    fi
+    # if [ "$DEVICE" == "GPU" ]; then
+    #     #TODO: Test running separately then running others
+    #     DOCKER_BUILDKIT=0 docker compose -f "$yml" -p lcc --compatibility up video-service
+    #     docker compose -f "$yml" -p lcc --compatibility up
+    # else
+    docker compose -f "$yml" -p lcc --compatibility up
+    # fi
     ;;
 *)
     shift

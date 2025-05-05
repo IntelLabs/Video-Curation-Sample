@@ -1,14 +1,14 @@
-define(`PROFILE_DEFAULT', `')
-
-define(`PROFILE_GPU',
-        `runtime: nvidia
+define(`PROFILE_DEFAULT', `depends_on:
+            - vdms-service')
+define(`PROFILE_GPU', `depends_on:
+            - vdms-service
+        runtime: nvidia
         deploy:
             resources:
                 reservations:
                     devices:
                         - driver: nvidia
                           capabilities: [gpu]')
-
     video-service:
         image: defn(`REGISTRY_PREFIX')lcc_video:stream
         environment:
@@ -32,6 +32,4 @@ define(`PROFILE_GPU',
         networks:
             - appnet
         restart: always
-        depends_on:
-            - vdms-service
         ifdef(`GPU', PROFILE_GPU, PROFILE_DEFAULT)
