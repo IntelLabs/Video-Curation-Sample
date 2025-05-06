@@ -18,6 +18,7 @@ vdhost = os.environ["VDHOST"]
 DEBUG = os.environ["DEBUG"]
 print(f"DEBUG: {DEBUG}")
 
+
 class SearchHandler(web.RequestHandler):
     def __init__(self, app, request, **kwargs):
         super(SearchHandler, self).__init__(app, request, **kwargs)
@@ -217,8 +218,8 @@ class SearchHandler(web.RequestHandler):
                                 }
 
                                 # Normalize BBs to frame size
-                                frameW = stream1["width"]
-                                frameH = stream1["height"]
+                                frameW = ent_bbox["frameW"]
+                                frameH = ent_bbox["frameH"]
 
                                 obj = {
                                     "detection": {
@@ -247,7 +248,7 @@ class SearchHandler(web.RequestHandler):
             for name in clips:
                 stream1 = clips[name]
                 for seg1 in stream1["segs"]:
-                    seg1c = {
+                    seg1c = {  # var "data" used in playback.js
                         "name": name,
                         "stream": quote(
                             "/api/segment/"
@@ -310,7 +311,7 @@ class SearchHandler(web.RequestHandler):
     @run_on_executor
     def _search(self, queries, size):
         if DEBUG == "1":
-            print(f"[TIMING],start_frontend_search,,"+str(time.time()), flush=True)
+            print("[TIMING],start_frontend_search,," + str(time.time()), flush=True)
         try:
             vdms_response = self.one_shot_query(queries)
         except Exception as e:
@@ -320,7 +321,7 @@ class SearchHandler(web.RequestHandler):
         # print(vdms_response, flush=True)
         segs = self._decode_response(vdms_response)
         if DEBUG == "1":
-            print(f"[TIMING],end_frontend_search,,"+str(time.time()), flush=True)
+            print("[TIMING],end_frontend_search,," + str(time.time()), flush=True)
         return segs
 
     @gen.coroutine

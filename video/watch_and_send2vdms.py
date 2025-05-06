@@ -6,9 +6,9 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from shutil import copyfile
-import time
 
 from inotify.adapters import Inotify
 
@@ -36,10 +36,12 @@ in_source = os.environ["IN_SOURCE"]
 DEBUG = os.environ["DEBUG"]
 # video_store_dir = "/home/resources"
 video_store_dir = "/var/www/mp4"
+resize_input = False
+model_w, model_h = (640, 640)
 dbs = {}
 
 
-def ingest_video(ingest_mode, filename_path, video_info, cmd_prefix="Add"):
+def ingest_video(ingest_mode, filename_path, video_info):
     global dbs
 
     # filename_path = "1191560.mp4"
@@ -57,6 +59,12 @@ def ingest_video(ingest_mode, filename_path, video_info, cmd_prefix="Add"):
     }
     if len(video_info) > 0:
         properties.update(video_info)
+
+    if resize_input or ((properties["height"] * properties["width"]) < (model_h * model_w)):
+        new_size = (model_w, model_h)
+    else:
+        new_size = (int(properties["width"]), int(properties["height"]))
+
     query = {
         "AddVideo": {
             "from_server_file": filename_path,  # .replace("/home/remote_function/", ""), #from_server_file, from_file_path
@@ -71,6 +79,8 @@ def ingest_video(ingest_mode, filename_path, video_info, cmd_prefix="Add"):
                         "otype": ingest_mode,
                         "media_type": "video",
                         "fps": properties["fps"],
+                        "input_sizeWH": new_size,
+                        "ingestion": True,
                     },
                 }
             ],
@@ -81,10 +91,17 @@ def ingest_video(ingest_mode, filename_path, video_info, cmd_prefix="Add"):
     with open(filename_path, "rb") as fd:
         video_blob.append(fd.read())
     if DEBUG == "1":
-        print(f"[TIMING],start_udf_ingest_{ingest_mode},{filename},"+str(time.time()), flush=True)
+        print(
+            f"[TIMING],start_udf_ingest_{ingest_mode},{filename}," + str(time.time()),
+            flush=True,
+        )
     res, res_arr = dbs[dn_name].query([query], [video_blob])
     if DEBUG == "1":
-        print(f"[TIMING],end_udf_ingest_{ingest_mode},{filename},"+str(time.time()), flush=True)
+        print(
+            f"[TIMING],end_udf_ingest_{ingest_mode},{filename}," + str(time.time()),
+            flush=True,
+        )
+        print(f"[DEBUG] {filename} PROPERTIES: {properties}", flush=True)
         print(f"[DEBUG] INGEST_VIDEO RESPONSE: {res}", flush=True)
         print(f"[DEBUG] Used client: {dn_name}", flush=True)
 
@@ -92,7 +109,10 @@ def ingest_video(ingest_mode, filename_path, video_info, cmd_prefix="Add"):
 def get_video_details(filename_path):
     if DEBUG == "1":
         filename = Path(filename_path).name
-        print(f"[TIMING],start_get_video_details,{filename},"+str(time.time()), flush=True)
+        print(
+            f"[TIMING],start_get_video_details,{filename}," + str(time.time()),
+            flush=True,
+        )
     video_info = {}
     result = subprocess.run(
         [
@@ -125,27 +145,27 @@ def get_video_details(filename_path):
         video_info = {
             "fps": float(fps),
             "duration": float(duration),
-            "width": float(width),
-            "height": float(height),
+            "width": int(width),
+            "height": int(height),
             "frame_count": int(frame_count),
         }
     if DEBUG == "1":
-        print(f"[TIMING],end_get_video_details,{filename},"+str(time.time()))
+        print(f"[TIMING],end_get_video_details,{filename}," + str(time.time()))
     return video_info
 
 
 def main(watch_folder=os.getcwd()):
     if DEBUG == "1":
-        print(f"[TIMING],start_watchandsend,,"+str(time.time()), flush=True)
+        print("[TIMING],start_watchandsend,," + str(time.time()), flush=True)
     if "videos" in in_source:
         for filename in os.listdir(video_store_dir):
             if filename.endswith(".mp4") and filename.startswith("video"):
                 filename_path = os.path.join(video_store_dir, filename)
                 video_info = get_video_details(filename_path)
                 # video_info = {}
-                for ingest_mode, cmdp in zip(ingestion.split(","), ["Add", "Find"]):
+                for ingest_mode in ingestion.split(","):
                     ingest_video(
-                        ingest_mode, filename_path, video_info, cmd_prefix="Add"
+                        ingest_mode, filename_path, video_info
                     )
 
     if "stream" in in_source:
@@ -160,12 +180,14 @@ def main(watch_folder=os.getcwd()):
             if "IN_CLOSE_WRITE" in type_names and not os.path.exists(filename_path):
                 copyfile(os.path.join(path, filename), filename_path)
                 if DEBUG == "1":
-                    print(f"[DEBUG] COPIED:{path}/{filename}  TO {filename_path}")  # TODO: Remove
+                    print(
+                        f"[DEBUG] COPIED:{path}/{filename}  TO {filename_path}"
+                    )  # TODO: Remove
                 video_info = get_video_details(filename_path)
                 for ingest_mode in ingestion.split(","):
                     ingest_video(ingest_mode, filename_path, video_info)
     if DEBUG == "1":
-        print(f"[TIMING],end_watchandsend,,"+str(time.time()), flush=True)
+        print("[TIMING],end_watchandsend,," + str(time.time()), flush=True)
 
 
 if __name__ == "__main__":

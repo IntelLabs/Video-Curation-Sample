@@ -302,6 +302,8 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
               bbox_props[member] = vframe["bbox"]["object_det"][member].asFloat();
             if (member == "gender" || member == "emotion")
               bbox_props[member] = vframe["bbox"]["object_det"][member].asString();
+            if (member == "frameW" || member == "frameH")
+              bbox_props[member] = vframe["bbox"]["object_det"][member].asInt();
           }
 
           Json::Value bb_edge_props;
@@ -433,6 +435,8 @@ int FindVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     results["list"].append(VDMS_ROI_COORD_Y_PROP);
     results["list"].append(VDMS_ROI_WIDTH_PROP);
     results["list"].append(VDMS_ROI_HEIGHT_PROP);
+    results["list"].append("frameW");
+    results["list"].append("frameH");
 
     query.QueryNode(get_value<int>(cmd, "_ref", -1), VDMS_ROI_TAG, cmd["link"],
                     cmd["metaconstraints"], results,

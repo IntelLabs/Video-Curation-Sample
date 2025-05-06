@@ -7,7 +7,7 @@ import sys
 
 time_segment_s = 10  # segment every 10 secs
 time_segment_half = time_segment_s / 2  # forces a keyframe at t=5,10,15 seconds.
-input_model_size = "640x360"
+# input_model_size = "640x360"
 # input_model_size="3840x2160",
 # input_model_size="1280x720",
 # input_model_size = "1920x1080"

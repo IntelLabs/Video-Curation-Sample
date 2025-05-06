@@ -1,28 +1,30 @@
 import json
 import os
+import time
 import uuid
 
 import cv2
 from openvino.runtime import Core
 from ultralytics import YOLO
-import time
 
 detection_threshold = 0.7
+iou_threshold = 0.5
 model_w, model_h = (640, 640)
-model_precision_object = "FP16"  # FP32, FP16
-model_name = "yolo11"  # yolo11, yolov8
+model_precision_object = "FP16"
+model_name = "yolo11"
 half_flag = True
 dynamic_flag = True
 batch_size = 1
 
 model_precision_face = "FP16"
 CV2_INTERPOLATION = cv2.INTER_AREA
+DEVICE = os.environ.get("DEVICE", "CPU")
+DEBUG = os.environ.get("DEBUG", "0")
+device_input = DEVICE.lower() if DEVICE == "CPU" else 0
 
 yolo_path = f"/home/resources/models/ultralytics/{model_name}/{model_precision_object}/{model_name}n"
 
-device = os.environ.get("DEVICE", "CPU")
-DEBUG = os.environ["DEBUG"]
-if device == "GPU":
+if DEVICE == "GPU":
     yolo_path += ".engine/"
 else:
     yolo_path += "_openvino_model/"
@@ -36,23 +38,36 @@ object_detection_model = YOLO(
 
 
 def yolo_object_detection(frame):
-    H, W, C = frame.shape
+    H, W, _ = frame.shape
+    if (H * W) < (model_h * model_w):
+        H, W = model_h, model_w
     global object_detection_model
-    results = object_detection_model(
-        frame, verbose=False, stream=True, conf=detection_threshold
+    frame_result = object_detection_model.predict(
+        frame,
+        imgsz=(H, W),
+        batch=batch_size,
+        conf=detection_threshold,
+        iou=iou_threshold,
+        # max_det=self.max_det,  # Limits the maximum number of detections per image
+        half=half_flag,
+        device=DEVICE.lower(),  # Specifies the device for validation (cpu, cuda:0, etc.). When None, automatically selects the best available device.
+        # plots=self.plots,
+        # project=self.project_name,
+        # name=self.run_name,
+        verbose=False,
+        # classes=class_ids,
     )
 
-    # Draw bounding boxes on the image
     objects = []
-    for result in results:
-        boxes = result.boxes
+    for result in frame_result:
+        boxes = result.boxes.cpu()
         for box in boxes:
             confidence = float(box.conf.item())
             if confidence > detection_threshold:
-                class_id = box.cls.item()
+                class_id = int(box.cls.item())
                 x1, y1, x2, y2 = box.xyxy.tolist()[0]
-                height = min(y2, H - 1) - max(0, y1)
-                width = min(x2, W - 1) - max(0, x1)
+                height = min(y2, H) - max(0, y1)
+                width = min(x2, W) - max(0, x1)
                 object_res = [
                     x1,
                     y1,
@@ -60,6 +75,8 @@ def yolo_object_detection(frame):
                     width,
                     object_detection_model.names[class_id],
                     confidence,
+                    H,
+                    W,
                 ]
                 # print(object_res)
                 objects.append(object_res)
@@ -67,6 +84,7 @@ def yolo_object_detection(frame):
     return objects
 
 
+DEVICE_OV = "AUTO"  # "CPU"
 ie = Core()
 face_detection_model_xml = f"/home/resources/models/intel/face-detection-adas-0001/{model_precision_face}/face-detection-adas-0001.xml"
 face_detection_model = ie.read_model(
@@ -75,7 +93,7 @@ face_detection_model = ie.read_model(
 )
 # face_det_w, face_det_h = 672, 384
 _, face_det_c, face_det_h, face_det_w = face_detection_model.inputs[0].shape
-face_det_compiled_model = ie.compile_model(face_detection_model, device)
+face_det_compiled_model = ie.compile_model(face_detection_model, DEVICE_OV)
 
 age_gender_classification_model_xml = f"/home/resources/models/intel/age-gender-recognition-retail-0013/{model_precision_face}/age-gender-recognition-retail-0013.xml"
 age_gender_classification_model = ie.read_model(
@@ -84,7 +102,7 @@ age_gender_classification_model = ie.read_model(
 )
 # ag_w, ag_h = 62, 62
 _, ag_c, ag_h, ag_w = age_gender_classification_model.inputs[0].shape
-ag_compiled_model = ie.compile_model(age_gender_classification_model, device)
+ag_compiled_model = ie.compile_model(age_gender_classification_model, DEVICE_OV)
 
 emotions_classification_model_xml = f"/home/resources/models/intel/emotions-recognition-retail-0003/{model_precision_face}/emotions-recognition-retail-0003.xml"
 emotions_classification_model = ie.read_model(
@@ -93,7 +111,7 @@ emotions_classification_model = ie.read_model(
 )
 # em_w, em_h = 64, 64
 _, em_c, em_h, em_w = emotions_classification_model.inputs[0].shape
-em_compiled_model = ie.compile_model(emotions_classification_model, device)
+em_compiled_model = ie.compile_model(emotions_classification_model, DEVICE_OV)
 
 
 def face_detection(frame):
@@ -167,16 +185,18 @@ def face_detection(frame):
                 emotion = str(emotions[em_result.argmax()])
             except Exception as e:
                 print(f"Error occurred: {e}. Skipping emotion model")
-            face_res = [x1, y1, height, width, age, gender, emotion, confidence]
+            face_res = [x1, y1, height, width, age, gender, emotion, confidence, H, W]
             # print(face_res)
             faces.append(face_res)
     return faces
 
 
 # SUPPORTS VIDEOS ONLY
-def run(ipfilename, format, options, resize_input=False):
+def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
     if DEBUG == "1":
-        print(f"[TIMING],start_udf_metadata,{ipfilename},"+str(time.time()), flush=True)
+        print(
+            f"[TIMING],start_udf_metadata,{ipfilename}," + str(time.time()), flush=True
+        )
     metadata = dict()
     video_obj = cv2.VideoCapture(ipfilename)
 
@@ -189,13 +209,18 @@ def run(ipfilename, format, options, resize_input=False):
             break  # No more frames are read
 
         frameNum = int(video_obj.get(cv2.CAP_PROP_POS_FRAMES))
+        fW, fH = (
+            int(video_obj.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(video_obj.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        )
 
-        if resize_input:
+        if input_sizeWH != (fW, fH):
             frame = cv2.resize(
-                frame, (model_w, model_h), interpolation=CV2_INTERPOLATION
+                frame, input_sizeWH, interpolation=CV2_INTERPOLATION
             )
+            fW, fH = input_sizeWH
 
-        H, W, _ = frame.shape
+
         if frame is not None and options["otype"] == "face":
             # face detection for each frame
             faces = face_detection(frame)
@@ -211,10 +236,15 @@ def run(ipfilename, format, options, resize_input=False):
                         "gender": str(face[5]),
                         "emotion": str(face[6]),
                         "confidence": float(face[7]),
+                        "frameH": fH,  #int(face[8]),
+                        "frameW": fW,  #int(face[9]),
                     },
                 }
 
                 metadata[frameNum] = {"frameId": frameNum, "bbox": tdict}
+                if DEBUG == "1":
+                    meta_str = ",".join([str(o) for o in face])
+                    print(f"[METADATA],{meta_str}", flush=True)
 
         elif frame is not None:
             # object detection
@@ -226,12 +256,16 @@ def run(ipfilename, format, options, resize_input=False):
                     "height": int(object[2]),
                     "width": int(object[3]),
                     "object": str(object[4]),
-                    "object_det": {"confidence": float(object[5])},
+                    "object_det": {
+                        "confidence": float(object[5]),
+                        "frameH": fH,  #int(object[6]),
+                        "frameW": fW,  #int(object[7]),
+                    },
                 }
 
                 metadata[frameNum] = {"frameId": frameNum, "bbox": tdict}
-                meta_str = ",".join([str(o) for o in object])
                 if DEBUG == "1":
+                    meta_str = ",".join([str(o) for o in object])
                     print(f"[METADATA],{meta_str}", flush=True)
 
     video_obj.release()
@@ -243,5 +277,5 @@ def run(ipfilename, format, options, resize_input=False):
         json.dump(response, f, indent=4)
 
     if DEBUG == "1":
-        print(f"[TIMING],end_udf_metadata,{ipfilename},"+str(time.time()), flush=True)
+        print(f"[TIMING],end_udf_metadata,{ipfilename}," + str(time.time()), flush=True)
     return ipfilename, jsonfile
