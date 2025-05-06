@@ -355,7 +355,7 @@ RUN cd /opt/build && \
       -Dfdkaac=enabled \
     && cd build && \
     ninja install && \
-    DESTDIR=/opt/dist ninja install 
+    DESTDIR=/opt/dist ninja install
 
 RUN apt-get update && \
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

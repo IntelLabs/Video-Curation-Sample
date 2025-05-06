@@ -2,11 +2,11 @@
 ### Customize the Build Process:
 
 You can use the following build options to customize the build process:
-- **BUILD_VERSION**: Specify the build version string.  
-- **DOCKER_PREFIX**: Specify the docker image prefix string.  
+- **BUILD_VERSION**: Specify the build version string.
+- **DOCKER_PREFIX**: Specify the docker image prefix string.
 - **BUILD_FDKAAC**: Set to ```ON``` (default) to build the ```libfdk_aac``` in the docker images, or ```OFF``` to disable including ```libfdk_aac``` in the docker images.
 
-Build examples:   
+Build examples:
 
 ```bash
 cd build
@@ -20,12 +20,12 @@ cmake -DBUILD_VERSION=21.3 -DBUILD_FDKAAC=OFF ..
 
 ### Command Make Targets
 
-- **update_link**: Update the image links in the platform README.md.  
-- **update_dockerfile**: Update the Dockerfiles. Do this after modifying any templates.  
-- **generate_readme**: Generate the image README.md for dockerhub.   
-- **upload_readme**: Upload the image README.md to dockerhub.  
+- **update_link**: Update the image links in the platform README.md.
+- **update_dockerfile**: Update the Dockerfiles. Do this after modifying any templates.
+- **generate_readme**: Generate the image README.md for dockerhub.
+- **upload_readme**: Upload the image README.md to dockerhub.
 
-Example: Generate the dockerhub READMEs  
+Example: Generate the dockerhub READMEs
 
 ```bash
 cd build

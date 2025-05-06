@@ -139,8 +139,8 @@ RUN cd BUILD_HOME && \
     git clone -b OWT_SDK_BRANCH ${OWT_SDK_REPO} && \
     cd owt-client-javascript/scripts && \
     git reset --hard OWT_SDK_VER && \
-    npm install && grunt 
-    
+    npm install && grunt
+
 # Get quic
 ARG OWT_QUIC_REPO=https://github.com/open-webrtc-toolkit/owt-deps-quic/releases/download/OWT_QUIC_VER/dist.tgz
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]

@@ -3,7 +3,7 @@
 if [ -z "$2" ]; then
     echo "Usage: <prefix> <platform>"
     exit -1
-fi 
+fi
 
 test -f README.md
 echo "Updating $2/README.md..."

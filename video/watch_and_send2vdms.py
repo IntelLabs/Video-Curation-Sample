@@ -60,7 +60,9 @@ def ingest_video(ingest_mode, filename_path, video_info):
     if len(video_info) > 0:
         properties.update(video_info)
 
-    if resize_input or ((properties["height"] * properties["width"]) < (model_h * model_w)):
+    if resize_input or (
+        (properties["height"] * properties["width"]) < (model_h * model_w)
+    ):
         new_size = (model_w, model_h)
     else:
         new_size = (int(properties["width"]), int(properties["height"]))
@@ -164,9 +166,7 @@ def main(watch_folder=os.getcwd()):
                 video_info = get_video_details(filename_path)
                 # video_info = {}
                 for ingest_mode in ingestion.split(","):
-                    ingest_video(
-                        ingest_mode, filename_path, video_info
-                    )
+                    ingest_video(ingest_mode, filename_path, video_info)
 
     if "stream" in in_source:
         i = Inotify()

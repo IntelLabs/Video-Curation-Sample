@@ -3,9 +3,9 @@ Component: libva-utils
 Repository: https://github.com/intel/libva-utils
 License: https://github.com/intel/libva-utils/blob/master/COPYING
 
-Component: Chart.js   
-Repository: https://github.com/chartjs/Chart.js   
-License: MIT (https://github.com/chartjs/Chart.js/blob/master/LICENSE.md)   
+Component: Chart.js
+Repository: https://github.com/chartjs/Chart.js
+License: MIT (https://github.com/chartjs/Chart.js/blob/master/LICENSE.md)
 
 Component: curl
 Repository: https://github.com/curl/curl
@@ -15,9 +15,9 @@ Component: ffmpeg
 Repository: https://ffmpeg.org
 License: https://ffmpeg.org/legal.html
 
-Component: Foundation Icon Font Sets   
-Repository: https://github.com/zurb/foundation-icons   
-License: MIT (https://github.com/zurb/foundation-icons/blob/master/MIT-LICENSE.txt)   
+Component: Foundation Icon Font Sets
+Repository: https://github.com/zurb/foundation-icons
+License: MIT (https://github.com/zurb/foundation-icons/blob/master/MIT-LICENSE.txt)
 
 Component: gflags
 Repository: https://github.com/gflags/gflags
@@ -99,9 +99,9 @@ Component: Intel Media SDK
 Repository: https://github.com/Intel-Media-SDK/MediaSDK
 License: https://github.com/Intel-Media-SDK/MediaSDK/blob/master/LICENSE
 
-Component: jQuery (New Wave JavaScript)   
-Repository: https://github.com/jquery/jquery   
-License: MIT (https://github.com/jquery/jquery/blob/master/LICENSE.txt)   
+Component: jQuery (New Wave JavaScript)
+Repository: https://github.com/jquery/jquery
+License: MIT (https://github.com/jquery/jquery/blob/master/LICENSE.txt)
 
 Component: JSON-CPP
 Repository: https://github.com/open-source-parsers/jsoncpp

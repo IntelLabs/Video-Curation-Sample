@@ -310,7 +310,7 @@ RUN cd /opt/build/opencv-4.5.3-openvino-2021.4.2 && mkdir build && cd build && \
     .. && \
   make -j "$(nproc)" && \
   make install DESTDIR=/opt/dist && \
-  make install 
+  make install
 
 RUN apt-get update && \
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -349,7 +349,7 @@ RUN cd /opt/build/openvino && \
     .. && \
   make -j "$(nproc)" && \
   make install && \
-  make install DESTDIR=/opt/dist 
+  make install DESTDIR=/opt/dist
 
 
 ARG OPENVINO_INSTALL_DIR=/usr/local/openvino
@@ -488,7 +488,7 @@ RUN cd /opt/build && \
       -Dfdkaac=enabled \
     && cd build && \
     ninja install && \
-    DESTDIR=/opt/dist ninja install 
+    DESTDIR=/opt/dist ninja install
 
 RUN apt-get update && \
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -622,7 +622,7 @@ RUN cd /opt/build/paho.mqtt.c-1.3.10 && \
   cp src/MQTTClientPersistence.h /opt/dist/usr/local/include/ && \
   cp src/MQTTProperties.h /opt/dist/usr/local/include/ && \
   cp src/MQTTReasonCodes.h /opt/dist/usr/local/include/ && \
-  cp src/MQTTSubscribeOpts.h /opt/dist/usr/local/include/; 
+  cp src/MQTTSubscribeOpts.h /opt/dist/usr/local/include/;
 
 RUN apt-get update && \
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -652,7 +652,7 @@ RUN git clone -b master $GVA_REPO /opt/build/gst-video-analytics && \
     .. \
     && make -j "$(nproc)" \
     && make install \
-    && make install DESTDIR=/opt/dist 
+    && make install DESTDIR=/opt/dist
 
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/local/lib/gstreamer-1.0/:/usr/local/lib/
 
@@ -727,7 +727,7 @@ ARG CUSTOM_IE_DIR=/usr/local/openvino/
 ARG CUSTOM_IE_LIBDIR=${CUSTOM_IE_DIR}/runtime/lib/intel64
 RUN printf "${CUSTOM_IE_LIBDIR}\n${CUSTOM_IE_DIR}/3rdparty/tbb/lib\n" >/etc/ld.so.conf.d/openvino.conf && ldconfig
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/gstreamer-1.0/
-ENV GI_TYPELIB_PATH=${GI_TYPELIB_PATH}:/usr/local/lib/girepository-1.0/ 
+ENV GI_TYPELIB_PATH=${GI_TYPELIB_PATH}:/usr/local/lib/girepository-1.0/
 ENV PYTHONPATH=${PYTHONPATH}:/opt/intel/dl_streamer/python
 ENV GST_PLUGIN_PATH=${GST_PLUGIN_PATH}:/usr/local/lib/gstreamer-1.0/
 

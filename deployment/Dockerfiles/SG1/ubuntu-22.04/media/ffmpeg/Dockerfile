@@ -354,7 +354,7 @@ RUN cd /opt/build/opencv-4.5.3-openvino-2021.4.2 && mkdir build && cd build && \
     .. && \
   make -j "$(nproc)" && \
   make install DESTDIR=/opt/dist && \
-  make install 
+  make install
 
 RUN apt-get update && \
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

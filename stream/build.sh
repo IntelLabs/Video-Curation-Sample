@@ -3,4 +3,4 @@
 IMAGE="lcc_stream"
 DIR=$(dirname $(readlink -f "$0"))
 
-. "$DIR/../script/build.sh" 
+. "$DIR/../script/build.sh"

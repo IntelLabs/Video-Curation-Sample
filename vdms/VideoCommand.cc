@@ -1,33 +1,33 @@
 /**
- * @file   VideoCommand.cc
- *
- * @section LICENSE
- *
- * The MIT License
- *
- * @copyright Copyright (c) 2017 Intel Corporation
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction,
- * including without limitation the rights to use, copy, modify,
- * merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
- * ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- * THE SOFTWARE.
- *
- */
+* @file   VideoCommand.cc
+*
+* @section LICENSE
+*
+* The MIT License
+*
+* @copyright Copyright (c) 2017 Intel Corporation
+*
+* Permission is hereby granted, free of charge, to any person obtaining a copy
+* of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction,
+* including without limitation the rights to use, copy, modify,
+* merge, publish, distribute, sublicense, and/or sell
+* copies of the Software, and to permit persons to whom the Software is
+* furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+* AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+* ARISING FROM,
+* OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+* THE SOFTWARE.
+*
+*/
 
 #include <filesystem>
 #include <fstream>
@@ -60,7 +60,7 @@ void VideoCommand::enqueue_operations(VCL::Video &video, const Json::Value &ops,
     } else if (type == "interval") {
 
       video.interval(VCL::Video::FRAMES, get_value<int>(op, "start"),
-                     get_value<int>(op, "stop"), get_value<int>(op, "step"));
+                    get_value<int>(op, "stop"), get_value<int>(op, "step"));
 
     } else if (type == "resize") {
       video.resize(get_value<int>(op, "width"), get_value<int>(op, "height"));
@@ -143,8 +143,8 @@ AddVideo::AddVideo() : VideoCommand("AddVideo") {
 }
 
 int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
-                                 const std::string &blob, int grp_id,
-                                 Json::Value &error) {
+                                const std::string &blob, int grp_id,
+                                Json::Value &error) {
   const Json::Value &cmd = jsoncmd[_cmd_name];
 
   int node_ref = get_value<int>(cmd, "_ref", query.get_available_reference());
@@ -218,7 +218,7 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     std::remove(file_name.c_str()); // remove the local copy of the file
     if (!result) {
       throw VCLException(ObjectNotFound,
-                         "Add video: Path to the file was not found");
+                        "Add video: Path to the file was not found");
     }
   }
 
@@ -373,15 +373,15 @@ int UpdateVideo::construct_protobuf(PMGDQuery &query,
 
   // Update Image node
   query.UpdateNode(node_ref, VDMS_VID_TAG, props, remove_props, constraints,
-                   get_value<bool>(cmd, "unique", false));
+                  get_value<bool>(cmd, "unique", false));
 
   return 0;
 }
 
 Json::Value UpdateVideo::construct_responses(Json::Value &responses,
-                                             const Json::Value &json,
-                                             protobufs::queryMessage &query_res,
-                                             const std::string &blob) {
+                                            const Json::Value &json,
+                                            protobufs::queryMessage &query_res,
+                                            const std::string &blob) {
   assert(responses.size() == 1);
 
   Json::Value ret;
@@ -468,9 +468,9 @@ int FindVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
 }
 
 Json::Value FindVideo::construct_responses(Json::Value &responses,
-                                           const Json::Value &json,
-                                           protobufs::queryMessage &query_res,
-                                           const std::string &blob) {
+                                          const Json::Value &json,
+                                          protobufs::queryMessage &query_res,
+                                          const std::string &blob) {
   const Json::Value &cmd = json[_cmd_name];
 
   Json::Value ret;
@@ -584,7 +584,7 @@ Json::Value FindVideo::construct_responses(Json::Value &responses,
           video.set_connection(connection);
           bool result = video._remote->Read_Video(
               video_path); // this takes the file from aws and puts it back in
-                           // the local database location
+                          // the local database location
           if (!result) {
             Json::Value return_error;
             return_error["status"] = RSCommand::Error;
@@ -741,8 +741,8 @@ bool FindFrames::get_interval_index(const Json::Value &cmd,
 }
 
 int FindFrames::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
-                                   const std::string &blob, int grp_id,
-                                   Json::Value &error) {
+                                  const std::string &blob, int grp_id,
+                                  Json::Value &error) {
   const Json::Value &cmd = jsoncmd[_cmd_name];
 
   // We try to catch the missing attribute error before
@@ -848,7 +848,7 @@ Json::Value FindFrames::construct_responses(Json::Value &responses,
         video.set_connection(connection);
         bool result = video._remote->Read_Video(
             video_path); // this takes the file from aws and puts it back in the
-                         // local database location
+                        // local database location
 
         if (!result) {
           Json::Value return_error;

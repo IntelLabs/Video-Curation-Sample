@@ -215,11 +215,8 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
         )
 
         if input_sizeWH != (fW, fH):
-            frame = cv2.resize(
-                frame, input_sizeWH, interpolation=CV2_INTERPOLATION
-            )
+            frame = cv2.resize(frame, input_sizeWH, interpolation=CV2_INTERPOLATION)
             fW, fH = input_sizeWH
-
 
         if frame is not None and options["otype"] == "face":
             # face detection for each frame
@@ -236,8 +233,8 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
                         "gender": str(face[5]),
                         "emotion": str(face[6]),
                         "confidence": float(face[7]),
-                        "frameH": fH,  #int(face[8]),
-                        "frameW": fW,  #int(face[9]),
+                        "frameH": fH,  # int(face[8]),
+                        "frameW": fW,  # int(face[9]),
                     },
                 }
 
@@ -258,8 +255,8 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
                     "object": str(object[4]),
                     "object_det": {
                         "confidence": float(object[5]),
-                        "frameH": fH,  #int(object[6]),
-                        "frameW": fW,  #int(object[7]),
+                        "frameH": fH,  # int(object[6]),
+                        "frameW": fW,  # int(object[7]),
                     },
                 }
 

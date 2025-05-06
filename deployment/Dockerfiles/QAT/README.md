@@ -55,10 +55,10 @@ Finally, restart the `qat_service` to initialize the configuration files:
 sudo systemctl restart qat_service
 ```
 
-### Run Docker Images: 
+### Run Docker Images:
 
 
-The table lists the available docker images:   
+The table lists the available docker images:
 (*media-nginx* image uses QAT HW implementation & *dev/nginx_sw* images use QAT SW implmentation.)
 |Image|Dockerfile|Docker Image|
 |:-:|---|---|
@@ -66,13 +66,13 @@ The table lists the available docker images:
 |media-nginx|[ubuntu-22.04/media/nginx](ubuntu-22.04/media/nginx)<br>[ubuntu-20.04/media/nginx](ubuntu-20.04/media/nginx)|[openvisualcloud/qat-ubuntu2204-media-nginx](https://hub.docker.com/r/openvisualcloud/qat-ubuntu2204-media-nginx)<br>[openvisualcloud/qat-ubuntu2004-media-nginx](https://hub.docker.com/r/openvisualcloud/qat-ubuntu2004-media-nginx)|
 |media-nginx_sw|[ubuntu-22.04/media/nginx_sw](ubuntu-22.04/media/nginx_sw)<br>[ubuntu-20.04/media/nginx_sw](ubuntu-20.04/media/nginx_sw)|[openvisualcloud/qat-ubuntu2204-media-nginx_sw](https://hub.docker.com/r/openvisualcloud/qat-ubuntu2204-media-nginx_sw)<br>[openvisualcloud/qat-ubuntu2004-media-nginx_sw](https://hub.docker.com/r/openvisualcloud/qat-ubuntu2004-media-nginx_sw)|
 
-The docker images **must** run with the following devices attached:  
-- `/dev/hugepages`: The hugepage kernel pages.  
-- `/dev/uio*`: The uio devices.  
-- `/dev/qat_*`: The qat devices.  
-- `/dev/usdm_drv`: The usdm device.  
+The docker images **must** run with the following devices attached:
+- `/dev/hugepages`: The hugepage kernel pages.
+- `/dev/uio*`: The uio devices.
+- `/dev/qat_*`: The qat devices.
+- `/dev/usdm_drv`: The usdm device.
 
-For example, run the following script to start the NGINX Ubuntu image:   
+For example, run the following script to start the NGINX Ubuntu image:
 
 ```bash
 docker run --cap-add=IPC_LOCK -v /dev/hugepages:/dev/hugepages $(ls -1 /dev/uio* /dev/qat_* /dev/usdm_drv | sed 's/\(.*\)/--device=\1:\1/') -it openvisualcloud/qat-ubuntu2004-media-nginx
@@ -80,17 +80,17 @@ docker run --cap-add=IPC_LOCK -v /dev/hugepages:/dev/hugepages $(ls -1 /dev/uio*
 
 ### Run Docker Images as Non-Root:
 
-To access the mounted [devices](#run-docker-images), the user must have the access permission. The NGINX [sample](ubuntu-20.04/media/nginx/nginx.conf) configuration runs the NGINX instance as root: `user root`. To run NGINX as a non-root user, for example `nobody`, you need to create a `qat` group, the GID of which **must** match that of the `qat` group on the host. Then you can run NGINX as user `nobody` and group `qat`: `user nobody qat`.   
+To access the mounted [devices](#run-docker-images), the user must have the access permission. The NGINX [sample](ubuntu-20.04/media/nginx/nginx.conf) configuration runs the NGINX instance as root: `user root`. To run NGINX as a non-root user, for example `nobody`, you need to create a `qat` group, the GID of which **must** match that of the `qat` group on the host. Then you can run NGINX as user `nobody` and group `qat`: `user nobody qat`.
 
-### Known Limitations:   
+### Known Limitations:
 
-- The docker images must be built and tested on the host with Intel QAT installed.  
+- The docker images must be built and tested on the host with Intel QAT installed.
 
 ### See Also:
 
-- [Intel QuickAssist Technology](https://01.org/intel-quickassist-technology)   
-- [QATzip](https://github.com/intel/QATzip)   
-- [QATengine](https://github.com/intel/QAT_Engine)   
-- [Async Mode Nginx](https://github.com/intel/asynch_mode_nginx)  
+- [Intel QuickAssist Technology](https://01.org/intel-quickassist-technology)
+- [QATzip](https://github.com/intel/QATzip)
+- [QATengine](https://github.com/intel/QAT_Engine)
+- [Async Mode Nginx](https://github.com/intel/asynch_mode_nginx)
 
 

@@ -46,7 +46,7 @@ define(`BUILD_ONEVPL_DISP',`
 ARG ONEVPL_DISP_REPO=ONEVPL_DISP_SRC_REPO
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN cd BUILD_HOME && \
-    wget -O - ${ONEVPL_DISP_REPO} | tar xz 
+    wget -O - ${ONEVPL_DISP_REPO} | tar xz
 RUN cd BUILD_HOME/oneVPL-ONEVPL_DISP_VER_TRUNC && \
     cp /opt/build/media-delivery/patches/libvpl2/* . && \
     { set -e; \

@@ -4,7 +4,7 @@ IFS=$'\n\t'
 if [[ -z "$2" ]]; then
     echo "Usage: ./update-dockerhub-readme.sh <docker_prefix> <readme_filepath>"
     exit 1
-fi 
+fi
 
 DOCKER_PREFIX="$1"
 README_FILEPATH="$2"
@@ -41,7 +41,7 @@ if [[ ! -e "${DOCKERHUB_TOKEN}" ]]; then
     read -p "Input docker hub user name: " DOCKERHUB_USERNAME
     read -sp "Input docker hub password: " DOCKERHUB_PASSWORD
     LOGIN_PAYLOAD="{\"username\": \"${DOCKERHUB_USERNAME}\", \"password\": \"${DOCKERHUB_PASSWORD}\"}"
-    curl -s -H "Content-Type: application/json" -X POST -d ${LOGIN_PAYLOAD} https://hub.docker.com/v2/users/login/ | jq -r .token > "${DOCKERHUB_TOKEN}" 
+    curl -s -H "Content-Type: application/json" -X POST -d ${LOGIN_PAYLOAD} https://hub.docker.com/v2/users/login/ | jq -r .token > "${DOCKERHUB_TOKEN}"
     echo "Dockerhub token is stored in ${DOCKERHUB_TOKEN}"
 fi
 

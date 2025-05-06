@@ -1,9 +1,9 @@
 
-The sample distribution package provides an easy way to ship the sample to a different system for evaluation or demonstration.  
+The sample distribution package provides an easy way to ship the sample to a different system for evaluation or demonstration.
 
 ### Build for Distribution:
 
-Run the following script to generate a distribution package:  
+Run the following script to generate a distribution package:
 
 ```bash
 mkdir build
@@ -13,11 +13,11 @@ make
 make dist
 ```
 
-The generated sample distribution package is under the `dist` directory, which you need to distribute to replicate the sample on a different system.  
+The generated sample distribution package is under the `dist` directory, which you need to distribute to replicate the sample on a different system.
 
 ### Restore Sample:
 
-On a system where you plan to run the sample, run the `restore.sh` script to restore the sample directory structure:  
+On a system where you plan to run the sample, run the `restore.sh` script to restore the sample directory structure:
 
 ```bash
 ./restore.sh
@@ -25,10 +25,10 @@ On a system where you plan to run the sample, run the `restore.sh` script to res
 
 ### Run Sample:
 
-Follow usual [sample build and run procedures](../README.md) to invoke the sample. 
+Follow usual [sample build and run procedures](../README.md) to invoke the sample.
 
 ### See Also:
 
-- [Build Options](cmake.md)   
-- [Sample README](../README.md)   
+- [Build Options](cmake.md)
+- [Sample README](../README.md)
 

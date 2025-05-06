@@ -166,7 +166,9 @@ def video_api():
                 tmpfile, format, json_data, tmp_dir_path, input_sizeWH
             )
         else:
-            video_file, _ = udf.run(tmpfile, format, json_data, tmp_dir_path, input_sizeWH)
+            video_file, _ = udf.run(
+                tmpfile, format, json_data, tmp_dir_path, input_sizeWH
+            )
 
         response_file = os.path.join(
             tmp_dir_path, "tmpfile" + uuid.uuid1().hex + ".zip"

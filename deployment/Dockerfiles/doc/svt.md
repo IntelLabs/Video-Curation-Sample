@@ -10,9 +10,9 @@ SVT Images get built with following SVT transcoders
 |SVT-AV1|v0.8.7|AV1 Compliant encoder library for VOD and Live encoding / transcoding video applications|
 |SVT-VP9|v0.2.2|VP9 Compliant encoder library for VOD and Live encoding / transcoding video applications|
 
-### Evaluate SVT 
+### Evaluate SVT
 
-The easiest way to evalute SVT is through the latest release on [Docker Hub](https://hub.docker.com/u/openvisualcloud), log onto a Linux PC with docker engine installed, execute "docker run <_image_> <_command_>" to try various SVT related functions. Refer to below examples: 
+The easiest way to evalute SVT is through the latest release on [Docker Hub](https://hub.docker.com/u/openvisualcloud), log onto a Linux PC with docker engine installed, execute "docker run <_image_> <_command_>" to try various SVT related functions. Refer to below examples:
 
 - SVT HEVC encoder:
 ```bash

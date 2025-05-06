@@ -92,7 +92,7 @@ ifelse(index(IMAGE,`flex'),-1,,ifelse(FFMPEG_1TN_PATCH,true,
 ARG FFMPEG_1TN_PATCH_REPO=https://github.com/spawlows/FFmpeg/commit/6e747101f5fc0c4fb56a178c8ba24fcee4917139.patch
 #RUN cd BUILD_HOME/FFmpeg-FFMPEG_VER && \
 RUN cd BUILD_HOME/FFmpeg && \
-    wget -O - ${FFMPEG_1TN_PATCH_REPO} | patch -p1;, 
+    wget -O - ${FFMPEG_1TN_PATCH_REPO} | patch -p1;,
 ))dnl
 
 

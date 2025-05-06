@@ -1,4 +1,4 @@
-This docker image is part of Open Visual Cloud software stacks. Optimized for the media creation and delivery use case. Image with SVT (Scalable Video Technology) Encoder and decoders. Ready to use SVT apps to try AV1, HEVC, VP9 transcoders. The docker image can be used in the FROM field of a downstream Dockerfile. 
+This docker image is part of Open Visual Cloud software stacks. Optimized for the media creation and delivery use case. Image with SVT (Scalable Video Technology) Encoder and decoders. Ready to use SVT apps to try AV1, HEVC, VP9 transcoders. The docker image can be used in the FROM field of a downstream Dockerfile.
 
 ## Supported tags and respective Dockerfile links
  - [xeon-ubuntu-2004-media-svt](https://github.com/OpenVisualCloud/Dockerfiles/blob/v23.06/Xeon/ubuntu-20.04/media/svt/Dockerfile)
@@ -8,7 +8,7 @@ This docker image is part of Open Visual Cloud software stacks. Optimized for th
   Intel&reg; Xeon&reg; platform, Ubuntu 20.04
 
 - #### Usage instructions:
-  [SVT](https://github.com/OpenVisualCloud/Dockerfiles/blob/master/doc/svt.md)	
+  [SVT](https://github.com/OpenVisualCloud/Dockerfiles/blob/master/doc/svt.md)
 
 
 - #### Getting started with Dockerfiles:
@@ -40,5 +40,5 @@ This docker installs third party components licensed under various open source l
 |FFmpeg|GNU Lesser General Public License v2.1 or later|
 
 
-More license information can be found in [components source package](https://github.com/OpenVisualCloud/Dockerfiles-Resources).   
+More license information can be found in [components source package](https://github.com/OpenVisualCloud/Dockerfiles-Resources).
 As for any pre-built image usage, it is the image user's responsibility to ensure that any use of this image complies with any relevant licenses and potential fees for all software contained within. We will have no indemnity or warranty coverage from suppliers.
