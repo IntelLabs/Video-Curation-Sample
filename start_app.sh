@@ -53,12 +53,11 @@ script_usage()
 
     Options:
         -h                  optional    Print this help message
-        -i or --ingestion   optional    Ingestion tyoe (object, face) [Default: "object,face"]
-        -t or --type        optional    Deployment method (compose, k8) [Default: compose]
+        -i or --ingestion   optional    Ingestion type (object, face) [Default: "object,face"]
+        -t or --type        optional    Deployment method (compose) [Default: compose]
         -r or --registry    optional    Registry [Default: None]
         -n or --ncurations  optional    Number of ingestion containers [Default: 1]
         -v or --nstreams    optional    Number of video streams [Default: 1]
-        -c or --ncpu        optional    Number CPUs for each ingestion container [Default: 0]
         -s or --source      optional    Input source type (videos, stream) [Default: stream]
         -d or --debug       optional    '1' to enable debug messages, otherwise '0'
 

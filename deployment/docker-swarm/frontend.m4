@@ -34,3 +34,4 @@
                     - node.role==manager
         depends_on:
             - vdms-service
+            - video-service
