@@ -3,7 +3,7 @@ from pathlib import Path
 
 from ultralytics import YOLO
 
-model_precision_object = "FP16"  # FP32, FP16
+model_precision_object = "FP16"
 model_name = "yolo11"
 half_flag = True
 dynamic_flag = True

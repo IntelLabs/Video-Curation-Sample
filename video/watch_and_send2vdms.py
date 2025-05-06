@@ -11,6 +11,7 @@ from pathlib import Path
 from shutil import copyfile
 
 from inotify.adapters import Inotify
+from ultralytics.utils.checks import check_imgsz
 
 import vdms
 
@@ -63,9 +64,13 @@ def ingest_video(ingest_mode, filename_path, video_info):
     if resize_input or (
         (properties["height"] * properties["width"]) < (model_h * model_w)
     ):
-        new_size = (model_w, model_h)
+        new_sizeHW = check_imgsz([model_h, model_w])  # expects hxw
     else:
-        new_size = (int(properties["width"]), int(properties["height"]))
+        new_sizeHW = check_imgsz(
+            [int(properties["height"]), int(properties["width"])]
+        )  # expects hxw
+
+    new_size = (new_sizeHW[1], new_sizeHW[0])
 
     query = {
         "AddVideo": {
