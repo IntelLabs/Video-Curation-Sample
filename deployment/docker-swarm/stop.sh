@@ -30,6 +30,7 @@ docker_compose)
     ;;
 esac
 
+docker rmi $(docker images | grep '<none>' | awk '{print $3}') || true
 docker container prune -f; echo
 docker volume prune -f; echo
 docker network prune -f; echo

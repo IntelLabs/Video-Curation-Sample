@@ -37,10 +37,10 @@ The sample is powered by the following Open Visual Cloud software stacks:
 - **Build Tools**: Install ```cmake``` and ```m4``` if they are not available on your system.
 
 - **Docker Engine**:
-  - Install [docker engine](https://docs.docker.com/install).
-  - Install [docker compose](https://docs.docker.com/compose/install), if you plan to deploy through docker compose. Version 1.20+ is required.
+  - Install [docker engine](https://docs.docker.com/install). Docker v23.0.5+ is preferred.
+  - Install [docker compose](https://docs.docker.com/compose/install), if you plan to deploy through docker compose verify you have Docker Compose V2 2.18.0+ setup.
   - Setup [docker swarm](https://docs.docker.com/engine/swarm), if you plan to deploy through docker swarm. See [Docker Swarm Setup](deployment/docker-swarm/README.md) for additional setup details.
-  - Setup [Kubernetes](https://kubernetes.io/docs/setup), if you plan to deploy through Kubernetes. See [Kubernetes Setup](deployment/kubernetes/README.md) for additional setup details.
+  <!-- - Setup [Kubernetes](https://kubernetes.io/docs/setup), if you plan to deploy through Kubernetes. See [Kubernetes Setup](deployment/kubernetes/README.md) for additional setup details. -->
   - Setup docker proxy as follows if you are behind a firewall:
     ```bash
     sudo mkdir -p /etc/systemd/system/docker.service.d
@@ -56,7 +56,7 @@ The sample is powered by the following Open Visual Cloud software stacks:
 ```bash
 mkdir build
 cd build
-cmake -DSTREAM_URL="udp://localhost:8088" -DIN_SOURCE=stream ..
+cmake -DIN_SOURCE=stream ..
 make
 ```
 
@@ -82,7 +82,7 @@ make stop_docker_swarm
 See also:  [Docker Swarm Setup](deployment/docker-swarm/README.md).
 <br>
 
-Use the following commands to start/stop Kubernetes services:
+<!-- Use the following commands to start/stop Kubernetes services:
 
 ```bash
 make update # optional for private registry
@@ -90,7 +90,7 @@ make start_kubernetes
 make stop_kubernetes
 ```
 
-See also: [Kubernetes Setup](deployment/kubernetes/README.md).
+See also: [Kubernetes Setup](deployment/kubernetes/README.md). -->
 <br>
 
 ## Launch Sample UI:
@@ -108,7 +108,7 @@ Launch your browser and browse to ```https://<hostname>:30007```. The sample UI 
 
 - [Configuration Options](doc/cmake.md)
 - [Docker Swarm Setup](deployment/docker-swarm/README.md)
-- [Kubernetes Setup](deployment/kubernetes/README.md)
+<!-- - [Kubernetes Setup](deployment/kubernetes/README.md) -->
 - [Sample Distribution](doc/dist.md)
 - [Visual Data Management System](https://github.com/intellabs/vdms)
 

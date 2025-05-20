@@ -55,7 +55,7 @@ script_usage()
 
     Options:
         -h                  optional    Print this help message
-        -d or --debug       optional    '1' to enable debug messages, otherwise '0'
+        -d or --debug       optional    Flag to enable debug messages
         -e or --device      optional    Device for inference (CPU, GPU) [Default: CPU]
         -i or --ingestion   optional    Ingestion type (object, face) [Default: "object,face"]
         -n or --ncurations  optional    Number of ingestion containers [Default: 1]

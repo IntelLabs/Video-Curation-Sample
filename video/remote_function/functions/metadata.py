@@ -14,11 +14,11 @@ model_precision_object = "FP16"
 model_name = "yolo11"
 half_flag = True
 dynamic_flag = True
-batch_size = 1
 
 model_precision_face = "FP16"
 CV2_INTERPOLATION = cv2.INTER_AREA
 DEVICE = os.environ.get("DEVICE", "CPU")
+DEVICE_OV = "AUTO"
 DEBUG = os.environ.get("DEBUG", "0")
 device_input = DEVICE.lower() if DEVICE == "CPU" else 0
 
@@ -26,8 +26,10 @@ yolo_path = f"/home/resources/models/ultralytics/{model_name}/{model_precision_o
 
 if DEVICE == "GPU":
     yolo_path += ".engine/"
+    batch_size = 1
 else:
     yolo_path += "_openvino_model/"
+    batch_size = 8
 
 
 object_detection_model = YOLO(
@@ -37,29 +39,25 @@ object_detection_model = YOLO(
 )
 
 
-def yolo_object_detection(frame):
-    H, W, _ = frame.shape
-    if (H * W) < (model_h * model_w):
-        H, W = model_h, model_w
+def yolo_object_detection(frame, H, W):
     global object_detection_model
-    frame_result = object_detection_model.predict(
+    results = object_detection_model.predict(
         frame,
         imgsz=(H, W),
         batch=batch_size,
         conf=detection_threshold,
         iou=iou_threshold,
-        # max_det=self.max_det,  # Limits the maximum number of detections per image
         half=half_flag,
-        device=DEVICE.lower(),  # Specifies the device for validation (cpu, cuda:0, etc.). When None, automatically selects the best available device.
-        # plots=self.plots,
-        # project=self.project_name,
-        # name=self.run_name,
+        device=device_input,  # Specifies the device for validation (cpu, cuda:0, etc.). When None, automatically selects the best available device.
+        project=None,
+        name=None,
         verbose=False,
-        # classes=class_ids,
+        save=False,
+        stream=True,
     )
 
     objects = []
-    for result in frame_result:
+    for result in results:
         boxes = result.boxes.cpu()
         for box in boxes:
             confidence = float(box.conf.item())
@@ -84,7 +82,6 @@ def yolo_object_detection(frame):
     return objects
 
 
-DEVICE_OV = "AUTO"  # "CPU"
 ie = Core()
 face_detection_model_xml = f"/home/resources/models/intel/face-detection-adas-0001/{model_precision_face}/face-detection-adas-0001.xml"
 face_detection_model = ie.read_model(
@@ -114,8 +111,8 @@ _, em_c, em_h, em_w = emotions_classification_model.inputs[0].shape
 em_compiled_model = ie.compile_model(emotions_classification_model, DEVICE_OV)
 
 
-def face_detection(frame):
-    H, W, C = frame.shape
+def face_detection(frame, H, W):
+    bs = 1
     # Model expects BGRA
     # face detect -> age-gender -> emotions
     global face_det_compiled_model, ag_compiled_model, em_compiled_model
@@ -128,7 +125,7 @@ def face_detection(frame):
         frame, (face_det_w, face_det_h), interpolation=CV2_INTERPOLATION
     )
     input_image = input_image.transpose(2, 0, 1)  # Shape: CHW
-    input_image = input_image.reshape((batch_size, face_det_c, face_det_h, face_det_w))
+    input_image = input_image.reshape((bs, face_det_c, face_det_h, face_det_w))
 
     output_layer = face_det_compiled_model.output(0)
     result = face_det_compiled_model([input_image])[output_layer]
@@ -166,7 +163,7 @@ def face_detection(frame):
                     face_roi, (ag_w, ag_h), interpolation=CV2_INTERPOLATION
                 )
                 ag_face_blob = ag_face_blob.transpose((2, 0, 1))
-                ag_face_blob = ag_face_blob.reshape((batch_size, ag_c, ag_h, ag_w))
+                ag_face_blob = ag_face_blob.reshape((bs, ag_c, ag_h, ag_w))
                 ag_result = ag_compiled_model([ag_face_blob])
                 age = int(ag_result["fc3_a"].flatten() * 100)
                 gender = str(genders[ag_result["prob"].argmax()])
@@ -178,7 +175,7 @@ def face_detection(frame):
                     face_roi, (em_w, em_h), interpolation=CV2_INTERPOLATION
                 )
                 em_face_blob = em_face_blob.transpose((2, 0, 1))
-                em_face_blob = em_face_blob.reshape((batch_size, em_c, em_h, em_w))
+                em_face_blob = em_face_blob.reshape((bs, em_c, em_h, em_w))
                 em_result = em_compiled_model([em_face_blob])[
                     em_compiled_model.output(0)
                 ]
@@ -191,13 +188,13 @@ def face_detection(frame):
     return faces
 
 
-# SUPPORTS VIDEOS ONLY
 def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
+    W, H = input_sizeWH
     if DEBUG == "1":
         print(
             f"[TIMING],start_udf_metadata,{ipfilename}," + str(time.time()), flush=True
         )
-    metadata = dict()
+    METADATA = dict()
     video_obj = cv2.VideoCapture(ipfilename)
 
     if not video_obj.isOpened():
@@ -216,11 +213,10 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
 
         if input_sizeWH != (fW, fH):
             frame = cv2.resize(frame, input_sizeWH, interpolation=CV2_INTERPOLATION)
-            fW, fH = input_sizeWH
 
         if frame is not None and options["otype"] == "face":
             # face detection for each frame
-            faces = face_detection(frame)
+            faces = face_detection(frame, H, W)
             for face in faces:
                 tdict = {
                     "x": int(face[0]),
@@ -233,19 +229,19 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
                         "gender": str(face[5]),
                         "emotion": str(face[6]),
                         "confidence": float(face[7]),
-                        "frameH": fH,  # int(face[8]),
-                        "frameW": fW,  # int(face[9]),
+                        "frameH": H,  # int(face[8]),
+                        "frameW": W,  # int(face[9]),
                     },
                 }
 
-                metadata[frameNum] = {"frameId": frameNum, "bbox": tdict}
+                METADATA[frameNum] = {"frameId": frameNum, "bbox": tdict}
                 if DEBUG == "1":
                     meta_str = ",".join([str(o) for o in face])
                     print(f"[METADATA],{meta_str}", flush=True)
 
         elif frame is not None:
             # object detection
-            objects = yolo_object_detection(frame)
+            objects = yolo_object_detection(frame, H, W)
             for object in objects:
                 tdict = {
                     "x": int(object[0]),
@@ -255,17 +251,19 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
                     "object": str(object[4]),
                     "object_det": {
                         "confidence": float(object[5]),
-                        "frameH": fH,  # int(object[6]),
-                        "frameW": fW,  # int(object[7]),
+                        "frameH": H,  # int(object[6]),
+                        "frameW": W,  # int(object[7]),
                     },
                 }
 
-                metadata[frameNum] = {"frameId": frameNum, "bbox": tdict}
+                METADATA[frameNum] = {"frameId": frameNum, "bbox": tdict}
                 if DEBUG == "1":
                     meta_str = ",".join([str(o) for o in object])
                     print(f"[METADATA],{meta_str}", flush=True)
 
     video_obj.release()
+
+    metadata = dict(sorted(METADATA.items(), key=lambda item: item[0], reverse=False))
 
     response = {"opFile": ipfilename, "metadata": metadata}
 
@@ -275,4 +273,5 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
 
     if DEBUG == "1":
         print(f"[TIMING],end_udf_metadata,{ipfilename}," + str(time.time()), flush=True)
+
     return ipfilename, jsonfile

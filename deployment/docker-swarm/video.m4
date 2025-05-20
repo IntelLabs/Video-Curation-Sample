@@ -15,6 +15,7 @@ define(`PROFILE_GPU', `depends_on:
             RETENTION_MINS: "60"
             CLEANUP_INTERVAL: "10m"
             KKHOST: "kafka-service:9092"
+            SHOST: "http://stream-service:8080"
             ZKHOST: "zookeeper-service:2181"
             DBHOST: "vdms-service"
             `DEBUG': "defn(`DEBUG')"
@@ -25,10 +26,11 @@ define(`PROFILE_GPU', `depends_on:
             HTTP_PROXY: "${HTTP_PROXY}"
             https_proxy: "${https_proxy}"
             HTTPS_PROXY: "${HTTPS_PROXY}"
-            no_proxy: "vdms-service,${no_proxy}"
-            NO_PROXY: "vdms-service,${NO_PROXY}"
+            no_proxy: "stream-service,vdms-service,${no_proxy}"
+            NO_PROXY: "stream-service,vdms-service,${NO_PROXY}"
         volumes:
             - /etc/localtime:/etc/localtime:ro
+            - app-content:/var/www
         networks:
             - appnet
         restart: always

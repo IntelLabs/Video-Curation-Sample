@@ -83,11 +83,13 @@ def ingest_video(ingest_mode, filename_path, video_info):
                     "url": "http://video-service:5011/video",
                     "options": {
                         "id": "metadata",
+                        # "id": "metadata2",
+                        # "id": "metadata_async",
+                        # "id": "metadata_mt",
                         "otype": ingest_mode,
                         "media_type": "video",
                         "fps": properties["fps"],
                         "input_sizeWH": new_size,
-                        "ingestion": True,
                     },
                 }
             ],
@@ -161,17 +163,26 @@ def get_video_details(filename_path):
     return video_info
 
 
+def sort_files_in_directory_by_size(in_dir):
+    all_files = []
+    for filename in os.listdir(in_dir):
+        if filename.endswith(".mp4") and filename.startswith("video"):
+            filename_path = os.path.join(video_store_dir, filename)
+            if os.path.isfile(filename_path):
+                file_size = os.path.getsize(filename_path)
+                all_files.append((filename_path, file_size))
+    return sorted(all_files, key=lambda item: item[1])
+
+
 def main(watch_folder=os.getcwd()):
     if DEBUG == "1":
         print("[TIMING],start_watchandsend,," + str(time.time()), flush=True)
     if "videos" in in_source:
-        for filename in os.listdir(video_store_dir):
-            if filename.endswith(".mp4") and filename.startswith("video"):
-                filename_path = os.path.join(video_store_dir, filename)
-                video_info = get_video_details(filename_path)
-                # video_info = {}
-                for ingest_mode in ingestion.split(","):
-                    ingest_video(ingest_mode, filename_path, video_info)
+        sorted_files = sort_files_in_directory_by_size(video_store_dir)
+        for filename_path, _ in sorted_files:
+            video_info = get_video_details(filename_path)
+            for ingest_mode in ingestion.split(","):
+                ingest_video(ingest_mode, filename_path, video_info)
 
     if "stream" in in_source:
         i = Inotify()

@@ -18,7 +18,7 @@
             NO_PROXY: "video-service,${NO_PROXY}"
         volumes:
             - /etc/localtime:/etc/localtime:ro
-            - stream-content:/var/www/mp4
+            - app-content:/var/www
         networks:
             - appnet
         restart: always

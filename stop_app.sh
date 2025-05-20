@@ -4,18 +4,20 @@
 #######################################################################################################################
 # DEFAULT VARIABLES
 EXP_TYPE=compose
+DOCKER_PRUNE="0"
 
 DIR=$(dirname $(readlink -f "$0"))
 BUILD_DIR=$DIR/build
 
 LONG_LIST=(
     "type"
+    "prune"
 )
 
 OPTS=$(getopt \
     --longoptions "$(printf "%s:," "${LONG_LIST[@]}")" \
     --name "$(basename "$0")" \
-    --options "ht:" \
+    --options "hpt:" \
     -- "$@"
 )
 
@@ -33,6 +35,7 @@ script_usage()
     Options:
         -h                  optional    Print this help message
         -t or --type        optional    Deployment method (compose, k8) [Default: compose]
+        -p or --prune       optional    Flag to prune docker builder
 
 EOF
 }
@@ -41,6 +44,7 @@ while true; do
     case "$1" in
         -h) script_usage; exit 0 ;;
         -t | --type) shift; EXP_TYPE="$1"; shift ;;
+        -p | --prune) shift; DOCKER_PRUNE="1" ;;
         --) shift; break ;;
         *) script_usage; exit 0 ;;
     esac
@@ -59,6 +63,10 @@ elif [ $EXP_TYPE == "k8" ]; then
 else
     echo "INVALID TYPE: ${EXP_TYPE}"
 
+fi
+
+if [ $DOCKER_PRUNE == "1" ]; then
+    DOCKER_BUILDKIT=1 docker builder prune -f  || true
 fi
 
 cd $DIR
