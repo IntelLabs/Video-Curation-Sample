@@ -83,9 +83,7 @@ def ingest_video(ingest_mode, filename_path, video_info):
                     "url": "http://video-service:5011/video",
                     "options": {
                         "id": "metadata",
-                        # "id": "metadata2",
                         # "id": "metadata_async",
-                        # "id": "metadata_mt",
                         "otype": ingest_mode,
                         "media_type": "video",
                         "fps": properties["fps"],

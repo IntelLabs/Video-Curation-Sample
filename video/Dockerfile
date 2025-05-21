@@ -22,9 +22,9 @@ RUN pip3 install pip --upgrade && \
         pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu; \
     else \
         pip3 install torch torchvision; \
-    fi; \
-    pip3 install wheel 'kafka-python>=1.4.7' inotify vdms
-RUN pip3 install -r /home/remote_function/requirements.${DEVICE}.txt
+    fi
+RUN pip3 install wheel 'kafka-python>=1.4.7' inotify vdms && \
+    pip3 install -r /home/remote_function/requirements.${DEVICE}.txt
 
 RUN omz_downloader --list /home/resources/models/models.lst -o /home/resources/models --precisions FP16
 
