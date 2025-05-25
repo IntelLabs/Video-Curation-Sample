@@ -19,6 +19,7 @@ ARG  GROUP
 ARG  UID
 ARG  GID
 ## must use ; here to ignore user exist status code
+## --no-log-init option can prevent the creation of large, sparse files in /var/log/lastlog and /var/log/faillog
 RUN if [ ${GID} -gt 0 ]; then groupadd -f -g ${GID} ${GROUP}; fi; \
     if [ ${UID} -gt 0 ]; then useradd --no-log-init -d /home/${USER} -g ${GID} -K UID_MAX=${UID} -K UID_MIN=${UID} ${USER}; fi; \
     touch /var/run/nginx.pid && \
