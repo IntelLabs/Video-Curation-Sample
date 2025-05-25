@@ -34,11 +34,6 @@ else:
 
 
 """ MODEL DEFINITIONS """
-object_detection_model = YOLO(
-    yolo_path,
-    verbose=False,
-    task="detect",
-)
 
 ie = Core()
 face_detection_model_xml = f"/home/resources/models/intel/face-detection-adas-0001/{model_precision_face}/face-detection-adas-0001.xml"
@@ -69,24 +64,7 @@ _, em_c, em_h, em_w = emotions_classification_model.inputs[0].shape
 em_compiled_model = ie.compile_model(emotions_classification_model, DEVICE_OV)
 
 
-def yolo_object_detection(file, H, W):
-    global object_detection_model
-    results = object_detection_model.predict(
-        file,
-        imgsz=(H, W),
-        batch=batch_size,
-        conf=detection_threshold,
-        iou=iou_threshold,
-        half=half_flag,
-        device=device_input,
-        project=None,
-        name=None,
-        verbose=False,
-        save=False,
-        stream=True,
-    )
-
-    return results
+""" DETECTION FUNCTIONS """
 
 
 def face_detection(frame, H, W):
@@ -163,20 +141,19 @@ def face_detection(frame, H, W):
             face_res = [x1, y1, height, width, age, gender, emotion, confidence, H, W]
             # print(face_res)
             faces.append(face_res)
-            if DEBUG == "1":
-                meta_str = ",".join([str(o) for o in face_res])
-                print(f"[METADATA],{meta_str}", flush=True)
 
     return faces
 
 
+""" MAIN FUNCTION """
+
+
 def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
     METADATA = dict()
+    W, H = input_sizeWH
 
-    async def update_face_metadata(frame, framenum, H, W):
-        results = face_detection(frame, H, W)
-        # global METADATA
-        for face in results:
+    async def update_face_metadata(results, framenum):
+        for oidx, face in enumerate(results):
             tdict = {
                 "x": int(face[0]),
                 "y": int(face[1]),
@@ -188,44 +165,21 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
                     "gender": str(face[5]),
                     "emotion": str(face[6]),
                     "confidence": float(face[7]),
-                    "frameH": H,  # int(face[8]),
-                    "frameW": W,  # int(face[9]),
+                    "frameH": int(H),
+                    "frameW": int(W),
                 },
             }
+            framenum_str = f"{framenum}_{oidx}"
+            if DEBUG == "1":
+                meta_str = ",".join([str(o) for o in face + [framenum_str]])
+                print(f"[METADATA],{meta_str}", flush=True)
 
-            METADATA[framenum] = {"frameId": framenum, "bbox": tdict}
+            METADATA[framenum_str] = {"frameId": framenum, "bbox": tdict}
 
-    async def update_obj_metadata(frame, framenum, H, W):
-        results = yolo_object_detection(frame, H, W)
-        # global METADATA
-        # global object_detection_model
-        objects = []
-        for result in results:
-            boxes = result.boxes.cpu()
-            for box in boxes:
-                confidence = float(box.conf.item())
-                if confidence > detection_threshold:
-                    class_id = int(box.cls.item())
-                    x1, y1, x2, y2 = box.xyxy.tolist()[0]
-                    height = min(y2, H) - max(0, y1)
-                    width = min(x2, W) - max(0, x1)
-                    object_res = [
-                        x1,
-                        y1,
-                        height,
-                        width,
-                        object_detection_model.names[class_id],
-                        confidence,
-                        H,
-                        W,
-                    ]
-                    # print(object_res)
-                    objects.append(object_res)
-                    if DEBUG == "1":
-                        meta_str = ",".join([str(o) for o in object_res])
-                        print(f"[METADATA],{meta_str}", flush=True)
+    async def update_obj_metadata(results, framenum, objects, dicts):  # , H, W):
+        H, W = results.orig_shape
 
-        for object in objects:
+        for oidx, object in enumerate(objects):
             tdict = {
                 "x": int(object[0]),
                 "y": int(object[1]),
@@ -234,15 +188,16 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
                 "object": str(object[4]),
                 "object_det": {
                     "confidence": float(object[5]),
-                    "frameH": H,
-                    "frameW": W,
+                    "frameH": int(H),
+                    "frameW": int(W),
                 },
             }
 
-            METADATA[framenum] = {"frameId": framenum, "bbox": tdict}
-
-    # global METADATA
-    W, H = input_sizeWH
+            framenum_str = f"{framenum}_{oidx}"
+            if DEBUG == "1":
+                meta_str = ",".join([str(o) for o in object + [framenum_str]])
+                print(f"[METADATA],{meta_str}", flush=True)
+            METADATA[framenum_str] = {"frameId": framenum, "bbox": tdict}
 
     if DEBUG == "1":
         print(
@@ -251,7 +206,6 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
 
     video_obj = cv2.VideoCapture(ipfilename)
 
-    # if options["otype"] == "face":  # Face Detection
     if not video_obj.isOpened():
         print(f"[!] Error opening video ({ipfilename})")
 
@@ -267,23 +221,99 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
             + str(time.time()),
             flush=True,
         )
-    while True:
-        (grabbed, frame) = video_obj.read()
-        if not grabbed:
-            break  # No more frames are read
-        frameNum = int(video_obj.get(cv2.CAP_PROP_POS_FRAMES))
+    if options["otype"] == "face":  # Face Detection
+        while True:
+            (grabbed, frame) = video_obj.read()
+            if not grabbed:
+                break  # No more frames are read
+            frameNum = int(video_obj.get(cv2.CAP_PROP_POS_FRAMES))
 
-        if (W, H) != (fW, fH):
-            frame = cv2.resize(frame, input_sizeWH, interpolation=CV2_INTERPOLATION)
+            if (W, H) != (fW, fH):
+                frame = cv2.resize(frame, input_sizeWH, interpolation=CV2_INTERPOLATION)
 
-        if options["otype"] == "face":  # Face Detection
-            # results = face_detection(frame, H, W)
-            asyncio.run(update_face_metadata(frame.copy(), frameNum, H, W))
-        else:
-            # results = yolo_object_detection(frame, H, W)
-            asyncio.run(update_obj_metadata(frame.copy(), frameNum, H, W))
+            results = face_detection(frame, H, W)
+            asyncio.run(update_face_metadata(results, frameNum))
+
+    else:
+        object_detection_model = YOLO(
+            yolo_path,
+            verbose=False,
+            task="detect",
+        )
+
+        def extract_metadata(predictor):
+            all_objects = []
+            all_object_dicts = []
+            all_frame_nums = []
+            for bidx, result in enumerate(predictor.results):
+                framenum = int(
+                    predictor.batch[2][bidx].split("frame ")[-1].split("/")[0]
+                )  # Access the frame number
+                all_frame_nums.append(framenum)
+                fH, fW = result.orig_shape
+                boxes = result.boxes.cpu()
+                objects = []
+                dicts = []
+                for box in boxes:
+                    confidence = float(box.conf.item())
+                    if confidence > detection_threshold:
+                        class_id = int(box.cls.item())
+                        x1, y1, x2, y2 = box.xyxy.tolist()[0]
+                        height = min(y2, fH) - max(0, y1)
+                        width = min(x2, fW) - max(0, x1)
+                        object_res = [
+                            x1,
+                            y1,
+                            height,
+                            width,
+                            result.names[class_id],
+                            confidence,
+                            fH,
+                            fW,
+                        ]
+                        # print(object_res)
+                        objects.append(object_res)
+
+                        tdict = {
+                            "x": int(object_res[0]),
+                            "y": int(object_res[1]),
+                            "height": int(object_res[2]),
+                            "width": int(object_res[3]),
+                            "object": str(object_res[4]),
+                            "object_det": {
+                                "confidence": float(object_res[5]),
+                                "frameH": int(fH),
+                                "frameW": int(fW),
+                            },
+                        }
+                        dicts.append(tdict)
+                        # METADATA[framenum] = {"frameId": framenum, "bbox": tdict}
+                all_objects.append(objects)
+                all_object_dicts.append(dicts)
+
+            predictor.results = zip(
+                predictor.results, all_frame_nums, all_objects, all_object_dicts
+            )
+
+        object_detection_model.add_callback("on_predict_batch_end", extract_metadata)
+        results = object_detection_model.predict(
+            ipfilename,
+            imgsz=(H, W),
+            batch=batch_size,
+            conf=detection_threshold,
+            iou=iou_threshold,
+            half=half_flag,
+            device=device_input,
+            project=None,
+            name=None,
+            verbose=False,
+            save=False,
+            stream=True,
+        )
+        for result, framenum, objects, dicts in results:
+            asyncio.run(update_obj_metadata(result, framenum, objects, dicts))
+
     video_obj.release()
-
     if DEBUG == "1":
         otype = options["otype"]
         print(

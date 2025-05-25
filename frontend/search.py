@@ -199,7 +199,7 @@ class SearchHandler(web.RequestHandler):
                             ts = float(ent_bbox["frameID"]) / stream1["fps"]
 
                             # merge segs
-                            segmin = 1
+                            segmin = 2
                             seg1 = [
                                 max(ts - segmin, 0),
                                 min(ts + segmin, stream1["duration"]),
@@ -218,8 +218,16 @@ class SearchHandler(web.RequestHandler):
                                 }
 
                                 # Normalize BBs to frame size
-                                frameW = ent_bbox["frameW"]
-                                frameH = ent_bbox["frameH"]
+                                frameW = (
+                                    ent_bbox["frameW"]
+                                    if not isinstance(ent_bbox["frameW"], str)
+                                    else ent_bbox["width"]
+                                )
+                                frameH = (
+                                    ent_bbox["frameH"]
+                                    if not isinstance(ent_bbox["frameH"], str)
+                                    else ent_bbox["height"]
+                                )
 
                                 obj = {
                                     "detection": {

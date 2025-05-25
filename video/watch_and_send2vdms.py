@@ -82,8 +82,8 @@ def ingest_video(ingest_mode, filename_path, video_info):
                     "type": "remoteOp",
                     "url": "http://video-service:5011/video",
                     "options": {
-                        "id": "metadata",
-                        # "id": "metadata_async",
+                        # "id": "metadata",
+                        "id": "metadata_async",
                         "otype": ingest_mode,
                         "media_type": "video",
                         "fps": properties["fps"],

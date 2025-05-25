@@ -18,7 +18,7 @@ COPY remote_function /home/remote_function
 COPY resources /home/resources
 
 RUN pip3 install pip --upgrade && \
-    if [ "${DEVICE}" == "CPU" ]; then \
+    if [ "${DEVICE}" = "CPU" ]; then \
         pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu; \
     else \
         pip3 install torch torchvision; \

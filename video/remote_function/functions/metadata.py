@@ -32,11 +32,44 @@ else:
     batch_size = 8
 
 
+""" MODEL DEFINITIONS """
 object_detection_model = YOLO(
     yolo_path,
     verbose=False,
     task="detect",
 )
+
+
+ie = Core()
+face_detection_model_xml = f"/home/resources/models/intel/face-detection-adas-0001/{model_precision_face}/face-detection-adas-0001.xml"
+face_detection_model = ie.read_model(
+    model=face_detection_model_xml,
+    weights=face_detection_model_xml.replace(".xml", ".bin"),
+)
+# face_det_w, face_det_h = 672, 384
+_, face_det_c, face_det_h, face_det_w = face_detection_model.inputs[0].shape
+face_det_compiled_model = ie.compile_model(face_detection_model, DEVICE_OV)
+
+age_gender_classification_model_xml = f"/home/resources/models/intel/age-gender-recognition-retail-0013/{model_precision_face}/age-gender-recognition-retail-0013.xml"
+age_gender_classification_model = ie.read_model(
+    model=age_gender_classification_model_xml,
+    weights=age_gender_classification_model_xml.replace(".xml", ".bin"),
+)
+# ag_w, ag_h = 62, 62
+_, ag_c, ag_h, ag_w = age_gender_classification_model.inputs[0].shape
+ag_compiled_model = ie.compile_model(age_gender_classification_model, DEVICE_OV)
+
+emotions_classification_model_xml = f"/home/resources/models/intel/emotions-recognition-retail-0003/{model_precision_face}/emotions-recognition-retail-0003.xml"
+emotions_classification_model = ie.read_model(
+    model=emotions_classification_model_xml,
+    weights=emotions_classification_model_xml.replace(".xml", ".bin"),
+)
+# em_w, em_h = 64, 64
+_, em_c, em_h, em_w = emotions_classification_model.inputs[0].shape
+em_compiled_model = ie.compile_model(emotions_classification_model, DEVICE_OV)
+
+
+""" DETECTION FUNCTIONS """
 
 
 def yolo_object_detection(frame, H, W):
@@ -80,35 +113,6 @@ def yolo_object_detection(frame, H, W):
                 objects.append(object_res)
 
     return objects
-
-
-ie = Core()
-face_detection_model_xml = f"/home/resources/models/intel/face-detection-adas-0001/{model_precision_face}/face-detection-adas-0001.xml"
-face_detection_model = ie.read_model(
-    model=face_detection_model_xml,
-    weights=face_detection_model_xml.replace(".xml", ".bin"),
-)
-# face_det_w, face_det_h = 672, 384
-_, face_det_c, face_det_h, face_det_w = face_detection_model.inputs[0].shape
-face_det_compiled_model = ie.compile_model(face_detection_model, DEVICE_OV)
-
-age_gender_classification_model_xml = f"/home/resources/models/intel/age-gender-recognition-retail-0013/{model_precision_face}/age-gender-recognition-retail-0013.xml"
-age_gender_classification_model = ie.read_model(
-    model=age_gender_classification_model_xml,
-    weights=age_gender_classification_model_xml.replace(".xml", ".bin"),
-)
-# ag_w, ag_h = 62, 62
-_, ag_c, ag_h, ag_w = age_gender_classification_model.inputs[0].shape
-ag_compiled_model = ie.compile_model(age_gender_classification_model, DEVICE_OV)
-
-emotions_classification_model_xml = f"/home/resources/models/intel/emotions-recognition-retail-0003/{model_precision_face}/emotions-recognition-retail-0003.xml"
-emotions_classification_model = ie.read_model(
-    model=emotions_classification_model_xml,
-    weights=emotions_classification_model_xml.replace(".xml", ".bin"),
-)
-# em_w, em_h = 64, 64
-_, em_c, em_h, em_w = emotions_classification_model.inputs[0].shape
-em_compiled_model = ie.compile_model(emotions_classification_model, DEVICE_OV)
 
 
 def face_detection(frame, H, W):
@@ -186,6 +190,9 @@ def face_detection(frame, H, W):
             # print(face_res)
             faces.append(face_res)
     return faces
+
+
+""" MAIN FUNCTION """
 
 
 def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):

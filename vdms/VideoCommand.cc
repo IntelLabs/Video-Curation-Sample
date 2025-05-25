@@ -190,9 +190,9 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
       get_value<std::string>(cmd, "container", "mp4");
   const std::string &file_name = VCL::create_unique(_storage_video, container);
 
-  // Modifiyng the existing properties that the user gives
+  // Modifying the existing properties that the user gives
   // is a good option to make the AddNode more simple.
-  // This is not ideal since we are manupulating with user's
+  // This is not ideal since we are manipulating with user's
   // input, but for now it is an acceptable solution.
   Json::Value props = get_value<Json::Value>(cmd, "properties");
   props[VDMS_VID_PATH_PROP] = file_name;
@@ -406,7 +406,7 @@ int FindVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
 
   Json::Value results = get_value<Json::Value>(cmd, "results");
 
-  // Unless otherwhise specified, we return the blob.
+  // Unless otherwise specified, we return the blob.
   if (get_value<bool>(results, "blob", true)) {
     results["list"].append(VDMS_VID_PATH_PROP);
   }
