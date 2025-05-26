@@ -8,6 +8,7 @@
               mode: host
         volumes:
             - /etc/localtime:/etc/localtime:ro
+            - app-content:/var/www
         networks:
             - appnet
         restart: always

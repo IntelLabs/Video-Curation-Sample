@@ -143,13 +143,6 @@ class Video {
   std::string get_video_id() const;
 
   /**
-   *  Gets the remote path set on the Video object
-   *
-   *  @return The string containing the remote path to the Video object
-   */
-  std::string get_remote_video_id() const;
-
-  /**
    *  Gets the codec used.
    *
    *  @return Codec
@@ -473,10 +466,6 @@ class Video {
   // No blob stored. The file path is stored instead
   // and is accessed locally or over the network.
   bool _no_blob = false;
-
-  // Remote file location. This value is set only if the video is at a remote
-  // location and no blob is being stored by VDMS
-  std::string _remote_file_location;
 
   // Query Error response
   std::string _query_error_response = "";

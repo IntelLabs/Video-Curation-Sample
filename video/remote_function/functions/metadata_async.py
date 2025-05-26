@@ -148,9 +148,9 @@ def face_detection(frame, H, W):
 """ MAIN FUNCTION """
 
 
-def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
+def run(ipfilename, format, options, tmp_dir_path):
     METADATA = dict()
-    W, H = input_sizeWH
+    W, H = options["input_sizeWH"]
 
     async def update_face_metadata(results, framenum):
         for oidx, face in enumerate(results):
@@ -229,7 +229,7 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
             frameNum = int(video_obj.get(cv2.CAP_PROP_POS_FRAMES))
 
             if (W, H) != (fW, fH):
-                frame = cv2.resize(frame, input_sizeWH, interpolation=CV2_INTERPOLATION)
+                frame = cv2.resize(frame, (W, H), interpolation=CV2_INTERPOLATION)
 
             results = face_detection(frame, H, W)
             asyncio.run(update_face_metadata(results, frameNum))

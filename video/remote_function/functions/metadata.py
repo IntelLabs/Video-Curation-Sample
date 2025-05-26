@@ -195,8 +195,8 @@ def face_detection(frame, H, W):
 """ MAIN FUNCTION """
 
 
-def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
-    W, H = input_sizeWH
+def run(ipfilename, format, options, tmp_dir_path):
+    W, H = options["input_sizeWH"]
     if DEBUG == "1":
         print(
             f"[TIMING],start_udf_metadata,{ipfilename}," + str(time.time()), flush=True
@@ -226,8 +226,8 @@ def run(ipfilename, format, options, tmp_dir_path, input_sizeWH):
 
         frameNum = int(video_obj.get(cv2.CAP_PROP_POS_FRAMES))
 
-        if input_sizeWH != (fW, fH):
-            frame = cv2.resize(frame, input_sizeWH, interpolation=CV2_INTERPOLATION)
+        if (W, H) != (fW, fH):
+            frame = cv2.resize(frame, (W, H), interpolation=CV2_INTERPOLATION)
 
         if frame is not None and options["otype"] == "face":
             # face detection for each frame

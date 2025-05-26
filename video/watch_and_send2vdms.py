@@ -74,8 +74,8 @@ def ingest_video(ingest_mode, filename_path, video_info):
 
     query = {
         "AddVideo": {
-            "from_server_file": filename_path,  # .replace("/home/remote_function/", ""), #from_server_file, from_file_path
-            # "is_local_file": True,
+            "from_file_path": filename_path,  # from_server_file
+            "is_local_file": True,
             "properties": properties,
             "operations": [
                 {
@@ -95,8 +95,8 @@ def ingest_video(ingest_mode, filename_path, video_info):
     }
 
     video_blob = []
-    with open(filename_path, "rb") as fd:
-        video_blob.append(fd.read())
+    # with open(filename_path, "rb") as fd:
+    #     video_blob.append(fd.read())
     if DEBUG == "1":
         print(
             f"[TIMING],start_udf_ingest_{ingest_mode},{filename}," + str(time.time()),

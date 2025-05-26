@@ -142,7 +142,6 @@ def video_api():
         json_data = json.loads(request.form["jsonData"])
         video_data = request.files["videoData"]
         format = json_data["format"] if "format" in json_data else "mp4"
-        input_sizeWH = json_data["input_sizeWH"]
 
         tmpfile = secure_filename(
             os.path.join(tmp_dir_path, "tmpfile" + uuid.uuid1().hex + "." + str(format))
@@ -163,12 +162,10 @@ def video_api():
 
         if "ingestion" in json_data:
             video_file, metadata_file = udf.run(
-                tmpfile, format, json_data, tmp_dir_path, input_sizeWH
+                tmpfile, format, json_data, tmp_dir_path
             )
         else:
-            video_file, _ = udf.run(
-                tmpfile, format, json_data, tmp_dir_path, input_sizeWH
-            )
+            video_file, _ = udf.run(tmpfile, format, json_data, tmp_dir_path)
 
         response_file = os.path.join(
             tmp_dir_path, "tmpfile" + uuid.uuid1().hex + ".zip"
