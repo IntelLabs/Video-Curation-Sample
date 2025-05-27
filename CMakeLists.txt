@@ -42,22 +42,10 @@ endif()
 
 if (NOT DEFINED IN_SOURCE)
     set(IN_SOURCE "videos") # Use videos
-    set(STREAM_URL "${EMPTY}")
 endif()
 
 if (NOT DEFINED NCPU)
     set(NCPU 0)
-endif()
-
-if (NOT IN_SOURCE MATCHES "stream")
-    set(STREAM_URL "${EMPTY}") # Use videos
-endif()
-
-if (NOT DEFINED STREAM_URL)
-    set(STREAM_URL "${EMPTY}") # Use videos
-    if (IN_SOURCE MATCHES "stream")
-        set(IN_SOURCE "videos")
-    endif()
 endif()
 
 
@@ -82,6 +70,6 @@ endforeach()
 execute_process(COMMAND printf "\n\nThis script will build third party components licensed under various open source licenses into your container images. The terms under which those components may be used and distributed can be found with the license document that is provided with those components. Please familiarize yourself with those terms to ensure your distribution of those components complies with the terms of those licenses.\n\n")
 
 execute_process(COMMAND printf "PLATFORM=${PLATFORM}, NSTREAMS=${NSTREAMS}, NCURATIONS=${NCURATIONS}, INGESTION=${INGESTION}\n")
-execute_process(COMMAND printf "IN_SOURCE=${IN_SOURCE}, STREAM_URL=${STREAM_URL}, NCPU=${NCPU}, DEVICE=${DEVICE}, DEBUG=${DEBUG}\n")
+execute_process(COMMAND printf "IN_SOURCE=${IN_SOURCE}, NCPU=${NCPU}, DEVICE=${DEVICE}, DEBUG=${DEBUG}\n")
 execute_process(COMMAND printf "REGISTRY=${REGISTRY}\n\n")
 

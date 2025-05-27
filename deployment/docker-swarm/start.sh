@@ -2,7 +2,7 @@
 
 DIR=$(dirname $(readlink -f "$0"))
 yml="$DIR/docker-compose.yml"
-DEVICE="$9"
+DEVICE="$8"
 
 case "$1" in
 docker_compose)

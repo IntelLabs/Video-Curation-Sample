@@ -10,7 +10,7 @@ NCPU=0
 NCURATIONS=1
 NSTREAMS=1
 IN_SOURCE=stream
-SOURCE="-DSTREAM_URL="rtp://127.0.0.1:8088" -DIN_SOURCE=${IN_SOURCE}"
+SOURCE="-DIN_SOURCE=${IN_SOURCE}"
 DEBUG="0"
 DEVICE="CPU"
 
@@ -79,19 +79,7 @@ while true; do
         -s | --source)
             shift;
             IN_SOURCE="$1";
-            if [ $IN_SOURCE == "stream" ]; then
-                SOURCE="-DSTREAM_URL="rtp://127.0.0.1:8088" -DIN_SOURCE=${IN_SOURCE}";
-
-            elif [ $IN_SOURCE == "videos" ]; then
-                SOURCE="-DIN_SOURCE=${IN_SOURCE}";
-
-            else
-                echo "INVALID SOURCE TYPE (-s): ${IN_SOURCE}";
-                script_usage;
-                exit 0;
-
-            fi
-
+            SOURCE="-DIN_SOURCE=${IN_SOURCE}";
             shift;
             ;;
         -t | --type) shift; EXP_TYPE="$1"; shift ;;

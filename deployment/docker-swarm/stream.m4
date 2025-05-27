@@ -9,7 +9,6 @@
             VDHOST: "http://video-service:8080"
             DBHOST: "vdms-service"
             ZKHOST: "zookeeper-service:2181"
-            `STREAM_URL': "defn(`STREAM_URL')"
             http_proxy: "${http_proxy}"
             HTTP_PROXY: "${HTTP_PROXY}"
             https_proxy: "${https_proxy}"

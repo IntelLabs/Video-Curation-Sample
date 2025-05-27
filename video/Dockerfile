@@ -4,6 +4,9 @@ FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1
 ARG DEVICE="CPU"
 ENV DEVICE="${DEVICE}"
 
+ARG IN_SOURCE="videos"
+ENV IN_SOURCE="${IN_SOURCE}"
+
 ENV VIRTUAL_ENV=/opt/venv
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -38,7 +41,7 @@ RUN rm /var/www/stream/* || true
 COPY archive /var/www/mp4
 RUN rm /var/www/mp4/.gitignore || true
 COPY segment_archive.py /home/
-RUN python3 /home/segment_archive.py
+RUN if [ "${IN_SOURCE}" = *"videos"* ]; then python3 /home/segment_archive.py; fi;
 CMD  ["/bin/bash","-c","python3 /home/resources/models/download_yolo.py && /home/manage.sh"]
 
 ####
