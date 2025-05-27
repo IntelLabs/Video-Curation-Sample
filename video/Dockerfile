@@ -25,7 +25,7 @@ RUN pip3 install pip --upgrade && \
         pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu; \
     else \
         pip3 install torch torchvision; \
-    fi
+    fi;
 RUN pip3 install wheel 'kafka-python>=1.4.7' inotify vdms && \
     pip3 install -r /home/remote_function/requirements.${DEVICE}.txt
 
