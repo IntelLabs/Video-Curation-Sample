@@ -27,7 +27,7 @@ yolo_path = f"/home/resources/models/ultralytics/{model_name}/{model_precision_o
 
 if DEVICE == "GPU":
     yolo_path += ".engine/"
-    batch_size = 1
+    batch_size = 8  # 1
 else:
     yolo_path += "_openvino_model/"
     batch_size = 8
@@ -176,28 +176,28 @@ def run(ipfilename, format, options, tmp_dir_path):
 
             METADATA[framenum_str] = {"frameId": framenum, "bbox": tdict}
 
-    async def update_obj_metadata(results, framenum, objects, dicts):  # , H, W):
-        H, W = results.orig_shape
+    # async def update_obj_metadata(results, framenum, objects, dicts):  # , H, W):
+    #     H, W = results.orig_shape
 
-        for oidx, object in enumerate(objects):
-            tdict = {
-                "x": int(object[0]),
-                "y": int(object[1]),
-                "height": int(object[2]),
-                "width": int(object[3]),
-                "object": str(object[4]),
-                "object_det": {
-                    "confidence": float(object[5]),
-                    "frameH": int(H),
-                    "frameW": int(W),
-                },
-            }
+    #     for oidx, object in enumerate(objects):
+    #         tdict = {
+    #             "x": int(object[0]),
+    #             "y": int(object[1]),
+    #             "height": int(object[2]),
+    #             "width": int(object[3]),
+    #             "object": str(object[4]),
+    #             "object_det": {
+    #                 "confidence": float(object[5]),
+    #                 "frameH": int(H),
+    #                 "frameW": int(W),
+    #             },
+    #         }
 
-            framenum_str = f"{framenum}_{oidx}"
-            if DEBUG == "1":
-                meta_str = ",".join([str(o) for o in object + [framenum_str]])
-                print(f"[METADATA],{meta_str}", flush=True)
-            METADATA[framenum_str] = {"frameId": framenum, "bbox": tdict}
+    #         framenum_str = f"{framenum}_{oidx}"
+    #         if DEBUG == "1":
+    #             meta_str = ",".join([str(o) for o in object + [framenum_str]])
+    #             print(f"[METADATA],{meta_str}", flush=True)
+    #         METADATA[framenum_str] = {"frameId": framenum, "bbox": tdict}
 
     if DEBUG == "1":
         print(
@@ -242,8 +242,8 @@ def run(ipfilename, format, options, tmp_dir_path):
         )
 
         def extract_metadata(predictor):
-            all_objects = []
-            all_object_dicts = []
+            # all_objects = []
+            # all_object_dicts = []
             all_frame_nums = []
             for bidx, result in enumerate(predictor.results):
                 framenum = int(
@@ -252,8 +252,9 @@ def run(ipfilename, format, options, tmp_dir_path):
                 all_frame_nums.append(framenum)
                 fH, fW = result.orig_shape
                 boxes = result.boxes.cpu()
-                objects = []
-                dicts = []
+                # objects = []
+                # dicts = []
+                oidx = 0
                 for box in boxes:
                     confidence = float(box.conf.item())
                     if confidence > detection_threshold:
@@ -272,7 +273,7 @@ def run(ipfilename, format, options, tmp_dir_path):
                             fW,
                         ]
                         # print(object_res)
-                        objects.append(object_res)
+                        # objects.append(object_res)
 
                         tdict = {
                             "x": int(object_res[0]),
@@ -286,15 +287,16 @@ def run(ipfilename, format, options, tmp_dir_path):
                                 "frameW": int(fW),
                             },
                         }
-                        dicts.append(tdict)
-                all_objects.append(objects)
-                all_object_dicts.append(dicts)
+                        framenum_str = f"{framenum}_{oidx}"
+                        METADATA[framenum_str] = {"frameId": framenum, "bbox": tdict}
+                        oidx += 1
+                #         dicts.append(tdict)
+                # all_objects.append(objects)
+                # all_object_dicts.append(dicts)
 
-            predictor.results = zip(
-                predictor.results, all_frame_nums, all_objects, all_object_dicts
-            )
-
-        object_detection_model.add_callback("on_predict_batch_end", extract_metadata)
+        object_detection_model.add_callback(
+            "on_predict_postprocess_end", extract_metadata
+        )
         results = object_detection_model.predict(
             ipfilename,
             imgsz=(H, W),
@@ -309,8 +311,8 @@ def run(ipfilename, format, options, tmp_dir_path):
             save=False,
             stream=True,
         )
-        for result, framenum, objects, dicts in results:
-            asyncio.run(update_obj_metadata(result, framenum, objects, dicts))
+        for result in results:
+            pass
 
     video_obj.release()
     if DEBUG == "1":

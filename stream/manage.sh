@@ -11,8 +11,8 @@ packet_size=18800 #1358 #18800
 time_segment_s=10
 
 SEGMENT_OPTS="-segment_time ${time_segment_s} -f segment -use_wallclock_as_timestamps 1 -reset_timestamps 1 -strftime 1 ${WATCH_DIR}/${HOSTNAME}__%Y-%m-%d_%H-%M-%S.mp4"
-GENERAL_OPTS="-flags -global_header -hide_banner -loglevel error -nostats -tune zerolatency -threads 1 -c copy -flush_packets 0"
-VIDEO_OPTS="-f mpegts -movflags faststart -crf 28 -r 15"  #-vcodec libx264   -s 640x360
+GENERAL_OPTS="-flags -global_header -hide_banner -loglevel error -nostats -tune zerolatency -threads 1 -filter:v fps=15 -flush_packets 0"
+VIDEO_OPTS="-f mpegts -movflags faststart"  # -vcodec libx264 -s 640x360 -crf 28 -r 15
 
 completed="INCOMPLETE"
 time_segment_ns=$((time_segment_s * 1000000000))

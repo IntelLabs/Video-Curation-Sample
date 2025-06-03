@@ -41,7 +41,7 @@ RUN rm /var/www/stream/* || true
 COPY archive /var/www/mp4
 RUN rm /var/www/mp4/.gitignore || true
 COPY segment_archive.py /home/
-RUN if [ "${IN_SOURCE}" = *"videos"* ]; then python3 /home/segment_archive.py; fi;
+RUN if [ "${IN_SOURCE}" = "videos" ]; then python3 /home/segment_archive.py; fi;
 CMD  ["/bin/bash","-c","python3 /home/resources/models/download_yolo.py && /home/manage.sh"]
 
 ####
