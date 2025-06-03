@@ -16,11 +16,6 @@ DOCKER_TAR_DIR="${11}"
 USER="docker"
 GROUP="docker"
 
-if [ "$DOCKER_TAR" != "1" ]; then
-    docker load -i ${DOCKER_TAR_DIR}/zookeeper.tar
-    docker load -i ${DOCKER_TAR_DIR}/kafka.tar
-fi
-
 build_docker() {
     docker_file="$1"
     shift
@@ -30,14 +25,25 @@ build_docker() {
         m4 -D${DEVICE} -I "$(dirname $docker_file)" "$docker_file.m4" > "$docker_file"
     fi
 
-    if [ "$DOCKER_TAR" != "1" ]; then
+    if [[ "$DOCKER_TAR" != "1" ]] || [[ "${image_name}" == *"_certificate"* ]]; then
+        if [[ "$DOCKER_TAR" == "1" ]] && [[ "${image_name}" == *"_certificate"* ]]; then
+            echo "Loading zookeeper and kafka docker image"
+            docker load -i ${DOCKER_TAR_DIR}/zookeeper.tar
+            docker load -i ${DOCKER_TAR_DIR}/kafka.tar
+
+            echo "Loading alpine base image"
+            docker load -i ${DOCKER_TAR_DIR}/alpine.tar
+        fi
+
         (cd "$DIR"; docker build --network host --file="$docker_file" "$@" -t "$image_name" "$DIR" $(env | cut -f1 -d= | grep -E '_(proxy|REPO|VER)$' | sed 's/^/--build-arg /') --build-arg USER=${USER} --build-arg GROUP=${GROUP} --build-arg UID=$(id -u) --build-arg GID=$(id -g) --build-arg DEVICE=${DEVICE} --build-arg IN_SOURCE=${IN_SOURCE} --build-arg DEBUG=${DEBUG})
     else
         tar_name="${image_name/:/_}"
+        if [[ "${tar_name}" == *"_video_"* ]]; then
+            tar_name=${tar_name}.${DEVICE}
+        fi
+        echo "Loading ${tar_name}.tar docker image"
         docker load -i "${DOCKER_TAR_DIR}/${tar_name}.tar"
     fi
-
-    docker rmi $(docker images -f "dangling=true" -q) || true
 
     # if REGISTRY is specified, push image to the private registry
     if [ "$REGISTRY" != " " ]; then
@@ -55,3 +61,5 @@ for dep in '.5.*' '.4.*' '.3.*' '.2.*' '.1.*' '.0.*' ''; do
         build_docker "$dockerfile" "$image"
     done
 done
+
+docker rmi $(docker images -f "dangling=true" -q) || true

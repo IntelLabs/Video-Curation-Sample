@@ -30,21 +30,26 @@ if (NOT DEFINED DEVICE)
     set(DEVICE "CPU")
 endif()
 
+if(DEVICE MATCHES "CPU")
+    set(NVIDIA_VISIBLE_DEVICES "all")
+else()
+    set(NVIDIA_VISIBLE_DEVICES "none")
+endif()
+
 if (NOT DEFINED DEBUG)
     set(DEBUG "0")
 endif()
 
 if (NOT DEFINED DOCKER_TAR)
     set(DOCKER_TAR "0")
-    set(DOCKER_TAR_DIR "${EMPTY}")
 endif()
 
-if(DOCKER_TAR MATCHES "1")
-    set(DOCKER_TAR_DIR ${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars)
+set(DOCKER_TAR_DIR ${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars)
 
+if(DOCKER_TAR MATCHES "1")
     set(TAR_FILES
         "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_frontend_stream.tar"
-        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_video_stream.tar"
+        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_video_stream.${DEVICE}.tar"
         "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/zookeeper.tar"
         "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_vdms_stream.tar"
         "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/kafka.tar"
@@ -60,16 +65,11 @@ if(DOCKER_TAR MATCHES "1")
     endforeach()
 
     if(NOT ALL_TARS_EXIST)
+        message(WARNING "All required tar files do not exist.")
         set(DOCKER_TAR "0")
         set(DOCKER_TAR_DIR "${EMPTY}")
     endif()
 
-endif()
-
-if(DEVICE MATCHES "CPU")
-    set(NVIDIA_VISIBLE_DEVICES "all")
-else()
-    set(NVIDIA_VISIBLE_DEVICES "none")
 endif()
 
 if (NOT DEFINED IN_SOURCE)
