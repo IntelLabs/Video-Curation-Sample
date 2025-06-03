@@ -11,8 +11,15 @@ IN_SOURCE="$4"
 REGISTRY="$6"
 DEVICE="$8"
 DEBUG="$9"
+DOCKER_TAR="${10}"
+DOCKER_TAR_DIR="${11}"
 USER="docker"
 GROUP="docker"
+
+if [ "$DOCKER_TAR" != "1" ]; then
+    docker load -i ${DOCKER_TAR_DIR}/zookeeper.tar
+    docker load -i ${DOCKER_TAR_DIR}/kafka.tar
+fi
 
 build_docker() {
     docker_file="$1"
@@ -22,7 +29,13 @@ build_docker() {
     if test -f "$docker_file.m4"; then
         m4 -D${DEVICE} -I "$(dirname $docker_file)" "$docker_file.m4" > "$docker_file"
     fi
-    (cd "$DIR"; docker build --network host --file="$docker_file" "$@" -t "$image_name" "$DIR" $(env | cut -f1 -d= | grep -E '_(proxy|REPO|VER)$' | sed 's/^/--build-arg /') --build-arg USER=${USER} --build-arg GROUP=${GROUP} --build-arg UID=$(id -u) --build-arg GID=$(id -g) --build-arg DEVICE=${DEVICE} --build-arg IN_SOURCE=${IN_SOURCE} --build-arg DEBUG=${DEBUG})
+
+    if [ "$DOCKER_TAR" != "1" ]; then
+        (cd "$DIR"; docker build --network host --file="$docker_file" "$@" -t "$image_name" "$DIR" $(env | cut -f1 -d= | grep -E '_(proxy|REPO|VER)$' | sed 's/^/--build-arg /') --build-arg USER=${USER} --build-arg GROUP=${GROUP} --build-arg UID=$(id -u) --build-arg GID=$(id -g) --build-arg DEVICE=${DEVICE} --build-arg IN_SOURCE=${IN_SOURCE} --build-arg DEBUG=${DEBUG})
+    else
+        tar_name="${image_name/:/_}"
+        docker load -i "${DOCKER_TAR_DIR}/${tar_name}.tar"
+    fi
 
     docker rmi $(docker images -f "dangling=true" -q) || true
 

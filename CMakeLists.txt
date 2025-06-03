@@ -34,6 +34,38 @@ if (NOT DEFINED DEBUG)
     set(DEBUG "0")
 endif()
 
+if (NOT DEFINED DOCKER_TAR)
+    set(DOCKER_TAR "0")
+    set(DOCKER_TAR_DIR "${EMPTY}")
+endif()
+
+if(DOCKER_TAR MATCHES "1")
+    set(DOCKER_TAR_DIR ${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars)
+
+    set(TAR_FILES
+        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_frontend_stream.tar"
+        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_video_stream.tar"
+        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/zookeeper.tar"
+        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_vdms_stream.tar"
+        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/kafka.tar"
+        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_certificate_stream.tar"
+    )
+
+    # Check if all files exist
+    set(ALL_TARS_EXIST TRUE)
+    foreach(TAR_FILE ${TAR_FILES})
+        if(NOT EXISTS "${TAR_FILE}")
+            set(ALL_TARS_EXIST FALSE)
+        endif()
+    endforeach()
+
+    if(NOT ALL_TARS_EXIST)
+        set(DOCKER_TAR "0")
+        set(DOCKER_TAR_DIR "${EMPTY}")
+    endif()
+
+endif()
+
 if(DEVICE MATCHES "CPU")
     set(NVIDIA_VISIBLE_DEVICES "all")
 else()
@@ -71,5 +103,5 @@ execute_process(COMMAND printf "\n\nThis script will build third party component
 
 execute_process(COMMAND printf "PLATFORM=${PLATFORM}, NSTREAMS=${NSTREAMS}, NCURATIONS=${NCURATIONS}, INGESTION=${INGESTION}\n")
 execute_process(COMMAND printf "IN_SOURCE=${IN_SOURCE}, NCPU=${NCPU}, DEVICE=${DEVICE}, DEBUG=${DEBUG}\n")
-execute_process(COMMAND printf "REGISTRY=${REGISTRY}\n\n")
+execute_process(COMMAND printf "DOCKER_TAR=${DOCKER_TAR}, DOCKER_TAR_DIR=${DOCKER_TAR_DIR}, REGISTRY=${REGISTRY}\n\n")
 

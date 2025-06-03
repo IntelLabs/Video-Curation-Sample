@@ -13,26 +13,28 @@ IN_SOURCE=stream
 SOURCE="-DIN_SOURCE=${IN_SOURCE}"
 DEBUG="0"
 DEVICE="CPU"
+DOCKER_TAR="0"
 
 DIR=$(dirname $(readlink -f "$0"))
 BUILD_DIR=$DIR/build
 
 LONG_LIST=(
-    "ingestion"
-    "type"
-    "registry"
-    "ncurations"
-    "nstreams"
-    "ncpu"
-    "source"
+    "ingestion:"
+    "type:"
+    "registry:"
+    "ncurations:"
+    "nstreams:"
+    "ncpu:"
+    "source:"
     "debug"
-    "device"
+    "device:"
+    "tars"
 )
 
 OPTS=$(getopt \
-    --longoptions "$(printf "%s:," "${LONG_LIST[@]}")" \
+    --longoptions "$(printf "%s," "${LONG_LIST[@]}")" \
     --name "$(basename "$0")" \
-    --options "hdi:t:r:n:v:c:s:e:" \
+    --options "hdli:t:r:n:v:c:s:e:" \
     -- "$@"
 )
 
@@ -56,6 +58,7 @@ script_usage()
     Options:
         -h                  optional    Print this help message
         -d or --debug       optional    Flag to enable debug messages
+        -l or --tars        optional    Flag to load docker images instead of building from Dockerfiles
         -e or --device      optional    Device for inference (CPU, GPU) [Default: CPU]
         -i or --ingestion   optional    Ingestion type (object, face) [Default: "object,face"]
         -n or --ncurations  optional    Number of ingestion containers [Default: 1]
@@ -72,6 +75,7 @@ while true; do
         -h) script_usage; exit 0 ;;
         -c | --ncpu) shift; NCPU=$1; shift ;;
         -d | --debug) shift; DEBUG="1" ;;
+        -l | --tars) shift; DOCKER_TAR="1" ;;
         -e | --device) shift; DEVICE=$1; shift ;;
         -i | --ingestion) shift; INGESTION=$1; shift ;;
         -n | --ncurations) shift; NCURATIONS=$1; shift ;;
@@ -94,9 +98,13 @@ done
 cd $BUILD_DIR
 
 if [ $REGISTRY == "None" ]; then
-    cmake -DINGESTION=$INGESTION $SOURCE -DNCPU=$NCPU -DNCURATIONS=$NCURATIONS -DNSTREAMS=$NSTREAMS -DDEBUG=$DEBUG -DDEVICE=$DEVICE ..
+    cmake -DINGESTION=$INGESTION $SOURCE -DNCPU=$NCPU \
+        -DNCURATIONS=$NCURATIONS -DNSTREAMS=$NSTREAMS \
+        -DDEBUG=$DEBUG -DDEVICE=$DEVICE -DDOCKER_TAR=$DOCKER_TAR ..
 else
-    cmake -DREGISTRY=$REGISTRY -DINGESTION=$INGESTION $SOURCE -DNCPU=$NCPU -DNCURATIONS=$NCURATIONS -DNSTREAMS=$NSTREAMS -DDEBUG=$DEBUG -DDEVICE=$DEVICE ..
+    cmake -DREGISTRY=$REGISTRY -DINGESTION=$INGESTION $SOURCE \
+        -DNCPU=$NCPU -DNCURATIONS=$NCURATIONS -DNSTREAMS=$NSTREAMS \
+        -DDEBUG=$DEBUG -DDEVICE=$DEVICE -DDOCKER_TAR=$DOCKER_TAR ..
 fi
 
 make
