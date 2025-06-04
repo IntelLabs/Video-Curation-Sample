@@ -2,12 +2,15 @@
 ## CMake Options:
 
 Use the following definitions to customize the building process:
-- **PLATFORM**: Specify the target platform: `Xeon`
-- **NCURATIONS**: Specify the number of curation processes running in the background.
+- **DEBUG**: Flag to enable debug messages
 - **DEVICE**: Specify the device: `CPU` or `GPU`
-- **NSTREAMS**: Specify the number of video streams
+- **DOCKER_TAR**: Flag to load docker images instead of building from Dockerfiles
+- **IN_SOURCE**: Specify the input video source: `videos` and/or `stream`.
+    <!-- Use comma as the deliminator to specify more than 1 source. -->
 - **INGESTION**: Specify the ingestion mode: `face` and/or `object`. Use comma as the deliminator to specify more than 1 ingestion mode.
-- **IN_SOURCE**: Specify the input video source: `videos` and/or `stream`. Use comma as the deliminator to specify more than 1 source.
+- **NCURATIONS**: Specify the number of curation processes running in the background.
+- **NSTREAMS**: Specify the number of video streams
+- **PLATFORM**: Specify the target platform: `Xeon`
 <!-- - **REGISTRY**: Name of private registry to push image. If registry secret is available, update `imagePullSecrets` field in [frontend.yaml.m4](../deployment/kubernetes/frontend.yaml.m4), [video_stream.yaml.m4](../deployment/kubernetes/video_stream.yaml.m4), and/or [video.yaml.m4](../deployment/kubernetes/video.yaml.m4) for Kubernetes. `docker login` may be necessary. -->
 <br>
 
@@ -19,7 +22,7 @@ Use the following definitions to customize the building process:
         requests:
             cpu: "1"
     ``` -->
-- **NCPU**: Use `NCPU` in your cmake command to specify number of CPU cores for Ingestion. The ingest pool will run on randomly selected CPUs. Similar to `taskset` on Linux.
+<!-- - **NCPU**: Use `NCPU` in your cmake command to specify number of CPU cores for Ingestion. The ingest pool will run on randomly selected CPUs. Similar to `taskset` on Linux. -->
 <br>
 
 ## Examples:
@@ -31,6 +34,13 @@ cd build
 cmake ..
 make
 ```
+Then run your preference [make command](#make-commands)  for deploying.
+
+Or you use the start script to deploy. An example is:
+```bash
+./start_app.sh -e DEVICE -s videos -d
+```
+<br>
 
 ### Stream from webcam or URL
 Build the sample:
@@ -40,9 +50,24 @@ cd build
 cmake -DIN_SOURCE=stream ..
 make
 ```
-Start the sample using preferred method, then use FFMPeg to start your webcam locally (or send a MP4 URL) and send via UDP to the host machine (`<hostname>`) and udp port (`<stream_port>`). Below is a sample command to stream using the internal camera on an HP laptop:
+Then run your preference [make command](#make-commands) for deploying.
+
+Or you use the start script to deploy. An example is:
+```bash
+./start_app.sh -e DEVICE -s stream -d
+```
+<br>
+
+
+Once application is deployed, then use FFMPeg to start your webcam locally (or send a MP4 URL) and send via UDP to the host machine (`<hostname>`) and udp port (`<stream_port>`).
+Below is a sample command to stream using the internal camera on an HP laptop:
 ```bash
 ffmpeg -re -f dshow -rtbufsize 100M -i video="HP HD Camera" -c copy -f mpegts -flush_packets 0 udp://<hostname>:<stream_port>?pkt_size=18800
+```
+
+Below is another sample command to stream a local video:
+```bash
+ffmpeg -re -i <mp4 video> -c copy -f mpegts -flush_packets 0 "udp://<hostname>:<stream_port>?pkt_size=18800"
 ```
 
 
@@ -53,7 +78,7 @@ ffmpeg -re -f dshow -rtbufsize 100M -i video="HP HD Camera" -c copy -f mpegts -f
 - **dist**: Create the sample distribution package.
 - **start/stop_docker_compose**: Start/stop the sample orchestrated by docker-compose.
 - **start/stop_docker_swarm**: Start/stop the sample orchestrated by docker swarm.
-- **start/stop_kubernetes**: Start/stop the sample orchestrated by Kubernetes.
+<!-- - **start/stop_kubernetes**: Start/stop the sample orchestrated by Kubernetes. -->
 
 ## See Also:
 
