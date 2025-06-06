@@ -9,7 +9,7 @@ half_flag = True
 dynamic_flag = True
 DEVICE = os.environ.get("DEVICE", "CPU")
 if DEVICE == "GPU":
-    batch_size = 8  # 1
+    batch_size = 1
 else:
     batch_size = 8
 

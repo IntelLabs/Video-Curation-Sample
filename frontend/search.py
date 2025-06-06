@@ -199,7 +199,7 @@ class SearchHandler(web.RequestHandler):
                             ts = float(ent_bbox["frameID"]) / stream1["fps"]
 
                             # merge segs
-                            segmin = 2
+                            segmin = 1  # 2
                             seg1 = [
                                 max(ts - segmin, 0),
                                 min(ts + segmin, stream1["duration"]),
