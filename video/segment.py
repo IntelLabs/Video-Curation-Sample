@@ -40,7 +40,9 @@ class SegmentHandler(web.RequestHandler):
                     self._genpath + "/" + output,
                 ]
             )
-            # call(["/usr/local/bin/ffmpeg","-i",self._mp4path+"/"+video,"-ss",start,"-t",end,"-c","copy",self._genpath+"/"+output])
+            # call(["/usr/local/bin/ffmpeg","-i",self._mp4path+"/"+video,"-force_key_frames",f"{start},{end}", self._genpath + "/" + output])
+
+            # call(["/usr/local/bin/ffmpeg","-ss",start,"-i",self._genpath + "/" + output,"-to",end,"-c","copy","-y",self._genpath+"/"+output])
         return output
 
     def _format(self, time):

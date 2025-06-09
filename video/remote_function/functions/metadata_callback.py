@@ -26,8 +26,8 @@ device_input = DEVICE.lower() if DEVICE == "CPU" else 0
 yolo_path = f"/home/resources/models/ultralytics/{model_name}/{model_precision_object}/{model_name}n"
 
 if DEVICE == "GPU":
-    yolo_path += ".engine/"
-    batch_size = 8  # 1
+    yolo_path += ".engine"
+    batch_size = 1
 else:
     yolo_path += "_openvino_model/"
     batch_size = 8
@@ -176,29 +176,6 @@ def run(ipfilename, format, options, tmp_dir_path):
 
             METADATA[framenum_str] = {"frameId": framenum, "bbox": tdict}
 
-    # async def update_obj_metadata(results, framenum, objects, dicts):  # , H, W):
-    #     H, W = results.orig_shape
-
-    #     for oidx, object in enumerate(objects):
-    #         tdict = {
-    #             "x": int(object[0]),
-    #             "y": int(object[1]),
-    #             "height": int(object[2]),
-    #             "width": int(object[3]),
-    #             "object": str(object[4]),
-    #             "object_det": {
-    #                 "confidence": float(object[5]),
-    #                 "frameH": int(H),
-    #                 "frameW": int(W),
-    #             },
-    #         }
-
-    #         framenum_str = f"{framenum}_{oidx}"
-    #         if DEBUG == "1":
-    #             meta_str = ",".join([str(o) for o in object + [framenum_str]])
-    #             print(f"[METADATA],{meta_str}", flush=True)
-    #         METADATA[framenum_str] = {"frameId": framenum, "bbox": tdict}
-
     if DEBUG == "1":
         print(
             f"[TIMING],start_udf_metadata,{ipfilename}," + str(time.time()), flush=True
@@ -287,7 +264,14 @@ def run(ipfilename, format, options, tmp_dir_path):
                                 "frameW": int(fW),
                             },
                         }
+
                         framenum_str = f"{framenum}_{oidx}"
+                        if DEBUG == "1":
+                            meta_str = ",".join(
+                                [str(o) for o in object_res + [framenum_str]]
+                            )
+                            print(f"[METADATA],{meta_str}", flush=True)
+
                         METADATA[framenum_str] = {"frameId": framenum, "bbox": tdict}
                         oidx += 1
                 #         dicts.append(tdict)

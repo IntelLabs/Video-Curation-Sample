@@ -152,7 +152,7 @@ def get_video_details(filename_path):
 
         video_info = {
             "fps": float(fps),
-            "duration": float(duration),
+            "duration": float(duration),  # round(float(duration),4)
             "width": int(width),
             "height": int(height),
             "frame_count": int(frame_count),

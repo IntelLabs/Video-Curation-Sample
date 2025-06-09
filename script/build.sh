@@ -31,8 +31,8 @@ build_docker() {
             docker load -i ${DOCKER_TAR_DIR}/zookeeper.tar
             docker load -i ${DOCKER_TAR_DIR}/kafka.tar
 
-            echo "Loading alpine base image"
-            docker load -i ${DOCKER_TAR_DIR}/alpine.tar
+            echo "Loading certificate image"
+            docker load -i ${DOCKER_TAR_DIR}/lcc_certificate_stream.tar
         fi
 
         (cd "$DIR"; docker build --network host --file="$docker_file" "$@" -t "$image_name" "$DIR" $(env | cut -f1 -d= | grep -E '_(proxy|REPO|VER)$' | sed 's/^/--build-arg /') --build-arg USER=${USER} --build-arg GROUP=${GROUP} --build-arg UID=$(id -u) --build-arg GID=$(id -g) --build-arg DEVICE=${DEVICE} --build-arg IN_SOURCE=${IN_SOURCE} --build-arg DEBUG=${DEBUG})
