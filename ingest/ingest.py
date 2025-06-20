@@ -1,20 +1,22 @@
 #!/usr/bin/python3
 
-from kafka import KafkaConsumer
-from subprocess import call
-from zkstate import ZKState
-import traceback
+import logging
+import os
 import socket
 import time
-import os
-import logging
-import kafka.errors as Errors
+import traceback
+from subprocess import call
 
-num_cpus=int(os.environ["NCPU"])
+import kafka.errors as Errors
+from kafka import KafkaConsumer
+from zkstate import ZKState
+
+num_cpus = int(os.environ["NCPU"])
 if num_cpus > 0:
-    from multiprocessing import cpu_count
     import random
+
     import psutil
+
     cpu_nums = list(range(psutil.cpu_count()))
     random.shuffle(cpu_nums)
     proc = psutil.Process(os.getpid())
@@ -30,18 +32,19 @@ stream_handler = logging.StreamHandler()
 stream_handler.setLevel(logging.INFO)
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
-logger.info('INGEST POOL')
+logger.info("INGEST POOL")
 
-topic="video_curation_sched"
-groupid="curaters"
-clientid=socket.gethostname()
+topic = "video_curation_sched"
+groupid = "curaters"
+clientid = socket.gethostname()
 
-producer_topic="ingest_sched"
+producer_topic = "ingest_sched"
 
-kkhost=os.environ["KKHOST"]
-vdhost=os.environ["VDHOST"]
-dbhost=os.environ["DBHOST"]
-in_source=os.environ["IN_SOURCE"]
+kkhost = os.environ["KKHOST"]
+vdhost = os.environ["VDHOST"]
+dbhost = os.environ["DBHOST"]
+in_source = os.environ["IN_SOURCE"]
+
 
 def send_producer_msg(producer, topic, strvalue):
     try:
@@ -57,31 +60,62 @@ def send_producer_msg(producer, topic, strvalue):
         logger.exception("[EXCEPTION]: %s", e)
         logger.error(traceback.format_exc())
 
+
 while True:
     try:
-        c=KafkaConsumer(topic,bootstrap_servers=kkhost,
-               client_id=clientid, group_id=groupid, auto_offset_reset="earliest",
-               api_version=(0,10))
+        c = KafkaConsumer(
+            topic,
+            bootstrap_servers=kkhost,
+            client_id=clientid,
+            group_id=groupid,
+            auto_offset_reset="earliest",
+            api_version=(0, 10),
+        )
 
         for msg in c:
-            mode,clip_name=msg.value.decode('utf-8').split(",")
-            zk=ZKState("/state/"+clip_name,mode)
+            mode, clip_name = msg.value.decode("utf-8").split(",")
+            zk = ZKState("/state/" + clip_name, mode)
             if not zk.processed():
                 if zk.process_start():
-
                     logger.info("Processing {}: {}...".format(clip_name, mode))
-                    
+
                     while True:
-                        logger.info("Downloading "+clip_name)
-                        sts=call(["/usr/bin/wget","-O",clip_name,vdhost+"/mp4/"+clip_name])
-                        if sts==0: break
+                        logger.info("Downloading " + clip_name)
+                        sts = call(
+                            [
+                                "/usr/bin/wget",
+                                "-O",
+                                clip_name,
+                                vdhost + "/mp4/" + clip_name,
+                            ]
+                        )
+                        if sts == 0:
+                            break
                         time.sleep(0.5)
 
-                    call(["/opt/gstreamer_gva/metaData_extract","-i",clip_name,"-n","-x",mode,"-a",dbhost,"-l"])
-                    
+                    s_t = time.time()
+                    call(
+                        [
+                            "/opt/gstreamer_gva/metaData_extract",
+                            "-i",
+                            clip_name,
+                            "-n",
+                            "-x",
+                            mode,
+                            "-a",
+                            dbhost,
+                            "-l",
+                        ]
+                    )
+                    e_t = time.time() - s_t
+                    print(
+                        f"[TIMING],end_{mode}_metaData_extract,{clip_name},{e_t:0.4f}s",
+                        flush=True,
+                    )
+
                     os.remove(clip_name)
                     zk.process_end()
             zk.close()
 
-    except:
+    except Exception:
         logger.error(traceback.format_exc())
