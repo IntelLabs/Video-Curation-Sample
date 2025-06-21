@@ -19,6 +19,8 @@ define(`PROFILE_GPU', `depends_on:
             ZKHOST: "zookeeper-service:2181"
             DBHOST: "vdms-service"
             `DEBUG': "defn(`DEBUG')"
+            `INGEST_METHOD': "defn(`INGEST_METHOD')"
+            METADATA_BATCH_SIZE: "100"
             `DEVICE': "defn(`DEVICE')"
             `IN_SOURCE': "defn(`IN_SOURCE')"
             `INGESTION': "defn(`INGESTION')"

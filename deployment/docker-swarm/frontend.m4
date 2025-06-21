@@ -9,6 +9,7 @@
         environment:
             DBHOST: "vdms-service"
             VDHOST: "http://video-service:8080"
+            `INGEST_METHOD': "defn(`INGEST_METHOD')"
             no_proxy: "vdms-service,video-service,${no_proxy}"
             NO_PROXY: "vdms-service,video-service,${NO_PROXY}"
             `DEBUG': "defn(`DEBUG')"

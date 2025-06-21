@@ -14,6 +14,7 @@ from inotify.adapters import Inotify
 from ultralytics.utils.checks import check_imgsz
 
 import vdms
+from ingest import get_manual_query
 
 # SETUP LOGGER
 logger = logging.getLogger(__name__)
@@ -29,23 +30,28 @@ logger.info("Video: Watch & Ingest")
 topic = "video_curation_sched"
 clientid = socket.gethostname()
 
-kkhost = os.environ["KKHOST"]
-dbhost = "vdms-service"  # os.environ["DBHOST"]
+dbhost = os.environ["DBHOST"]  # "vdms-service"  # os.environ["DBHOST"]
 dbport = 55555
 ingestion = os.environ["INGESTION"]
 in_source = os.environ["IN_SOURCE"]
 DEBUG = os.environ["DEBUG"]
+DEVICE = os.environ.get("DEVICE", "CPU")
+INGEST_METHOD = os.environ.get("INGEST_METHOD", "manual")  # "manual", "udf"
 # video_store_dir = "/home/resources"
-video_store_dir = "/var/www/mp4"
+video_store_dir = os.environ.get("video_store_dir", "/var/www/mp4")
 resize_input = False
 model_w, model_h = (640, 640)
 dbs = {}
 
 
-def ingest_video(ingest_mode, filename_path, video_info):
+def ingest_video(ingest_mode, filename_path, video_info, method="manual"):
     global dbs
 
-    # filename_path = "1191560.mp4"
+    if method == "udf":
+        prop_file_name_key = "Name"
+    else:
+        prop_file_name_key = "server_filepath"
+
     filename = str(Path(filename_path).name)
     dn_name = filename.split("__")[0]
     if dn_name not in dbs:
@@ -55,7 +61,7 @@ def ingest_video(ingest_mode, filename_path, video_info):
         dbs[dn_name].connect(dbhost, dbport)
 
     properties = {
-        "Name": filename,  # .split("/")[-1],
+        prop_file_name_key: filename,  # .split("/")[-1],
         "category": "video_path_rop",
     }
     if len(video_info) > 0:
@@ -72,46 +78,52 @@ def ingest_video(ingest_mode, filename_path, video_info):
 
     new_size = (new_sizeHW[1], new_sizeHW[0])
 
-    query = {
-        "AddVideo": {
-            "from_file_path": filename_path,  # from_server_file
-            "is_local_file": True,
-            "properties": properties,
-            "operations": [
-                {
-                    "type": "remoteOp",
-                    "url": "http://video-service:5011/video",
-                    "options": {
-                        # "id": "metadata",
-                        # "id": "metadata_async",
-                        "id": "metadata_callback",
-                        "otype": ingest_mode,
-                        "media_type": "video",
-                        "fps": properties["fps"],
-                        "input_sizeWH": new_size,
-                    },
-                }
-            ],
+    if method == "udf":
+        # get_udf_query(dbs[dn_name], filename_path, properties, ingest_mode, new_size)
+        query = {
+            "AddVideo": {
+                "from_file_path": filename_path,  # from_server_file
+                "is_local_file": True,
+                "properties": properties,
+                "operations": [
+                    {
+                        "type": "remoteOp",
+                        "url": "http://video-service:5011/video",
+                        "options": {
+                            # "id": "metadata",
+                            # "id": "metadata_async",
+                            "id": "metadata_callback",
+                            "otype": ingest_mode,
+                            "media_type": "video",
+                            "fps": properties["fps"],
+                            "input_sizeWH": new_size,
+                        },
+                    }
+                ],
+            }
         }
-    }
 
-    video_blob = []
-    # with open(filename_path, "rb") as fd:
-    #     video_blob.append(fd.read())
-    if DEBUG == "1":
-        print(
-            f"[TIMING],start_udf_ingest_{ingest_mode},{filename}," + str(time.time()),
-            flush=True,
-        )
-    res, res_arr = dbs[dn_name].query([query], [video_blob])
-    if DEBUG == "1":
-        print(
-            f"[TIMING],end_udf_ingest_{ingest_mode},{filename}," + str(time.time()),
-            flush=True,
-        )
-        print(f"[DEBUG] {filename} PROPERTIES: {properties}", flush=True)
-        print(f"[DEBUG] INGEST_VIDEO RESPONSE: {res}", flush=True)
-        print(f"[DEBUG] Used client: {dn_name}", flush=True)
+        video_blob = []
+        # with open(filename_path, "rb") as fd:
+        #     video_blob.append(fd.read())
+        if DEBUG == "1":
+            print(
+                f"[TIMING],start_udf_ingest_{ingest_mode},{filename},"
+                + str(time.time()),
+                flush=True,
+            )
+        res, res_arr = dbs[dn_name].query([query], [video_blob])
+        if DEBUG == "1":
+            print(
+                f"[TIMING],end_udf_ingest_{ingest_mode},{filename}," + str(time.time()),
+                flush=True,
+            )
+            print(f"[DEBUG] {filename} PROPERTIES: {properties}", flush=True)
+            print(f"[DEBUG] INGEST_VIDEO RESPONSE: {res}", flush=True)
+            print(f"[DEBUG] Used client: {dn_name}", flush=True)
+
+    else:
+        get_manual_query(dbs[dn_name], filename_path, properties, ingest_mode, new_size)
 
 
 def get_video_details(filename_path):
@@ -165,7 +177,7 @@ def get_video_details(filename_path):
 def sort_files_in_directory_by_size(in_dir):
     all_files = []
     for filename in os.listdir(in_dir):
-        if filename.endswith(".mp4") and filename.startswith("video"):
+        if filename.endswith(".mp4"):  # and filename.startswith("video"):
             filename_path = os.path.join(video_store_dir, filename)
             if os.path.isfile(filename_path):
                 file_size = os.path.getsize(filename_path)
@@ -181,7 +193,9 @@ def main(watch_folder=os.getcwd()):
         for filename_path, _ in sorted_files:
             video_info = get_video_details(filename_path)
             for ingest_mode in ingestion.split(","):
-                ingest_video(ingest_mode, filename_path, video_info)
+                ingest_video(
+                    ingest_mode, filename_path, video_info, method=INGEST_METHOD
+                )
 
     if "stream" in in_source:
         i = Inotify()
@@ -200,7 +214,10 @@ def main(watch_folder=os.getcwd()):
                     )  # TODO: Remove
                 video_info = get_video_details(filename_path)
                 for ingest_mode in ingestion.split(","):
-                    ingest_video(ingest_mode, filename_path, video_info)
+                    ingest_video(
+                        ingest_mode, filename_path, video_info, method=INGEST_METHOD
+                    )
+
     if DEBUG == "1":
         print("[TIMING],end_watchandsend,," + str(time.time()), flush=True)
 

@@ -72,6 +72,10 @@ if(DOCKER_TAR MATCHES "1")
 
 endif()
 
+if(NOT DEFINED INGEST_METHOD)
+    set(INGEST_METHOD "manual")
+endif()
+
 if (NOT DEFINED IN_SOURCE)
     set(IN_SOURCE "videos") # Use videos
 endif()
@@ -103,5 +107,5 @@ execute_process(COMMAND printf "\n\nThis script will build third party component
 
 execute_process(COMMAND printf "PLATFORM=${PLATFORM}, NSTREAMS=${NSTREAMS}, NCURATIONS=${NCURATIONS}, INGESTION=${INGESTION}\n")
 execute_process(COMMAND printf "IN_SOURCE=${IN_SOURCE}, NCPU=${NCPU}, DEVICE=${DEVICE}, DEBUG=${DEBUG}\n")
-execute_process(COMMAND printf "DOCKER_TAR=${DOCKER_TAR}, DOCKER_TAR_DIR=${DOCKER_TAR_DIR}, REGISTRY=${REGISTRY}\n\n")
+execute_process(COMMAND printf "DOCKER_TAR=${DOCKER_TAR}, DOCKER_TAR_DIR=${DOCKER_TAR_DIR}, INGEST_METHOD=${INGEST_METHOD},REGISTRY=${REGISTRY}\n\n")
 

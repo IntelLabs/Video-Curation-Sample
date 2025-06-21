@@ -14,9 +14,9 @@ from tornado.concurrent import run_on_executor
 import vdms
 
 dbhost = os.environ["DBHOST"]
-vdhost = os.environ["VDHOST"]
+# vdhost = os.environ["VDHOST"]
 DEBUG = os.environ["DEBUG"]
-print(f"DEBUG: {DEBUG}")
+INGEST_METHOD = os.environ.get("INGEST_METHOD", "manual")  # "manual", "udf"
 
 
 class SearchHandler(web.RequestHandler):
@@ -42,6 +42,100 @@ class SearchHandler(web.RequestHandler):
         return None
 
     def _construct_single_query(self, query1, ref):
+        q_vid = {
+            "FindVideo": {
+                "_ref": ref,
+                # "results": {"list": ['video_name', "video_filename"]},
+                # "results": {"list": ["fps", "duration", "width", "height"]}
+            }
+        }
+        q_vid2 = {
+            "FindEntity": {
+                "_ref": ref + 1,
+                "link": {"ref": ref},
+            }
+        }
+
+        q_frame = {
+            "FindBoundingBox": {
+                "link": {"ref": ref + 1},
+                "results": {
+                    "list": [
+                        "objectID",
+                        "fps",
+                        "duration",
+                        "width",
+                        "height",
+                        "server_filepath",
+                        "frameID",
+                        "VD:x1",
+                        "VD:y1",
+                        "VD:width",
+                        "VD:height",
+                        "frameW",
+                        "frameH",
+                        "confidence",
+                    ]
+                },
+            }
+        }
+
+        if query1["name"] == "video":
+            name = self._value(query1, "Video Name")
+            if name != "*" and name != "":
+                q_vid["FindVideo"].update(
+                    {
+                        "constraints": {
+                            "Name": ["==", name],
+                        },
+                    }
+                )
+
+            elif name == "*":
+                q_vid["FindVideo"].update(
+                    {
+                        "results": {
+                            "list": [
+                                "server_filepath",
+                                "fps",
+                                "duration",
+                                "width",
+                                "height",
+                                "frame_count",
+                            ],
+                        }
+                    }
+                )
+                return [q_vid]
+
+        metaconstraints = {}
+        if query1["name"] == "object":
+            metaconstraints["objectID"] = ["==", self._value(query1, "Object List")]
+            q_frame["FindBoundingBox"].update({"constraints": metaconstraints})
+
+        if query1["name"] == "person":
+            metaconstraints["age"] = [
+                ">=",
+                int(self._value(query1, "Age Min")),
+                "<=",
+                int(self._value(query1, "Age Max")),
+            ]
+            metaconstraints["objectID"] = ["==", "face"]
+
+            emotion = self._value(query1, "Emotion List")
+            if emotion != "skip":
+                metaconstraints["emotion"] = ["==", emotion]
+
+            gender = self._value(query1, "Gender")
+            if gender != "skip":
+                metaconstraints["gender"] = ["==", gender]
+
+            if len(metaconstraints) > 0:
+                q_frame["FindBoundingBox"].update({"constraints": metaconstraints})
+
+        return [q_vid, q_vid2, q_frame]
+
+    def _construct_single_query_udf(self, query1, ref):
         q_vid = {
             "FindVideo": {
                 "_ref": ref,
@@ -137,6 +231,178 @@ class SearchHandler(web.RequestHandler):
         return [q_vid, q_vid2, q_frame]
 
     def _decode_response(self, response):
+        clips = {}
+        if len(response) % 3 != 0:
+            segs = []
+            for i in range(0, len(response), 1):
+                if (
+                    "FindVideo" in response[i]
+                    and response[i]["FindVideo"]["status"] == 0
+                ):
+                    entities = response[i]["FindVideo"]["entities"]
+                    print(entities)
+
+                    for ent in entities:
+                        name = ent["Name"]
+                        duration = ent["duration"]
+                        seg1c = {
+                            "name": name,
+                            "stream": quote(
+                                "/api/segment/0/" + str(duration) + "/" + name
+                            ),
+                            "thumbnail": quote("/api/thumbnail/0/" + name + ".png"),
+                            "fps": ent["fps"],
+                            "time": 0,
+                            "duration": duration,
+                            "offset": 0,
+                            "width": ent["width"],
+                            "height": ent["height"],
+                            "frames": [x for x in range(0, ent["frame_count"])],
+                        }
+                        segs.append(seg1c)
+
+        else:
+            for i in range(0, len(response), 3):
+                if (
+                    "FindVideo" in response[i]
+                    and response[i]["FindVideo"]["status"] == 0
+                    and response[i + 2]["FindBoundingBox"]["status"] == 0
+                    and "entities" in response[i + 2]["FindBoundingBox"]
+                ):
+                    entities = response[i + 2]["FindBoundingBox"]["entities"]
+                    # if response[i+1]["FindConnection"]["status"]==0 and response[i]["FindBoundingBox"]["status"]==0:
+                    #     # connections=response[i+1]["FindConnection"]["connections"]
+                    #     bboxes=response[i]["FindBoundingBox"]["entities"]
+                    #     # if len(connections)!=len(bboxes): continue
+                    print(entities)
+                    for j in range(0, len(entities)):
+                        # for ent_bbox in entities[j]["bbox"]:
+                        ent_bbox = entities[j]
+                        stream = ent_bbox["server_filepath"]
+                        if stream not in clips:
+                            clips[stream] = {
+                                "fps": ent_bbox["fps"],
+                                "duration": ent_bbox["duration"],
+                                "width": ent_bbox["width"],
+                                "height": ent_bbox["height"],
+                                "segs": [],
+                                "frames": {},
+                            }
+
+                        # time stamp and duration
+                        stream1 = clips[stream]
+                        ts = float(ent_bbox["frameID"]) / ent_bbox["fps"]
+
+                        # merge segs
+                        segmin = 2
+                        seg1 = [
+                            max(ts - segmin, 0),
+                            min(ts + segmin, stream1["duration"]),
+                        ]
+                        stream1["segs"] = merge_iv(stream1["segs"], seg1)
+
+                        if ts not in stream1["frames"]:
+                            stream1["frames"][ts] = {"time": ts, "objects": []}
+
+                        if "objectID" in ent_bbox:
+                            bbc = {
+                                "x": ent_bbox["VD:x1"],
+                                "y": ent_bbox["VD:y1"],
+                                "w": ent_bbox["VD:width"],
+                                "h": ent_bbox["VD:height"],
+                            }
+
+                            # Normalize BBs to frame size
+                            # if "resized_height" in ent_bbox and not isinstance(ent_bbox["resized_height"], str):
+                            frameH = (
+                                ent_bbox["frameH"]
+                                if not isinstance(ent_bbox["frameH"], str)
+                                else ent_bbox["height"]
+                            )
+                            # else:
+                            #     break
+
+                            # if "resized_width" in ent_bbox and not isinstance(ent_bbox["resized_width"], str):
+                            frameW = (
+                                ent_bbox["frameW"]
+                                if not isinstance(ent_bbox["frameW"], str)
+                                else ent_bbox["width"]
+                            )
+                            # else:
+                            #     break
+                            # if isinstance(ent_bbox["frameW"], str) and not isinstance(frameH, str):
+                            #     new_sizeHW = check_imgsz(
+                            #         [int(ent_bbox["height"]), int(ent_bbox["width"])]
+                            #     )  # expects hxw
+                            #     frameW = model_w if (ent_bbox["height"] * ent_bbox["width"]) < (model_h * model_w) else new_sizeHW[1]
+                            # else:
+                            #     frameW = ent_bbox["frameW"]
+                            x_min = float(bbc["x"]) / float(frameW)
+                            x_max = float(bbc["w"] + bbc["x"]) / float(frameW)
+                            y_min = float(bbc["y"]) / float(frameH)
+                            y_max = float(bbc["h"] + bbc["y"]) / float(frameH)
+
+                            obj = {
+                                "detection": {
+                                    "bounding_box": {
+                                        "x_max": x_max,
+                                        "x_min": x_min,
+                                        "y_max": y_max,
+                                        "y_min": y_min,
+                                    },
+                                    "label": ent_bbox["objectID"],
+                                },
+                                # "frame": {
+                                #     "width": frameW,
+                                #     "height": frameH,
+                                # },
+                            }
+                            if "confidence" in ent_bbox:
+                                obj["detection"]["confidence"] = ent_bbox["confidence"]
+                            stream1["frames"][ts]["objects"].append(obj)
+
+            print("clips:", flush=True)
+            print(clips, flush=True)
+
+            # create segments
+            segs = []
+            for name in clips:
+                stream1 = clips[name]
+                for seg1 in stream1["segs"]:
+                    seg1c = {
+                        "name": name,
+                        "stream": quote(
+                            "/api/segment/"
+                            + str(seg1[0])
+                            + "/"
+                            + str(seg1[1])
+                            + "/"
+                            + name
+                        ),
+                        "thumbnail": quote(
+                            "/api/thumbnail/" + str(seg1[0]) + "/" + name + ".png"
+                        ),
+                        "fps": stream1["fps"],
+                        "time": seg1[0],
+                        "duration": seg1[1] - seg1[0],
+                        "offset": 0,
+                        "width": stream1["width"],
+                        "height": stream1["height"],
+                        "frames": [],
+                    }
+                    for ts in stream1["frames"]:
+                        if ts >= seg1[0] and ts <= seg1[1]:
+                            stream1["frames"][ts].update(
+                                {"time": (ts - seg1[0]) * 1000}
+                            )
+                            seg1c["frames"].append(stream1["frames"][ts])
+                    segs.append(seg1c)
+
+        print("segs:", flush=True)
+        print(segs, flush=True)
+        return segs
+
+    def _decode_response_udf(self, response):
         clips = {}
         if len(response) % 3 != 0:
             segs = []
@@ -300,7 +566,10 @@ class SearchHandler(web.RequestHandler):
 
                 # BB & Connection query for each icon
                 print("q: ", q)
-                vdms_query = self._construct_single_query(q, ref)
+                if INGEST_METHOD == "udf":
+                    vdms_query = self._construct_single_query_udf(q, ref)
+                else:
+                    vdms_query = self._construct_single_query(q, ref)
 
                 print("vdms_query:", flush=True)
                 print(vdms_query, flush=True)
@@ -327,7 +596,10 @@ class SearchHandler(web.RequestHandler):
             print("Exception: " + str(e) + "\n" + traceback.format_exc(), flush=True)
         # print("VDMS response:")
         # print(vdms_response, flush=True)
-        segs = self._decode_response(vdms_response)
+        if INGEST_METHOD == "udf":
+            segs = self._decode_response_udf(vdms_response)
+        else:
+            segs = self._decode_response(vdms_response)
         if DEBUG == "1":
             print("[TIMING],end_frontend_search,," + str(time.time()), flush=True)
         return segs
