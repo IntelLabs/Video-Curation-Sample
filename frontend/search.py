@@ -86,7 +86,7 @@ class SearchHandler(web.RequestHandler):
                 q_vid["FindVideo"].update(
                     {
                         "constraints": {
-                            "Name": ["==", name],
+                            "server_filepath": ["==", name],
                         },
                     }
                 )
@@ -243,7 +243,7 @@ class SearchHandler(web.RequestHandler):
                     print(entities)
 
                     for ent in entities:
-                        name = ent["Name"]
+                        name = ent["server_filepath"]
                         duration = ent["duration"]
                         seg1c = {
                             "name": name,

@@ -191,7 +191,6 @@ def get_model(model_dir, run_platform, device_input, batch=1):
 def insert_bb_data(
     db, filename, data, properties, frame_exist=[], ingest_mode="object"
 ):
-    global batch_data
     frame_props = {
         k: v for k, v in properties.items() if k not in ["category", "frame_count"]
     }
@@ -325,6 +324,7 @@ def get_manual_query(db, filename_path, properties, ingest_mode, new_size):
         # Process the detections
         # faces = []
         oidx = 0
+        num_faces = 0
         for detection in result[0][0]:
             confidence = float(detection[2])
             if confidence > detection_threshold:
@@ -405,6 +405,7 @@ def get_manual_query(db, filename_path, properties, ingest_mode, new_size):
                         "frameW": int(W),
                     },
                 }
+                num_faces += 1
                 framenum_str = f"{framenum}_{oidx}"
                 if DEBUG == "1":
                     meta_str = ",".join([str(o) for o in face_res + [framenum_str]])
@@ -425,7 +426,7 @@ def get_manual_query(db, filename_path, properties, ingest_mode, new_size):
                     batch_data = []
                 oidx += 1
 
-        # return faces
+        return num_faces
 
     if DEBUG == "1":
         print(
@@ -499,7 +500,7 @@ def get_manual_query(db, filename_path, properties, ingest_mode, new_size):
         int(video_obj.get(cv2.CAP_PROP_FRAME_WIDTH)),
         int(video_obj.get(cv2.CAP_PROP_FRAME_HEIGHT)),
     )
-
+    num_detections = 0
     if ingest_mode == "face":
         while True:
             (grabbed, frame) = video_obj.read()
@@ -512,7 +513,7 @@ def get_manual_query(db, filename_path, properties, ingest_mode, new_size):
 
             # results = face_detection(frame, H, W)
             # asyncio.run(update_face_metadata(results, frameNum))
-            face_detection(frame, frameNum, H, W, frame_exist)
+            num_detections += face_detection(frame, frameNum, H, W, frame_exist)
 
         if batch_data != []:
             # RUN QUERY
@@ -634,13 +635,22 @@ def get_manual_query(db, filename_path, properties, ingest_mode, new_size):
             stream=True,
         )
         for result in results:
-            pass
+            num_detections += 1
 
     video_obj.release()
     if DEBUG == "1":
         print(
             f"[TIMING],end_{ingest_mode}_metadata_extraction,{filename},"
             + str(time.time()),
+            flush=True,
+        )
+
+        print(
+            f"[TIMING],end_manual_metadata,{filename}," + str(time.time()), flush=True
+        )
+
+        print(
+            f"[METADATA_INFO],{filename},{ingest_mode},{num_detections},{W},{H}",
             flush=True,
         )
 
