@@ -28,6 +28,7 @@ else:
 
 device_input = DEVICE.lower() if DEVICE == "CPU" else 0
 batch_data = []
+num_detections = 0
 yolo_path = Path(
     f"{base_resource_dir}/models/ultralytics/{model_name}/{model_precision_object}"
 )
@@ -273,7 +274,7 @@ def get_manual_query(db, filename_path, properties, ingest_mode, new_size):
     Run object detection
     Insert data into VDMS using callback
     """
-    global batch_data
+    global batch_data, num_detections
     W, H = new_size
     filename = properties["server_filepath"]
     dn_name = filename.split("__")[0]
@@ -532,7 +533,7 @@ def get_manual_query(db, filename_path, properties, ingest_mode, new_size):
         )
 
         def extract_metadata(predictor):
-            global batch_data
+            global batch_data, num_detections
             # all_objects = []
             # all_object_dicts = []
             all_frame_nums = []
@@ -588,6 +589,7 @@ def get_manual_query(db, filename_path, properties, ingest_mode, new_size):
                             print(f"[METADATA],{meta_str}", flush=True)
 
                         batch_data.append({"frameId": framenum_str, "bbox": tdict})
+                        num_detections += 1
                         if len(batch_data) == METADATA_BATCH_SIZE:
                             # RUN INSERT QUERY
                             insert_bb_data(
@@ -635,7 +637,8 @@ def get_manual_query(db, filename_path, properties, ingest_mode, new_size):
             stream=True,
         )
         for result in results:
-            num_detections += 1
+            # num_detections += 1
+            pass
 
     video_obj.release()
     if DEBUG == "1":
