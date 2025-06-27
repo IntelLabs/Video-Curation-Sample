@@ -306,14 +306,20 @@ def run(ipfilename, format, options, tmp_dir_path):
             + str(time.time()),
             flush=True,
         )
-
-    metadata = dict(sorted(METADATA.items(), key=lambda item: item[0], reverse=False))
+    print(f"[UDF METADATA FILE (presort metadata)]: {METADATA}")
+    metadata = dict(
+        sorted(
+            METADATA.items(), key=lambda item: int(item[0].split("_")[0]), reverse=False
+        )
+    )
+    print(f"[UDF METADATA FILE (postsort metadata)]: {metadata}")
 
     response = {"opFile": ipfilename, "metadata": metadata}
 
     jsonfile = "jsonfile" + uuid.uuid1().hex + ".json"
     with open(jsonfile, "w") as f:
         json.dump(response, f, indent=4)
+    print(f"[UDF METADATA FILE (response)]: {response}")
 
     if DEBUG == "1":
         num_detections = len(metadata.keys())

@@ -165,7 +165,7 @@ def get_video_details(filename_path):
 def sort_files_in_directory_by_size(in_dir):
     all_files = []
     for filename in os.listdir(in_dir):
-        if filename.endswith(".mp4") and filename.startswith("video"):
+        if filename.endswith(".mp4"):  # and filename.startswith("video"):
             filename_path = os.path.join(video_store_dir, filename)
             if os.path.isfile(filename_path):
                 file_size = os.path.getsize(filename_path)

@@ -196,7 +196,8 @@ def video_api():
         except Exception as e:
             print("Error in file read:", str(e), file=sys.stderr)
             return "Error in file read"
-    except Exception:
+    except Exception as e2:
+        print("Internal error occurred:", str(e2), file=sys.stderr)
         return "An internal error has occurred. Please try again later."
 
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# TODO: FFMpeg vs opencv splitting
+
 import os
 import shlex
 import subprocess
@@ -7,7 +9,7 @@ import sys
 
 time_segment_s = 10  # segment every 10 secs
 time_segment_half = time_segment_s / 2  # forces a keyframe at t=5,10,15 seconds.
-FPS = 20  # 15, 20, 30
+FPS = 10  # 15, 20, 30
 
 GENERAL_OPTS = f"-flags -global_header -hide_banner -loglevel error -nostats -tune zerolatency -threads 1 -filter:v fps={FPS} -flush_packets 0"
 VIDEO_OPTS = "-f mpegts -movflags faststart -crf 28"  # -vcodec libx264   -s 640x360
