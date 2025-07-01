@@ -295,6 +295,11 @@ def run(ipfilename, format, options, tmp_dir_path):
         json.dump(response, f, indent=4)
 
     if DEBUG == "1":
+        num_detections = len(metadata.keys())
         print(f"[TIMING],end_udf_metadata,{ipfilename}," + str(time.time()), flush=True)
+
+        print(
+            f"[METADATA_INFO],{ipfilename},{otype},{num_detections},{W},{H}", flush=True
+        )
 
     return ipfilename, jsonfile

@@ -1181,7 +1181,11 @@ void Video::SyncRemoteOperation::operator()(Video *video, cv::Mat &frame,
           }
           /* ask libcurl to show us the verbose output */
           curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-          curl_easy_perform(curl);
+          curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "deflate, gzip");
+          res = curl_easy_perform(curl);
+          if (res != CURLE_OK) {
+            std::cout << "curl_easy_perform(curl) failed: " << curl_easy_strerror(res) << std::endl;
+          }
           fclose(zip_response_file);
         }
 

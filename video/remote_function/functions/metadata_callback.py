@@ -30,7 +30,8 @@ if DEVICE == "GPU":
     batch_size = 1
 else:
     yolo_path += "_openvino_model/"
-    batch_size = 8
+    # batch_size = 8
+    batch_size = 1
 
 
 """ MODEL DEFINITIONS """
@@ -221,82 +222,91 @@ def run(ipfilename, format, options, tmp_dir_path):
         def extract_metadata(predictor):
             # all_objects = []
             # all_object_dicts = []
-            all_frame_nums = []
-            for bidx, result in enumerate(predictor.results):
-                framenum = int(
-                    predictor.batch[2][bidx].split("frame ")[-1].split("/")[0]
-                )  # Access the frame number
-                all_frame_nums.append(framenum)
-                fH, fW = result.orig_shape
-                boxes = result.boxes.cpu()
-                # objects = []
-                # dicts = []
-                oidx = 0
-                for box in boxes:
-                    confidence = float(box.conf.item())
-                    if confidence > detection_threshold:
-                        class_id = int(box.cls.item())
-                        x1, y1, x2, y2 = box.xyxy.tolist()[0]
-                        height = min(y2, fH) - max(0, y1)
-                        width = min(x2, fW) - max(0, x1)
-                        object_res = [
-                            x1,
-                            y1,
-                            height,
-                            width,
-                            result.names[class_id],
-                            confidence,
-                            fH,
-                            fW,
-                        ]
-                        # print(object_res)
-                        # objects.append(object_res)
+            try:
+                all_frame_nums = []
+                for bidx, result in enumerate(predictor.results):
+                    framenum = int(
+                        predictor.batch[2][bidx].split("frame ")[-1].split("/")[0]
+                    )  # Access the frame number
+                    all_frame_nums.append(framenum)
+                    fH, fW = result.orig_shape
+                    boxes = result.boxes.cpu()
+                    # objects = []
+                    # dicts = []
+                    oidx = 0
+                    for box in boxes:
+                        confidence = float(box.conf.item())
+                        if confidence > detection_threshold:
+                            class_id = int(box.cls.item())
+                            x1, y1, x2, y2 = box.xyxy.tolist()[0]
+                            height = min(y2, fH) - max(0, y1)
+                            width = min(x2, fW) - max(0, x1)
+                            object_res = [
+                                x1,
+                                y1,
+                                height,
+                                width,
+                                result.names[class_id],
+                                confidence,
+                                fH,
+                                fW,
+                            ]
+                            # print(object_res)
+                            # objects.append(object_res)
 
-                        tdict = {
-                            "x": int(object_res[0]),
-                            "y": int(object_res[1]),
-                            "height": int(object_res[2]),
-                            "width": int(object_res[3]),
-                            "object": str(object_res[4]),
-                            "object_det": {
-                                "confidence": float(object_res[5]),
-                                "frameH": int(fH),
-                                "frameW": int(fW),
-                            },
-                        }
+                            tdict = {
+                                "x": int(object_res[0]),
+                                "y": int(object_res[1]),
+                                "height": int(object_res[2]),
+                                "width": int(object_res[3]),
+                                "object": str(object_res[4]),
+                                "object_det": {
+                                    "confidence": float(object_res[5]),
+                                    "frameH": int(fH),
+                                    "frameW": int(fW),
+                                },
+                            }
 
-                        framenum_str = f"{framenum}_{oidx}"
-                        if DEBUG == "1":
-                            meta_str = ",".join(
-                                [str(o) for o in object_res + [framenum_str]]
-                            )
-                            print(f"[METADATA],{meta_str}", flush=True)
+                            framenum_str = f"{framenum}_{oidx}"
+                            if DEBUG == "1":
+                                meta_str = ",".join(
+                                    [str(o) for o in object_res + [framenum_str]]
+                                )
+                                print(f"[METADATA],{meta_str}", flush=True)
 
-                        METADATA[framenum_str] = {"frameId": framenum, "bbox": tdict}
-                        oidx += 1
-                #         dicts.append(tdict)
-                # all_objects.append(objects)
-                # all_object_dicts.append(dicts)
+                            METADATA[framenum_str] = {
+                                "frameId": framenum,
+                                "bbox": tdict,
+                            }
+                            oidx += 1
+                    #         dicts.append(tdict)
+                    # all_objects.append(objects)
+                    # all_object_dicts.append(dicts)
+            except Exception as e:
+                print(f"Error in extract_metadata: {e}")
 
         object_detection_model.add_callback(
             "on_predict_postprocess_end", extract_metadata
         )
-        results = object_detection_model.predict(
-            ipfilename,
-            imgsz=(H, W),
-            batch=batch_size,
-            conf=detection_threshold,
-            iou=iou_threshold,
-            half=half_flag,
-            device=device_input,
-            project=None,
-            name=None,
-            verbose=False,
-            save=False,
-            stream=True,
-        )
-        for result in results:
-            pass
+        try:
+            results = object_detection_model.predict(
+                ipfilename,
+                imgsz=(H, W),
+                batch=batch_size,
+                conf=detection_threshold,
+                iou=iou_threshold,
+                half=half_flag,
+                device=device_input,
+                project=None,
+                name=None,
+                verbose=False,
+                save=False,
+                stream=True,
+            )
+            for result in results:
+                pass
+        except Exception as e:
+            print(f"Error in YOLO prediction: {e}")
 
     video_obj.release()
     if DEBUG == "1":

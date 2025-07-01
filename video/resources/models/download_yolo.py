@@ -11,7 +11,8 @@ DEVICE = os.environ.get("DEVICE", "CPU")
 if DEVICE == "GPU":
     batch_size = 1
 else:
-    batch_size = 8
+    # batch_size = 8
+    batch_size = 1
 
 
 def get_model(model_dir, run_platform, device_input, batch=1):
