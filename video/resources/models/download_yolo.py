@@ -51,7 +51,7 @@ def get_model(model_dir, run_platform, device_input, batch=1):
         )
         # pt_detection_model.export(format='engine')  # Rohit
 
-        final_model_path = f"{model_dir}/{model_name}n.engine/"
+        final_model_path = f"{model_dir}/{model_name}n.engine"
         object_detection_model = YOLO(
             final_model_path,
             verbose=False,
