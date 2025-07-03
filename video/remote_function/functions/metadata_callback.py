@@ -153,7 +153,7 @@ def run(ipfilename, format, options, tmp_dir_path):
     METADATA = dict()
     W, H = options["input_sizeWH"]
 
-    async def update_face_metadata(results, framenum):
+    async def update_face_metadata(results, frameNum):
         for oidx, face in enumerate(results):
             tdict = {
                 "x": int(face[0]),
@@ -170,12 +170,12 @@ def run(ipfilename, format, options, tmp_dir_path):
                     "frameW": int(W),
                 },
             }
-            framenum_str = f"{framenum}_{oidx}"
+            framenum_str = f"{frameNum}_{oidx}"
             if DEBUG == "1":
                 meta_str = ",".join([str(o) for o in face + [framenum_str]])
                 print(f"[METADATA],{meta_str}", flush=True)
 
-            METADATA[framenum_str] = {"frameId": framenum, "bbox": tdict}
+            METADATA[framenum_str] = {"frameId": frameNum, "bbox": tdict}
 
     if DEBUG == "1":
         print(
@@ -225,10 +225,10 @@ def run(ipfilename, format, options, tmp_dir_path):
             try:
                 all_frame_nums = []
                 for bidx, result in enumerate(predictor.results):
-                    framenum = int(
+                    frameNum = int(
                         predictor.batch[2][bidx].split("frame ")[-1].split("/")[0]
                     )  # Access the frame number
-                    all_frame_nums.append(framenum)
+                    all_frame_nums.append(frameNum)
                     fH, fW = result.orig_shape
                     boxes = result.boxes.cpu()
                     # objects = []
@@ -267,7 +267,7 @@ def run(ipfilename, format, options, tmp_dir_path):
                                 },
                             }
 
-                            framenum_str = f"{framenum}_{oidx}"
+                            framenum_str = f"{frameNum}_{oidx}"
                             if DEBUG == "1":
                                 meta_str = ",".join(
                                     [str(o) for o in object_res + [framenum_str]]
@@ -275,7 +275,7 @@ def run(ipfilename, format, options, tmp_dir_path):
                                 print(f"[METADATA],{meta_str}", flush=True)
 
                             METADATA[framenum_str] = {
-                                "frameId": framenum,
+                                "frameId": frameNum,
                                 "bbox": tdict,
                             }
                             oidx += 1

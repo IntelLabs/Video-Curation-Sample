@@ -25,7 +25,7 @@ device_input = DEVICE.lower() if DEVICE == "CPU" else 0
 yolo_path = f"/home/resources/models/ultralytics/{model_name}/{model_precision_object}/{model_name}n"
 
 if DEVICE == "GPU":
-    yolo_path += ".engine/"
+    yolo_path += ".engine"
     batch_size = 1
 else:
     yolo_path += "_openvino_model/"
@@ -257,24 +257,29 @@ def run(ipfilename, format, options, tmp_dir_path):
         elif frame is not None:
             # object detection
             objects = yolo_object_detection(frame, H, W)
-            for object in objects:
+            for oidx, object_res in enumerate(objects):
                 tdict = {
-                    "x": int(object[0]),
-                    "y": int(object[1]),
-                    "height": int(object[2]),
-                    "width": int(object[3]),
-                    "object": str(object[4]),
+                    "x": int(object_res[0]),
+                    "y": int(object_res[1]),
+                    "height": int(object_res[2]),
+                    "width": int(object_res[3]),
+                    "object": str(object_res[4]),
                     "object_det": {
-                        "confidence": float(object[5]),
+                        "confidence": float(object_res[5]),
                         "frameH": H,  # int(object[6]),
                         "frameW": W,  # int(object[7]),
                     },
                 }
 
-                METADATA[frameNum] = {"frameId": frameNum, "bbox": tdict}
+                framenum_str = f"{frameNum}_{oidx}"
                 if DEBUG == "1":
-                    meta_str = ",".join([str(o) for o in object])
+                    meta_str = ",".join([str(o) for o in object_res + [framenum_str]])
                     print(f"[METADATA],{meta_str}", flush=True)
+
+                METADATA[framenum_str] = {
+                    "frameId": frameNum,
+                    "bbox": tdict,
+                }
 
     video_obj.release()
 
