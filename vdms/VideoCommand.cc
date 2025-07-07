@@ -254,21 +254,11 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
         frame_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
         frame_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
         frame_props["server_filepath"] = props["Name"].asString();
-        frame_props["fps"] = props["fps"].asFloat();
-        frame_props["duration"] = props["duration"].asFloat();
-        frame_props["width"] = props["width"].asFloat();
-        frame_props["height"] = props["height"].asFloat();
-        frame_props["frame_count"] = props["frame_count"].asInt();
 
         Json::Value edge_props;
         edge_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
         edge_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
         edge_props["server_filepath"] = props["Name"].asString();
-        edge_props["fps"] = props["fps"].asFloat();
-        edge_props["duration"] = props["duration"].asFloat();
-        edge_props["width"] = props["width"].asFloat();
-        edge_props["height"] = props["height"].asFloat();
-        edge_props["frame_count"] = props["frame_count"].asInt();
 
         if (!frame_flag) {
           query.AddNode(frame_ref, VDMS_DM_VID_TAG, frame_props, Json::Value());
@@ -280,11 +270,6 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
           Json::Value bbox_props;
           bbox_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
           bbox_props["server_filepath"] = props["Name"].asString();
-          bbox_props["fps"] = props["fps"].asFloat();
-          bbox_props["duration"] = props["duration"].asFloat();
-          bbox_props["width"] = props["width"].asFloat();
-          bbox_props["height"] = props["height"].asFloat();
-          bbox_props["frame_count"] = props["frame_count"].asInt();
           bbox_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
           // bbox_props[VDMS_DM_VID_OBJECT_PROP] =
           //     vframe["bbox"]["object"].asString();
@@ -320,11 +305,6 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
           bb_edge_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
           bb_edge_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
           bb_edge_props["server_filepath"] = props["Name"].asString();
-          bb_edge_props["fps"] = props["fps"].asFloat();
-          bb_edge_props["duration"] = props["duration"].asFloat();
-          bb_edge_props["width"] = props["width"].asFloat();
-          bb_edge_props["height"] = props["height"].asFloat();
-          bb_edge_props["frame_count"] = props["frame_count"].asInt();
 
           query.AddNode(bb_ref, VDMS_ROI_TAG, bbox_props, Json::Value());
           query.AddEdge(-1, frame_ref, bb_ref, VDMS_DM_VID_BB_EDGE,
@@ -425,11 +405,6 @@ int FindVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     results["list"].append(VDMS_DM_VID_NAME_PROP);
     results["list"].append(VDMS_DM_VID_IDX_PROP);
     results["list"].append("server_filepath");
-    results["list"].append("fps");
-    results["list"].append("duration");
-    results["list"].append("width");
-    results["list"].append("height");
-    results["list"].append("frame_count");
 
     for (auto member : cmd["metaconstraints"].getMemberNames()) {
       results["list"].append(member);
@@ -455,15 +430,7 @@ int FindVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     results["list"].append(VDMS_DM_VID_NAME_PROP);
     results["list"].append(VDMS_DM_VID_IDX_PROP);
     results["list"].append("server_filepath");
-    results["list"].append("fps");
-    results["list"].append("duration");
-    results["list"].append("width");
-    results["list"].append("height");
-    results["list"].append("frame_count");
 
-    // for (auto member : cmd["frameconstraints"].getMemberNames()) {
-    //   results["list"].append(member);
-    // }
 
     query.QueryNode(get_value<int>(cmd, "_ref", -1), VDMS_DM_VID_TAG,
                     cmd["link"], cmd["frameconstraints"], results,

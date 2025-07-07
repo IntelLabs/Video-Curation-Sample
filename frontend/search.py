@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, unquote
 
 from merge_iv import merge_iv
+from requests import get
 from tornado import gen, web
 from tornado.concurrent import run_on_executor
 
@@ -164,150 +165,179 @@ class SearchHandler(web.RequestHandler):
 
     def _decode_response(self, response):
         clips = {}
-        if len(response) % 3 != 0:
-            segs = []
-            for i in range(0, len(response), 1):
-                if (
-                    "FindVideo" in response[i]
-                    and response[i]["FindVideo"]["status"] == 0
-                ):
-                    entities = response[i]["FindVideo"]["entities"]
-                    print(entities)
+        # if len(response) % 3 != 0:
+        #     segs = []
+        #     for i in range(0, len(response), 1):
+        #         if (
+        #             "FindVideo" in response[i]
+        #             and response[i]["FindVideo"]["status"] == 0
+        #         ):
+        #             entities = response[i]["FindVideo"]["entities"]
+        #             print(entities)
 
-                    for ent in entities:
-                        name = ent["Name"]
-                        duration = ent["duration"]
-                        seg1c = {
-                            "name": name,
-                            "stream": quote(
-                                "/api/segment/0/" + str(duration) + "/" + name
-                            ),
-                            "thumbnail": quote("/api/thumbnail/0/" + name + ".png"),
-                            "fps": ent["fps"],
-                            "time": 0,
-                            "duration": duration,
-                            "offset": 0,
-                            "width": ent["width"],
-                            "height": ent["height"],
-                            "frames": [x for x in range(0, ent["frame_count"])],
+        #             for ent in entities:
+        #                 name = ent["Name"]
+        #                 duration = ent["duration"]
+        #                 seg1c = {
+        #                     "name": name,
+        #                     "stream": quote(
+        #                         "/api/segment/0/" + str(duration) + "/" + name
+        #                     ),
+        #                     "thumbnail": quote("/api/thumbnail/0/" + name + ".png"),
+        #                     "fps": ent["fps"],
+        #                     "time": 0,
+        #                     "duration": duration,
+        #                     "offset": 0,
+        #                     "width": ent["width"],
+        #                     "height": ent["height"],
+        #                     "frames": [x for x in range(0, ent["frame_count"])],
+        #                 }
+        #                 segs.append(seg1c)
+
+        # else:
+        for i in range(0, len(response), 3):
+            if (
+                "FindVideo" in response[i]
+                and response[i]["FindVideo"]["status"] == 0
+                # and response[i + 2]["FindVideo"]["status"] == 0
+                and response[i + 2]["FindBoundingBox"]["status"] == 0
+                # and "entities" in response[i + 2]["FindVideo"]
+                and "entities" in response[i + 2]["FindBoundingBox"]
+            ):
+                # entities = response[i + 2]["FindVideo"]["entities"]
+                entities = response[i + 2]["FindBoundingBox"]["entities"]
+                print(entities)
+                # for j in range(0, len(entities)):
+                # for ent_bbox in entities[j]["bbox"]:
+                for ent_bbox in entities:
+                    stream = ent_bbox["server_filepath"]
+                    if stream not in clips:
+                        r = get(vdhost + "/api/info", params={"video": stream}).json()
+                        # clips[stream] = {
+                        #     "fps": ent_bbox["fps"],
+                        #     "duration": ent_bbox["duration"],
+                        #     "width": ent_bbox["width"],
+                        #     "height": ent_bbox["height"],
+                        #     "segs": [],
+                        #     "frames": {},
+                        # }
+                        clips[stream] = {
+                            "fps": r["fps"],
+                            "duration": r["duration"],
+                            "width": r["width"],
+                            "height": r["height"],
+                            "segs": [],
+                            "frames": {},
                         }
-                        segs.append(seg1c)
 
-        else:
-            for i in range(0, len(response), 3):
-                if (
-                    "FindVideo" in response[i]
-                    and response[i]["FindVideo"]["status"] == 0
-                    # and response[i + 2]["FindVideo"]["status"] == 0
-                    and response[i + 2]["FindBoundingBox"]["status"] == 0
-                    # and "entities" in response[i + 2]["FindVideo"]
-                    and "entities" in response[i + 2]["FindBoundingBox"]
-                ):
-                    # entities = response[i + 2]["FindVideo"]["entities"]
-                    entities = response[i + 2]["FindBoundingBox"]["entities"]
-                    print(entities)
-                    # for j in range(0, len(entities)):
-                    # for ent_bbox in entities[j]["bbox"]:
-                    for ent_bbox in entities:
-                        stream = ent_bbox["server_filepath"]
-                        if stream not in clips:
-                            clips[stream] = {
-                                "fps": ent_bbox["fps"],
-                                "duration": ent_bbox["duration"],
-                                "width": ent_bbox["width"],
-                                "height": ent_bbox["height"],
-                                "segs": [],
-                                "frames": {},
-                            }
+                    # print(
+                    #     "FPS: "
+                    #     + str(r["fps"])
+                    #     + "(r) vs "
+                    #     + str(ent_bbox["fps"])
+                    #     + "(ent)"
+                    # )
+                    # print(
+                    #     "duration: "
+                    #     + str(r["duration"])
+                    #     + "(r) vs "
+                    #     + str(ent_bbox["duration"])
+                    #     + "(ent)"
+                    # )
+                    # print(
+                    #     "width: "
+                    #     + str(r["width"])
+                    #     + "(r) vs "
+                    #     + str(ent_bbox["width"])
+                    #     + "(ent)"
+                    # )
+                    # print(
+                    #     "height: "
+                    #     + str(r["height"])
+                    #     + "(r) vs "
+                    #     + str(ent_bbox["height"])
+                    #     + "(ent)"
+                    # )
 
-                        # time stamp and duration
-                        stream1 = clips[stream]
-                        ts = float(ent_bbox["frameID"]) / stream1["fps"]
+                    # time stamp and duration
+                    stream1 = clips[stream]
+                    ts = float(ent_bbox["frameID"]) / stream1["fps"]
 
-                        # merge segs
-                        segmin = 1  # 1, 2
-                        seg1 = [
-                            max(ts - segmin, 0),
-                            min(ts + segmin, stream1["duration"]),
-                        ]
-                        stream1["segs"] = merge_iv(stream1["segs"], seg1)
+                    # merge segs
+                    segmin = 1  # 1, 2
+                    seg1 = [
+                        max(ts - segmin, 0),
+                        min(ts + segmin, stream1["duration"]),
+                    ]
+                    stream1["segs"] = merge_iv(stream1["segs"], seg1)
 
-                        if ts not in stream1["frames"]:
-                            stream1["frames"][ts] = {"time": ts, "objects": []}
+                    if ts not in stream1["frames"]:
+                        stream1["frames"][ts] = {"time": ts, "objects": []}
 
-                        if "objectID" in ent_bbox:
-                            bbc = {
-                                "x": ent_bbox["VD:x1"],
-                                "y": ent_bbox["VD:y1"],
-                                "w": ent_bbox["VD:width"],
-                                "h": ent_bbox["VD:height"],
-                            }
+                    if "objectID" in ent_bbox:
+                        bbc = {
+                            "x": ent_bbox["VD:x1"],
+                            "y": ent_bbox["VD:y1"],
+                            "w": ent_bbox["VD:width"],
+                            "h": ent_bbox["VD:height"],
+                        }
 
-                            # Normalize BBs to frame size
-                            frameW = (
-                                ent_bbox["frameW"]
-                                if not isinstance(ent_bbox["frameW"], str)
-                                else ent_bbox["width"]
-                            )
-                            frameH = (
-                                ent_bbox["frameH"]
-                                if not isinstance(ent_bbox["frameH"], str)
-                                else ent_bbox["height"]
-                            )
+                        # Normalize BBs to frame size
+                        frameW = (
+                            ent_bbox["frameW"]
+                            if not isinstance(ent_bbox["frameW"], str)
+                            else stream1["width"]
+                        )
+                        frameH = (
+                            ent_bbox["frameH"]
+                            if not isinstance(ent_bbox["frameH"], str)
+                            else stream1["height"]
+                        )
 
-                            obj = {
-                                "detection": {
-                                    "bounding_box": {
-                                        "x_max": float(bbc["w"] + bbc["x"])
-                                        / float(frameW),
-                                        "x_min": float(bbc["x"]) / float(frameW),
-                                        "y_max": float(bbc["h"] + bbc["y"])
-                                        / float(frameH),
-                                        "y_min": float(bbc["y"]) / float(frameH),
-                                    },
-                                    "label": ent_bbox["objectID"],
+                        obj = {
+                            "detection": {
+                                "bounding_box": {
+                                    "x_max": float(bbc["w"] + bbc["x"]) / float(frameW),
+                                    "x_min": float(bbc["x"]) / float(frameW),
+                                    "y_max": float(bbc["h"] + bbc["y"]) / float(frameH),
+                                    "y_min": float(bbc["y"]) / float(frameH),
                                 },
-                            }
-                            if "confidence" in ent_bbox:
-                                obj["detection"]["confidence"] = ent_bbox["confidence"]
-                            stream1["frames"][ts]["objects"].append(obj)
+                                "label": ent_bbox["objectID"],
+                            },
+                        }
+                        if "confidence" in ent_bbox:
+                            obj["detection"]["confidence"] = ent_bbox["confidence"]
+                        stream1["frames"][ts]["objects"].append(obj)
 
-            print("clips:", flush=True)
-            print(clips, flush=True)
+        print("clips:", flush=True)
+        print(clips, flush=True)
 
-            # create segments
-            segs = []
-            for name in clips:
-                stream1 = clips[name]
-                for seg1 in stream1["segs"]:
-                    seg1c = {  # var "data" used in playback.js
-                        "name": name,
-                        "stream": quote(
-                            "/api/segment/"
-                            + str(seg1[0])
-                            + "/"
-                            + str(seg1[1])
-                            + "/"
-                            + name
-                        ),
-                        "thumbnail": quote(
-                            "/api/thumbnail/" + str(seg1[0]) + "/" + name + ".png"
-                        ),
-                        "fps": stream1["fps"],
-                        "time": seg1[0],
-                        "duration": seg1[1] - seg1[0],
-                        "offset": 0,
-                        "width": stream1["width"],
-                        "height": stream1["height"],
-                        "frames": [],
-                    }
-                    for ts in stream1["frames"]:
-                        if ts >= seg1[0] and ts <= seg1[1]:
-                            stream1["frames"][ts].update(
-                                {"time": (ts - seg1[0]) * 1000}
-                            )
-                            seg1c["frames"].append(stream1["frames"][ts])
-                    segs.append(seg1c)
+        # create segments
+        segs = []
+        for name in clips:
+            stream1 = clips[name]
+            for seg1 in stream1["segs"]:
+                seg1c = {  # var "data" used in playback.js
+                    "name": name,
+                    "stream": quote(
+                        "/api/segment/" + str(seg1[0]) + "/" + str(seg1[1]) + "/" + name
+                    ),
+                    "thumbnail": quote(
+                        "/api/thumbnail/" + str(seg1[0]) + "/" + name + ".png"
+                    ),
+                    "fps": stream1["fps"],
+                    "time": seg1[0],
+                    "duration": seg1[1] - seg1[0],
+                    "offset": 0,
+                    "width": stream1["width"],
+                    "height": stream1["height"],
+                    "frames": [],
+                }
+                for ts in stream1["frames"]:
+                    if ts >= seg1[0] and ts <= seg1[1]:
+                        stream1["frames"][ts].update({"time": (ts - seg1[0]) * 1000})
+                        seg1c["frames"].append(stream1["frames"][ts])
+                segs.append(seg1c)
 
         print("segs:", flush=True)
         print(segs, flush=True)
