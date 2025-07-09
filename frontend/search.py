@@ -49,8 +49,6 @@ class SearchHandler(web.RequestHandler):
                 "constraints": {
                     "category": ["==", "video_path_rop"],
                 },
-                # "results": {"list": ['video_name', "video_filename"]},
-                # "results": {"list": ["fps", "duration", "width", "height"]}
             }
         }
         q_vid2 = {
@@ -61,36 +59,12 @@ class SearchHandler(web.RequestHandler):
                 "link": {"ref": ref},
             }
         }
-
-        # q_frame = {
-        #     "FindVideo": {
-        #         # "metaconstraints" : {
-        #         #     # "objectID" : ["==", "car"],
-        #         #     "objectID" : ["==", "face"],
-        #         #     "emotion" : ["==", "happy"],
-        #         # },
-        #         "link": {"ref": ref + 1},
-        #         # "operations": [
-        #         #     {
-        #         #         "type": "remoteOp",
-        #         #         "url": "http://video-service:5011/video",
-        #         #         "options": {
-        #         #             "id": "framesofinterest",
-        #         #         },
-        #         #     }
-        #         # ],
-        #     }
-        # }
         q_frame = {
             "FindBoundingBox": {
                 "link": {"ref": ref + 1},
                 "results": {
                     "list": [
                         "objectID",
-                        "fps",
-                        "duration",
-                        "width",
-                        "height",
                         "server_filepath",
                         "frameID",
                         "VD:x1",
@@ -136,7 +110,6 @@ class SearchHandler(web.RequestHandler):
         metaconstraints = {}
         if query1["name"] == "object":
             metaconstraints["objectID"] = ["==", self._value(query1, "Object List")]
-            # q_frame["FindVideo"].update({"metaconstraints": metaconstraints})
             q_frame["FindBoundingBox"].update({"constraints": metaconstraints})
 
         if query1["name"] == "person":
@@ -156,8 +129,6 @@ class SearchHandler(web.RequestHandler):
             if gender != "skip":
                 metaconstraints["gender"] = ["==", gender]
 
-            # if len(metaconstraints) > 0:
-            #     q_frame["FindVideo"].update({"metaconstraints": metaconstraints})
             if len(metaconstraints) > 0:
                 q_frame["FindBoundingBox"].update({"constraints": metaconstraints})
 
@@ -165,36 +136,6 @@ class SearchHandler(web.RequestHandler):
 
     def _decode_response(self, response):
         clips = {}
-        # if len(response) % 3 != 0:
-        #     segs = []
-        #     for i in range(0, len(response), 1):
-        #         if (
-        #             "FindVideo" in response[i]
-        #             and response[i]["FindVideo"]["status"] == 0
-        #         ):
-        #             entities = response[i]["FindVideo"]["entities"]
-        #             print(entities)
-
-        #             for ent in entities:
-        #                 name = ent["Name"]
-        #                 duration = ent["duration"]
-        #                 seg1c = {
-        #                     "name": name,
-        #                     "stream": quote(
-        #                         "/api/segment/0/" + str(duration) + "/" + name
-        #                     ),
-        #                     "thumbnail": quote("/api/thumbnail/0/" + name + ".png"),
-        #                     "fps": ent["fps"],
-        #                     "time": 0,
-        #                     "duration": duration,
-        #                     "offset": 0,
-        #                     "width": ent["width"],
-        #                     "height": ent["height"],
-        #                     "frames": [x for x in range(0, ent["frame_count"])],
-        #                 }
-        #                 segs.append(seg1c)
-
-        # else:
         for i in range(0, len(response), 3):
             if (
                 "FindVideo" in response[i]
@@ -213,14 +154,6 @@ class SearchHandler(web.RequestHandler):
                     stream = ent_bbox["server_filepath"]
                     if stream not in clips:
                         r = get(vdhost + "/api/info", params={"video": stream}).json()
-                        # clips[stream] = {
-                        #     "fps": ent_bbox["fps"],
-                        #     "duration": ent_bbox["duration"],
-                        #     "width": ent_bbox["width"],
-                        #     "height": ent_bbox["height"],
-                        #     "segs": [],
-                        #     "frames": {},
-                        # }
                         clips[stream] = {
                             "fps": r["fps"],
                             "duration": r["duration"],
@@ -229,35 +162,6 @@ class SearchHandler(web.RequestHandler):
                             "segs": [],
                             "frames": {},
                         }
-
-                    # print(
-                    #     "FPS: "
-                    #     + str(r["fps"])
-                    #     + "(r) vs "
-                    #     + str(ent_bbox["fps"])
-                    #     + "(ent)"
-                    # )
-                    # print(
-                    #     "duration: "
-                    #     + str(r["duration"])
-                    #     + "(r) vs "
-                    #     + str(ent_bbox["duration"])
-                    #     + "(ent)"
-                    # )
-                    # print(
-                    #     "width: "
-                    #     + str(r["width"])
-                    #     + "(r) vs "
-                    #     + str(ent_bbox["width"])
-                    #     + "(ent)"
-                    # )
-                    # print(
-                    #     "height: "
-                    #     + str(r["height"])
-                    #     + "(r) vs "
-                    #     + str(ent_bbox["height"])
-                    #     + "(ent)"
-                    # )
 
                     # time stamp and duration
                     stream1 = clips[stream]
