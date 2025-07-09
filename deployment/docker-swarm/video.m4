@@ -18,6 +18,9 @@ define(`PROFILE_GPU', `depends_on:
             SHOST: "http://stream-service:8080"
             ZKHOST: "zookeeper-service:2181"
             DBHOST: "vdms-service"
+            `RESIZE_FLAG': "defn(`RESIZE_FLAG')"
+            CPU_BATCH_SIZE: 1
+            GPU_BATCH_SIZE: 1
             `DEBUG': "defn(`DEBUG')"
             `DEVICE': "defn(`DEVICE')"
             `IN_SOURCE': "defn(`IN_SOURCE')"

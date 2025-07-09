@@ -13,6 +13,7 @@ DEVICE="$8"
 DEBUG="$9"
 DOCKER_TAR="${10}"
 DOCKER_TAR_DIR="${11}"
+RESIZE_FLAG="${12}"
 USER="docker"
 GROUP="docker"
 
@@ -35,7 +36,12 @@ build_docker() {
             docker load -i ${DOCKER_TAR_DIR}/lcc_certificate_stream.tar
         fi
 
-        (cd "$DIR"; docker build --network host --file="$docker_file" "$@" -t "$image_name" "$DIR" $(env | cut -f1 -d= | grep -E '_(proxy|REPO|VER)$' | sed 's/^/--build-arg /') --build-arg USER=${USER} --build-arg GROUP=${GROUP} --build-arg UID=$(id -u) --build-arg GID=$(id -g) --build-arg DEVICE=${DEVICE} --build-arg IN_SOURCE=${IN_SOURCE} --build-arg DEBUG=${DEBUG})
+        (cd "$DIR"; docker build --network host --file="$docker_file" "$@" -t "$image_name" "$DIR" $(env | cut -f1 -d= | grep -E '_(proxy|REPO|VER)$' | sed 's/^/--build-arg /') --build-arg USER=${USER} --build-arg GROUP=${GROUP} --build-arg UID=$(id -u) --build-arg GID=$(id -g) --build-arg DEVICE=${DEVICE} --build-arg IN_SOURCE=${IN_SOURCE} --build-arg DEBUG=${DEBUG} --build-arg RESIZE_FLAG=${RESIZE_FLAG})
+        # if [[ "${image_name}" == *"_video"* ]]; then
+        #     (cd "$DIR"; docker build --no-cache --network host --file="$docker_file" "$@" -t "$image_name" "$DIR" $(env | cut -f1 -d= | grep -E '_(proxy|REPO|VER)$' | sed 's/^/--build-arg /') --build-arg USER=${USER} --build-arg GROUP=${GROUP} --build-arg UID=$(id -u) --build-arg GID=$(id -g) --build-arg DEVICE=${DEVICE} --build-arg IN_SOURCE=${IN_SOURCE} --build-arg DEBUG=${DEBUG} --build-arg RESIZE_FLAG=${RESIZE_FLAG})
+        # else
+        #     (cd "$DIR"; docker build --network host --file="$docker_file" "$@" -t "$image_name" "$DIR" $(env | cut -f1 -d= | grep -E '_(proxy|REPO|VER)$' | sed 's/^/--build-arg /') --build-arg USER=${USER} --build-arg GROUP=${GROUP} --build-arg UID=$(id -u) --build-arg GID=$(id -g) --build-arg DEVICE=${DEVICE} --build-arg IN_SOURCE=${IN_SOURCE} --build-arg DEBUG=${DEBUG} --build-arg RESIZE_FLAG=${RESIZE_FLAG})
+        # fi
     else
         tar_name="${image_name/:/_}"
         if [[ "${tar_name}" == *"_video_"* ]]; then

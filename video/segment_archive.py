@@ -7,12 +7,29 @@ import shlex
 import subprocess
 import sys
 
+
+def str2bool(in_val):
+    if isinstance(in_val, bool):
+        return in_val
+
+    if not isinstance(in_val, str):
+        raise ValueError(f"{in_val} is not a bool or string")
+
+    if in_val.title() == "True":
+        return True
+    else:
+        return False
+
+
 time_segment_s = 10  # segment every 10 secs
 time_segment_half = time_segment_s / 2  # forces a keyframe at t=5,10,15 seconds.
 FPS = 10  # 15, 20, 30
+resize_input = str2bool(os.getenv("RESIZE_FLAG", False))
 
 GENERAL_OPTS = f"-flags -global_header -hide_banner -loglevel error -nostats -tune zerolatency -threads 1 -filter:v fps={FPS} -flush_packets 0"
 VIDEO_OPTS = "-f mpegts -movflags faststart -crf 28"  # -vcodec libx264   -s 640x360
+if resize_input:
+    VIDEO_OPTS += " -s 640x640"
 
 
 def main(watch_folder="/var/www/mp4"):

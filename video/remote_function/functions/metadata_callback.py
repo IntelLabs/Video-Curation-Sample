@@ -27,11 +27,10 @@ yolo_path = f"/home/resources/models/ultralytics/{model_name}/{model_precision_o
 
 if DEVICE == "GPU":
     yolo_path += ".engine"
-    batch_size = 1
+    batch_size = int(os.environ.get("GPU_BATCH_SIZE", 1))
 else:
     yolo_path += "_openvino_model/"
-    # batch_size = 8
-    batch_size = 1
+    batch_size = int(os.environ.get("CPU_BATCH_SIZE", 1))  # 8
 
 
 """ MODEL DEFINITIONS """

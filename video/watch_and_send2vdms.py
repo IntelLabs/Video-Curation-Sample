@@ -11,6 +11,7 @@ from pathlib import Path
 from shutil import copyfile
 
 from inotify.adapters import Inotify
+from segment_archive import str2bool
 from ultralytics.utils.checks import check_imgsz
 
 import vdms
@@ -34,10 +35,10 @@ dbhost = "vdms-service"  # os.environ["DBHOST"]
 dbport = 55555
 ingestion = os.environ["INGESTION"]
 in_source = os.environ["IN_SOURCE"]
+resize_input = str2bool(os.getenv("RESIZE_FLAG", False))
 DEBUG = os.environ["DEBUG"]
 # video_store_dir = "/home/resources"
 video_store_dir = "/var/www/mp4"
-resize_input = False
 model_w, model_h = (640, 640)
 dbs = {}
 
