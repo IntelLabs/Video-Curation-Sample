@@ -169,16 +169,11 @@ class SearchHandler(web.RequestHandler):
                 if (
                     "FindVideo" in response[i]
                     and response[i]["FindVideo"]["status"] == 0
-                    # and response[i + 2]["FindVideo"]["status"] == 0
                     and response[i + 2]["FindBoundingBox"]["status"] == 0
-                    # and "entities" in response[i + 2]["FindVideo"]
                     and "entities" in response[i + 2]["FindBoundingBox"]
                 ):
-                    # entities = response[i + 2]["FindVideo"]["entities"]
                     entities = response[i + 2]["FindBoundingBox"]["entities"]
                     print(entities)
-                    # for j in range(0, len(entities)):
-                    # for ent_bbox in entities[j]["bbox"]:
                     for ent_bbox in entities:
                         stream = ent_bbox["server_filepath"]
                         if stream not in clips:

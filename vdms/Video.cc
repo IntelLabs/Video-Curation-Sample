@@ -1040,7 +1040,7 @@ Json::Value process_response(std::string zip_file_name,
 
   int numFiles = zip_get_num_files(archive);
 
-  const size_t buffer_size=1024;  // 1024
+  const size_t buffer_size=1024;
   for (int i = 0; i < numFiles; ++i) {
     struct zip_stat fileInfo;
     zip_stat_init(&fileInfo);
@@ -1067,12 +1067,7 @@ Json::Value process_response(std::string zip_file_name,
 
           fclose(new_file);
         } else {
-          // char buffer[buffer_size];
           std::string jsonString;  // Accumulates JSON data
-          // int bytes_read;
-          // while ((bytes_read = zip_fread(file, buffer, sizeof(buffer))) > 0) {
-            // jsonString += buffer;
-          // }
           std::vector<char> buffer(buffer_size);
           ssize_t bytes_read;
           while ((bytes_read = zip_fread(file, buffer.data(), buffer_size)) > 0) {
@@ -1081,7 +1076,6 @@ Json::Value process_response(std::string zip_file_name,
 
           Json::Reader reader;
           bool parsingSuccessful = reader.parse(jsonString, metadata);
-
           if (!parsingSuccessful) {
             return metadata;
           }
@@ -1101,7 +1095,6 @@ void Video::SyncRemoteOperation::operator()(Video *video, cv::Mat &frame,
                                             std::string args) {
   try {
     int frame_count = video->get_frame_count(false);
-
     if (frame_count > 0) {
       std::string fname = args;
 
@@ -1216,14 +1209,12 @@ void Video::SyncRemoteOperation::operator()(Video *video, cv::Mat &frame,
           } else if (http_status_code == 503) {
             throw VCLException(ObjectEmpty, "Unable to reach remote server");
           } else {
-            // error 100 - continuing (large request)
             throw VCLException(ObjectEmpty, "Remote Server error.");
           }
         }
 
         Json::Value metadata_response =
             process_response(zip_response_filepath, response_filepath, format);
-        // std::cout << "metadata_response[SyncRemoteOperation:1214]: "  << metadata_response.toStyledString() << std::endl;
         if (!metadata_response.empty()) {
           video->set_ingest_metadata(metadata_response["metadata"]);
         }

@@ -207,9 +207,7 @@ def set_global_exception_handler(app):
     def unhandled_exception(e):
         response = dict()
         error_message = traceback.format_exc()
-        app.logger.error(
-            "Caught Exception: {}".format(error_message)
-        )  # or whatever logger you use
+        app.logger.error("Caught Exception: {}".format(error_message))
         response["errorMessage"] = error_message
         return response, 500
 

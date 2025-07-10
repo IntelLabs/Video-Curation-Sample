@@ -271,15 +271,8 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
           bbox_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
           bbox_props["server_filepath"] = props["Name"].asString();
           bbox_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
-          // bbox_props[VDMS_DM_VID_OBJECT_PROP] =
-          //     vframe["bbox"]["object"].asString();
-          if (vframe["bbox"]["object"].asString().empty()){
-            bbox_props[VDMS_DM_VID_OBJECT_PROP] = "unknown";
-          }
-          else{
-            bbox_props[VDMS_DM_VID_OBJECT_PROP] =
-                vframe["bbox"]["object"].asString();
-          }
+          bbox_props[VDMS_DM_VID_OBJECT_PROP] =
+              vframe["bbox"]["object"].asString();
           bbox_props[VDMS_ROI_COORD_X_PROP] = vframe["bbox"]["x"].asFloat();
           bbox_props[VDMS_ROI_COORD_Y_PROP] = vframe["bbox"]["y"].asFloat();
           bbox_props[VDMS_ROI_WIDTH_PROP] = vframe["bbox"]["width"].asFloat();
@@ -425,7 +418,6 @@ int FindVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     results["list"].append(VDMS_DM_VID_NAME_PROP);
     results["list"].append(VDMS_DM_VID_IDX_PROP);
     results["list"].append("server_filepath");
-
 
     query.QueryNode(get_value<int>(cmd, "_ref", -1), VDMS_DM_VID_TAG,
                     cmd["link"], cmd["frameconstraints"], results,
