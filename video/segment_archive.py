@@ -23,7 +23,7 @@ def str2bool(in_val):
 
 time_segment_s = 10  # segment every 10 secs
 time_segment_half = time_segment_s / 2  # forces a keyframe at t=5,10,15 seconds.
-FPS = 10  # 15, 20, 30
+FPS = 15  # 15, 20, 30
 resize_input = str2bool(os.getenv("RESIZE_FLAG", False))
 
 GENERAL_OPTS = f"-flags -global_header -hide_banner -loglevel error -nostats -tune zerolatency -threads 1 -filter:v fps={FPS} -flush_packets 0"

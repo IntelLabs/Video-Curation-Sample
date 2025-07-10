@@ -152,6 +152,7 @@ def face_detection(frame, H, W):
 
 def run(ipfilename, format, options, tmp_dir_path):
     METADATA = dict()
+    OBJ_COUNTER = dict()
     W, H = options["input_sizeWH"]
 
     async def update_face_metadata(results, frameNum):
@@ -254,6 +255,14 @@ def run(ipfilename, format, options, tmp_dir_path):
                             ]
                             # print(object_res)
                             # objects.append(object_res)
+                            class_name = str(object_res[4])
+                            OBJ_COUNTER.setdefault(class_name, 0)
+                            OBJ_COUNTER[class_name] += 1
+                            current_cnt = OBJ_COUNTER[class_name]
+                            print(
+                                f"[OBJECT DETECTION] {class_name} detected in frame {frameNum} (Total detected: {current_cnt})",
+                                flush=True,
+                            )
 
                             tdict = {
                                 "x": int(object_res[0]),
@@ -317,20 +326,18 @@ def run(ipfilename, format, options, tmp_dir_path):
             + str(time.time()),
             flush=True,
         )
-    print(f"[UDF METADATA FILE (presort metadata)]: {METADATA}")
+
     metadata = dict(
         sorted(
             METADATA.items(), key=lambda item: int(item[0].split("_")[0]), reverse=False
         )
     )
-    print(f"[UDF METADATA FILE (postsort metadata)]: {metadata}")
 
     response = {"opFile": ipfilename, "metadata": metadata}
 
     jsonfile = "jsonfile" + uuid.uuid1().hex + ".json"
     with open(jsonfile, "w") as f:
         json.dump(response, f, indent=4)
-    print(f"[UDF METADATA FILE (response)]: {response}")
 
     if DEBUG == "1":
         num_detections = len(metadata.keys())

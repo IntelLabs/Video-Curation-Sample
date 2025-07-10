@@ -1039,7 +1039,7 @@ Json::Value process_response(std::string zip_file_name,
   }
 
   int numFiles = zip_get_num_files(archive);
-  std::cout << "numFiles[process_response:1042]: " << numFiles << std::endl;
+
   const size_t buffer_size=1024;  // 1024
   for (int i = 0; i < numFiles; ++i) {
     struct zip_stat fileInfo;
@@ -1049,7 +1049,7 @@ Json::Value process_response(std::string zip_file_name,
       std::string filename(fileInfo.name);
       zip_file *file = zip_fopen_index(archive, i, 0);
       if (file) {
-        std::cout << "buffer_size[process_response:1052]: " << buffer_size << std::endl;
+
         if (filename.find(format) != std::string::npos) {
 
           char *new_filename = video_file_name.data();
@@ -1078,10 +1078,10 @@ Json::Value process_response(std::string zip_file_name,
           while ((bytes_read = zip_fread(file, buffer.data(), buffer_size)) > 0) {
             jsonString.append(buffer.data(), bytes_read);
           }
-          std::cout << "jsonString[process_response:1076]: " << jsonString << std::endl;
+
           Json::Reader reader;
           bool parsingSuccessful = reader.parse(jsonString, metadata);
-          std::cout << "metadata[process_response:1079]: " << metadata.toStyledString() << std::endl;
+
           if (!parsingSuccessful) {
             return metadata;
           }
@@ -1101,7 +1101,7 @@ void Video::SyncRemoteOperation::operator()(Video *video, cv::Mat &frame,
                                             std::string args) {
   try {
     int frame_count = video->get_frame_count(false);
-    std::cout << "frame_count[SyncRemoteOperation:1099]: " << frame_count << std::endl;
+
     if (frame_count > 0) {
       std::string fname = args;
 
@@ -1180,7 +1180,7 @@ void Video::SyncRemoteOperation::operator()(Video *video, cv::Mat &frame,
                               "CURL setup error with form");
           }
           /* ask libcurl to show us the verbose output */
-          curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+          // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
           curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "deflate, gzip");
           res = curl_easy_perform(curl);
           if (res != CURLE_OK) {
@@ -1223,7 +1223,7 @@ void Video::SyncRemoteOperation::operator()(Video *video, cv::Mat &frame,
 
         Json::Value metadata_response =
             process_response(zip_response_filepath, response_filepath, format);
-        std::cout << "metadata_response[SyncRemoteOperation:1214]: "  << metadata_response.toStyledString() << std::endl;
+        // std::cout << "metadata_response[SyncRemoteOperation:1214]: "  << metadata_response.toStyledString() << std::endl;
         if (!metadata_response.empty()) {
           video->set_ingest_metadata(metadata_response["metadata"]);
         }

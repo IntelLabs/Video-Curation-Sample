@@ -191,18 +191,9 @@ def video_api():
             return response
 
         try:
-            print(f"Sending file: {response_file}")
-            send_file_resp = send_file(
-                response_file,
-                mimetype="application/zip",
-                as_attachment=True,
-                download_name=response_file,
+            return send_file(
+                response_file, as_attachment=True, download_name=response_file
             )
-            print("Done sending file")
-            return send_file_resp
-            # return send_file(
-            #     response_file, as_attachment=True, download_name=response_file
-            # )
         except Exception as e:
             print("Error in file read:", str(e), file=sys.stderr)
             return "Error in file read"

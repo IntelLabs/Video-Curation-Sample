@@ -284,11 +284,6 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
           bbox_props[VDMS_ROI_COORD_Y_PROP] = vframe["bbox"]["y"].asFloat();
           bbox_props[VDMS_ROI_WIDTH_PROP] = vframe["bbox"]["width"].asFloat();
           bbox_props[VDMS_ROI_HEIGHT_PROP] = vframe["bbox"]["height"].asFloat();
-          // bbox_props[VDMS_DM_VID_OBJECT_DET] =
-          //     vframe["bbox"]["object_det"].toStyledString();
-          std::cout << "AddVideo[construct_protobuf:304] object: " << bbox_props[VDMS_DM_VID_OBJECT_PROP] << std::endl;
-          std::cout << "AddVideo[construct_protobuf:305] bbox width: " << vframe["bbox"]["width"].asFloat() << std::endl;
-          std::cout << "AddVideo[construct_protobuf:306] bbox height: " << vframe["bbox"]["height"].asFloat() << std::endl;
 
           for (auto member : vframe["bbox"]["object_det"].getMemberNames()) {
             if (member == "age")

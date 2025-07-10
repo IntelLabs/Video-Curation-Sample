@@ -40,6 +40,7 @@ object_detection_model = YOLO(
     verbose=False,
     task="detect",
 )
+OBJ_COUNTER = dict()
 
 
 ie = Core()
@@ -74,8 +75,8 @@ em_compiled_model = ie.compile_model(emotions_classification_model, DEVICE_OV)
 """ DETECTION FUNCTIONS """
 
 
-def yolo_object_detection(frame, H, W):
-    global object_detection_model
+def yolo_object_detection(frame, H, W, frameNum):
+    global object_detection_model, OBJ_COUNTER
     results = object_detection_model.predict(
         frame,
         imgsz=(H, W),
@@ -113,6 +114,14 @@ def yolo_object_detection(frame, H, W):
                 ]
                 # print(object_res)
                 objects.append(object_res)
+                class_name = str(object_res[4])
+                OBJ_COUNTER.setdefault(class_name, 0)
+                OBJ_COUNTER[class_name] += 1
+                current_cnt = OBJ_COUNTER[class_name]
+                print(
+                    f"[OBJECT DETECTION] {class_name} detected in frame {frameNum} (Total detected: {current_cnt})",
+                    flush=True,
+                )
 
     return objects
 
@@ -234,7 +243,7 @@ def run(ipfilename, format, options, tmp_dir_path):
         if frame is not None and options["otype"] == "face":
             # face detection for each frame
             faces = face_detection(frame, H, W)
-            for face in faces:
+            for oidx, face in enumerate(faces):
                 tdict = {
                     "x": int(face[0]),
                     "y": int(face[1]),
@@ -251,14 +260,16 @@ def run(ipfilename, format, options, tmp_dir_path):
                     },
                 }
 
-                METADATA[frameNum] = {"frameId": frameNum, "bbox": tdict}
+                framenum_str = f"{frameNum}_{oidx}"
                 if DEBUG == "1":
                     meta_str = ",".join([str(o) for o in face])
                     print(f"[METADATA],{meta_str}", flush=True)
 
+                METADATA[framenum_str] = {"frameId": frameNum, "bbox": tdict}
+
         elif frame is not None:
             # object detection
-            objects = yolo_object_detection(frame, H, W)
+            objects = yolo_object_detection(frame, H, W, frameNum)
             for oidx, object_res in enumerate(objects):
                 tdict = {
                     "x": int(object_res[0]),
