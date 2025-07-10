@@ -8,7 +8,9 @@ from openvino.runtime import Core
 from ultralytics import YOLO
 
 detection_threshold = 0.7
-iou_threshold = 0.5
+# More detections: Higher IoU values (e.g., 0.7 or 0.8) will be more lenient with overlapping boxes,
+# potentially retaining more detections, even if they are closely clustered.
+iou_threshold = 0.9  # 0.5
 model_w, model_h = (640, 640)
 model_precision_object = "FP16"
 model_name = "yolo11"
