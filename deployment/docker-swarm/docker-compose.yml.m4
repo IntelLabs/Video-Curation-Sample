@@ -6,6 +6,7 @@ services:
 include(zookeeper.m4)
 include(kafka.m4)
 include(frontend.m4)
+include(udf.m4)
 include(vdms.m4)
 ifdef(`in_stream', `include(stream.m4)', `')
 include(video.m4)

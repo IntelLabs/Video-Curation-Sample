@@ -8,10 +8,11 @@ import cv2
 from openvino.runtime import Core
 from ultralytics import YOLO
 
-detection_threshold = 0.7
+detection_threshold = 0.5  # 0.7
 # More detections: Higher IoU values (e.g., 0.7 or 0.8) will be more lenient with overlapping boxes,
 # potentially retaining more detections, even if they are closely clustered.
-iou_threshold = 0.9  # 0.5
+iou_threshold = 0.75  # 0.5
+max_detections_per_img = 100  # default: 300
 model_w, model_h = (640, 640)
 model_precision_object = "FP16"
 model_name = "yolo11"
@@ -303,6 +304,7 @@ def run(ipfilename, format, options, tmp_dir_path):
                 ipfilename,
                 imgsz=(H, W),
                 batch=batch_size,
+                max_det=max_detections_per_img,
                 conf=detection_threshold,
                 iou=iou_threshold,
                 half=half_flag,

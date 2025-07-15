@@ -8,13 +8,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from shutil import copyfile
 
 from inotify.adapters import Inotify
 from segment_archive import str2bool
 from ultralytics.utils.checks import check_imgsz
-
-import vdms
+from utils import UDFRemotePool, VDMSClientPool, VDMSConnection
 
 # SETUP LOGGER
 logger = logging.getLogger(__name__)
@@ -37,23 +35,28 @@ ingestion = os.environ["INGESTION"]
 in_source = os.environ["IN_SOURCE"]
 resize_input = str2bool(os.getenv("RESIZE_FLAG", False))
 DEBUG = os.environ["DEBUG"]
+NUM_UDFS = int(os.environ["NCURATIONS"])
 # video_store_dir = "/home/resources"
 video_store_dir = "/var/www/mp4"
 model_w, model_h = (640, 640)
-dbs = {}
+# dbs = {}
+vdms_pool_size = 10
 
 
-def ingest_video(ingest_mode, filename_path, video_info):
-    global dbs
+def ingest_video(db_pool, udf_pool, ingest_mode, filename_path, video_info):
+    # global dbs
 
     # filename_path = "1191560.mp4"
     filename = str(Path(filename_path).name)
-    dn_name = filename.split("__")[0]
-    if dn_name not in dbs:
-        dbs[dn_name] = vdms.vdms()
-        dbs[dn_name].connect(dbhost, dbport)
-    elif not dbs[dn_name].is_connected():
-        dbs[dn_name].connect(dbhost, dbport)
+    # dn_name = filename.split("__")[0]
+    # if dn_name not in dbs:
+    #     dbs[dn_name] = vdms.vdms()
+    #     dbs[dn_name].connect(dbhost, dbport)
+    # elif not dbs[dn_name].is_connected():
+    #     dbs[dn_name].connect(dbhost, dbport)
+    # db = db_pool.retrieve()
+    db = db_pool.retrieve()
+    udf_name = udf_pool.retrieve()
 
     properties = {
         "Name": filename,  # .split("/")[-1],
@@ -81,13 +84,14 @@ def ingest_video(ingest_mode, filename_path, video_info):
             "operations": [
                 {
                     "type": "remoteOp",
-                    "url": "http://video-service:5011/video",
+                    # "url": "http://video-service:5011/video",
+                    "url": f"http://{udf_name}:5011/video",
                     "options": {
                         # "id": "metadata",
                         "id": "metadata_callback",
                         "otype": ingest_mode,
                         "media_type": "video",
-                        "fps": properties["fps"],
+                        # "fps": properties["fps"],
                         "input_sizeWH": new_size,
                     },
                 }
@@ -103,7 +107,9 @@ def ingest_video(ingest_mode, filename_path, video_info):
             f"[TIMING],start_udf_ingest_{ingest_mode},{filename}," + str(time.time()),
             flush=True,
         )
-    res, res_arr = dbs[dn_name].query([query], [video_blob])
+    # res, res_arr = dbs[dn_name].query([query], [video_blob])
+    res, res_arr = db.db.query([query], [video_blob])
+
     if DEBUG == "1":
         print(
             f"[TIMING],end_udf_ingest_{ingest_mode},{filename}," + str(time.time()),
@@ -111,7 +117,10 @@ def ingest_video(ingest_mode, filename_path, video_info):
         )
         print(f"[DEBUG] {filename} PROPERTIES: {properties}", flush=True)
         print(f"[DEBUG] INGEST_VIDEO RESPONSE: {res}", flush=True)
-        print(f"[DEBUG] Used client: {dn_name}", flush=True)
+        # print(f"[DEBUG] Used client: {dn_name}", flush=True)
+
+    db_pool.release(db)
+    udf_pool.release(udf_name)
 
 
 def get_video_details(filename_path):
@@ -174,35 +183,54 @@ def sort_files_in_directory_by_size(in_dir):
 
 
 def main(watch_folder=os.getcwd()):
-    if DEBUG == "1":
-        print("[TIMING],start_watchandsend,," + str(time.time()), flush=True)
-    if "videos" in in_source:
-        sorted_files = sort_files_in_directory_by_size(video_store_dir)
-        for filename_path, _ in sorted_files:
-            video_info = get_video_details(filename_path)
-            for ingest_mode in ingestion.split(","):
-                ingest_video(ingest_mode, filename_path, video_info)
+    def create_VDMS_connection():
+        return VDMSConnection(dbhost, dbport)
 
-    if "stream" in in_source:
+    db_pool = VDMSClientPool(create_VDMS_connection, vdms_pool_size)
+    udf_pool = UDFRemotePool(NUM_UDFS)
+
+    try:
+        if DEBUG == "1":
+            print("[TIMING],start_watchandsend,," + str(time.time()), flush=True)
+        print(f"in_source: {in_source}")
+        # if "videos" in in_source:
+        #     print(f"video_store_dir: {video_store_dir}")
+        #     sorted_files = sort_files_in_directory_by_size(video_store_dir)
+        #     print(f"sorted_files: {sorted_files}")
+        #     for filename_path, _ in sorted_files:
+        #         print(f"filename_path: {filename_path}")
+        #         video_info = get_video_details(filename_path)
+        #         for ingest_mode in ingestion.split(","):
+        #             print(f"ingest_video(db_pool, udf_pool, {ingest_mode}, {filename_path}, {video_info})")
+        #             ingest_video(db_pool, udf_pool, ingest_mode, filename_path, video_info)
+
+        # if "stream" in in_source:
         i = Inotify()
         i.add_watch(watch_folder)
 
         for event in i.event_gen(yield_nones=False):
             (_, type_names, path, filename) = event
-            filename_path = os.path.join(video_store_dir, filename)
+            filename_path = os.path.join(path, filename)
 
             # on file write completion, we publish to topic
-            if "IN_CLOSE_WRITE" in type_names and not os.path.exists(filename_path):
-                copyfile(os.path.join(path, filename), filename_path)
-                if DEBUG == "1":
-                    print(
-                        f"[DEBUG] COPIED:{path}/{filename}  TO {filename_path}"
-                    )  # TODO: Remove
+            if "IN_CLOSE_WRITE" in type_names:  # and not os.path.exists(filename_path):
+                # copyfile(os.path.join(path, filename), filename_path)
+                # if DEBUG == "1":
+                #     print(
+                #         f"[DEBUG] COPIED:{path}/{filename}  TO {filename_path}"
+                #     )  # TODO: Remove
                 video_info = get_video_details(filename_path)
                 for ingest_mode in ingestion.split(","):
-                    ingest_video(ingest_mode, filename_path, video_info)
-    if DEBUG == "1":
-        print("[TIMING],end_watchandsend,," + str(time.time()), flush=True)
+                    ingest_video(
+                        db_pool, udf_pool, ingest_mode, filename_path, video_info
+                    )
+
+        if DEBUG == "1":
+            print("[TIMING],end_watchandsend,," + str(time.time()), flush=True)
+    finally:
+        # Close connections
+        db_pool.close_all()
+        udf_pool.close_all()
 
 
 if __name__ == "__main__":

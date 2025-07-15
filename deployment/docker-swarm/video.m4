@@ -1,6 +1,8 @@
 define(`PROFILE_DEFAULT', `depends_on:
+            - udf-service
             - vdms-service')
 define(`PROFILE_GPU', `depends_on:
+            - udf-service
             - vdms-service
         runtime: nvidia
         deploy:
@@ -25,6 +27,7 @@ define(`PROFILE_GPU', `depends_on:
             `DEVICE': "defn(`DEVICE')"
             `IN_SOURCE': "defn(`IN_SOURCE')"
             `INGESTION': "defn(`INGESTION')"
+            `NCURATIONS': "defn(`NCURATIONS')"
             http_proxy: "${http_proxy}"
             HTTP_PROXY: "${HTTP_PROXY}"
             https_proxy: "${https_proxy}"
