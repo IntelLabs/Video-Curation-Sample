@@ -11,3 +11,4 @@ onnxruntime-gpu
 sk-video>=1.1.10
 tensorrt
 ultralytics>=8.3.83
+vdms

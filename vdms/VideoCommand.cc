@@ -38,6 +38,7 @@
 #include "VideoCommand.h"
 #include "VideoLoop.h"
 #include "defines.h"
+#include "DynamicMetadataHandler.h"
 
 using namespace VDMS;
 namespace fs = std::filesystem;
@@ -196,9 +197,11 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
   // input, but for now it is an acceptable solution.
   Json::Value props = get_value<Json::Value>(cmd, "properties");
   props[VDMS_VID_PATH_PROP] = file_name;
+  props[VDMS_BG_UNIQUE_VID_ID] = file_name;
 
   if (video.is_blob_not_stored()) {
     props[VDMS_VID_PATH_PROP] = video.get_video_id();
+    props[VDMS_BG_UNIQUE_VID_ID] = video.get_video_id();
   }
 
   // Add Video node
@@ -233,97 +236,6 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     query.AddEdge(-1, node_ref, frame_ref, VDMS_KF_EDGE, Json::Value());
   }
 
-  std::vector<Json::Value> video_metadata = video.get_ingest_metadata();
-
-  if (video_metadata.size() > 0) {
-    std::map<int, int> frameMap;
-    int frame_ref;
-    for (Json::Value metadata : video_metadata) {
-      for (Json::Value vframe : metadata) {
-        bool frame_flag = false;
-        if (frameMap.find(vframe["frameId"].asInt()) == frameMap.end()) {
-          frame_ref = query.get_available_reference();
-          frameMap.insert(
-              std::pair<int, int>(vframe["frameId"].asInt(), frame_ref));
-        } else {
-          frame_ref = frameMap.at(vframe["frameId"].asInt());
-          frame_flag = true;
-        }
-
-        Json::Value frame_props;
-        frame_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
-        frame_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
-        frame_props["server_filepath"] = props["Name"].asString();
-        frame_props["fps"] = props["fps"].asFloat();
-        frame_props["duration"] = props["duration"].asFloat();
-        frame_props["width"] = props["width"].asFloat();
-        frame_props["height"] = props["height"].asFloat();
-        frame_props["frame_count"] = props["frame_count"].asInt();
-
-        Json::Value edge_props;
-        edge_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
-        edge_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
-        edge_props["server_filepath"] = props["Name"].asString();
-        edge_props["fps"] = props["fps"].asFloat();
-        edge_props["duration"] = props["duration"].asFloat();
-        edge_props["width"] = props["width"].asFloat();
-        edge_props["height"] = props["height"].asFloat();
-        edge_props["frame_count"] = props["frame_count"].asInt();
-
-        if (!frame_flag) {
-          query.AddNode(frame_ref, VDMS_DM_VID_TAG, frame_props, Json::Value());
-        }
-        query.AddEdge(-1, node_ref, frame_ref, VDMS_DM_VID_EDGE, edge_props);
-
-        if (vframe.isMember("bbox")) {
-          int bb_ref = query.get_available_reference();
-          Json::Value bbox_props;
-          bbox_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
-          bbox_props["server_filepath"] = props["Name"].asString();
-          bbox_props["fps"] = props["fps"].asFloat();
-          bbox_props["duration"] = props["duration"].asFloat();
-          bbox_props["width"] = props["width"].asFloat();
-          bbox_props["height"] = props["height"].asFloat();
-          bbox_props["frame_count"] = props["frame_count"].asInt();
-          bbox_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
-          bbox_props[VDMS_DM_VID_OBJECT_PROP] =
-              vframe["bbox"]["object"].asString();
-          bbox_props[VDMS_ROI_COORD_X_PROP] = vframe["bbox"]["x"].asFloat();
-          bbox_props[VDMS_ROI_COORD_Y_PROP] = vframe["bbox"]["y"].asFloat();
-          bbox_props[VDMS_ROI_WIDTH_PROP] = vframe["bbox"]["width"].asFloat();
-          bbox_props[VDMS_ROI_HEIGHT_PROP] = vframe["bbox"]["height"].asFloat();
-          // bbox_props[VDMS_DM_VID_OBJECT_DET] =
-          //     vframe["bbox"]["object_det"].toStyledString();
-
-          for (auto member : vframe["bbox"]["object_det"].getMemberNames()) {
-            if (member == "age")
-              bbox_props[member] = vframe["bbox"]["object_det"][member].asInt();
-            if (member == "confidence")
-              bbox_props[member] = vframe["bbox"]["object_det"][member].asFloat();
-            if (member == "gender" || member == "emotion")
-              bbox_props[member] = vframe["bbox"]["object_det"][member].asString();
-            if (member == "frameW" || member == "frameH")
-              bbox_props[member] = vframe["bbox"]["object_det"][member].asInt();
-          }
-
-          Json::Value bb_edge_props;
-          bb_edge_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
-          bb_edge_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
-          bb_edge_props["server_filepath"] = props["Name"].asString();
-          bb_edge_props["fps"] = props["fps"].asFloat();
-          bb_edge_props["duration"] = props["duration"].asFloat();
-          bb_edge_props["width"] = props["width"].asFloat();
-          bb_edge_props["height"] = props["height"].asFloat();
-          bb_edge_props["frame_count"] = props["frame_count"].asInt();
-
-          query.AddNode(bb_ref, VDMS_ROI_TAG, bbox_props, Json::Value());
-          query.AddEdge(-1, frame_ref, bb_ref, VDMS_DM_VID_BB_EDGE,
-                        bb_edge_props);
-        }
-      }
-    }
-  }
-
   // In case we need to cleanup the query
   error["video_added"] = file_name;
 
@@ -333,6 +245,13 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
 
   if (output_vcl_timing) {
     video.timers.print_map_runtimes();
+  }
+
+  std::vector<Json::Value> video_metadata = video.get_ingest_metadata();
+  if (video_metadata.size() > 0) {
+    DynamicMetadataHandler dmh(video, props, video_metadata);
+    std::thread dmh_thread(&DynamicMetadataHandler::initiate, dmh);
+    dmh_thread.detach();
   }
 
   return 0;

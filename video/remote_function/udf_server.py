@@ -142,6 +142,8 @@ def video_api():
         json_data = json.loads(request.form["jsonData"])
         video_data = request.files["videoData"]
         format = json_data["format"] if "format" in json_data else "mp4"
+        # json_data['host'] = request.remote_addr
+        json_data['host'] = "vdms-service"
 
         tmpfile = secure_filename(
             os.path.join(tmp_dir_path, "tmpfile" + uuid.uuid1().hex + "." + str(format))

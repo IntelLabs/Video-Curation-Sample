@@ -1,2 +1,5 @@
 build/*
 video/resources/models/ultralytics
+.vscode
+*.log
+__pycache__

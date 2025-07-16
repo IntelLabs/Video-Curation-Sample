@@ -38,7 +38,7 @@ COPY manage.sh /home/
 COPY *.conf /etc/nginx/
 RUN rm /var/www/mp4/* || true
 RUN rm /var/www/stream/* || true
-COPY archive /var/www/mp4
+COPY archive/*.mp4 /var/www/mp4/
 RUN rm /var/www/mp4/.gitignore || true
 COPY segment_archive.py /home/
 RUN if [ "${IN_SOURCE}" = "videos" ]; then python3 /home/segment_archive.py; fi;
