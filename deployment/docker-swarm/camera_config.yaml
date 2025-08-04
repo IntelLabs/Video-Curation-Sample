@@ -1,0 +1,15 @@
+# Copyright (C) 2025 Intel Corporation
+# SPDX-License-Identifier: MIT
+
+#########################################################################
+# SUPPORTED STRUCTURE
+#
+# camera_name:     (Required) Unique name or ID for camera
+#   type:          (Required) Stream type (udp, rtsp)
+#   url:           (Required) Stream url (udp, rtsp)
+#########################################################################
+
+# live1:
+#   type: rtsp
+#   url: rtsp://127.0.0.1:8554/live1
+

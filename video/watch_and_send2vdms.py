@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import time
 from pathlib import Path
 from shutil import copyfile
 
+import cv2
 from inotify.adapters import Inotify
 from segment_archive import str2bool
 from ultralytics.utils.checks import check_imgsz
@@ -40,6 +42,7 @@ DEBUG = os.environ["DEBUG"]
 # video_store_dir = "/home/resources"
 video_store_dir = "/var/www/mp4"
 model_w, model_h = (640, 640)
+FPS = 15
 dbs = {}
 
 
@@ -173,15 +176,196 @@ def sort_files_in_directory_by_size(in_dir):
     return sorted(all_files, key=lambda item: item[1])
 
 
+def write_video(file_queue, frameNum, _out_vid, clip_filename):
+    if _out_vid is not None:
+        _out_vid.release()
+        # print(f"Created video at frameNum {frameNum}", flush=True)
+
+        # Add filename to processing queue
+        # file_queue.put(clip_filename)
+        if clip_filename not in file_queue and clip_filename not in ["", None]:
+            file_queue.append(clip_filename)
+        print(f"Added {clip_filename} to queue", flush=True)
+
+        _out_vid = None
+        clip_filename = ""
+    return _out_vid, clip_filename, file_queue
+
+
+def video_clip_producer(
+    file_queue,
+    video_path,
+    file_prefix,
+    method=None,
+    fps=None,
+    clip_length_in_secs=10,
+    outdir="/var/www/mp4",
+):
+    # ffmpeg Elapsed time: 253.96045470237732 secs
+    # opencv Elapsed time: 215.44384384155273 secs
+    print("Splitting video into clips ...")
+    all_clips = []
+    if method == "opencv":
+        video_obj = cv2.VideoCapture(video_path)
+        # , cv2.CAP_FFMPEG)
+
+        if (fps is not None) and (float(video_obj.get(cv2.CAP_PROP_FPS)) != float(fps)):
+            modified_video_path = "/tmp/" + Path(video_path).name
+
+            # Change FPS of video using ffmpeg
+            # GENERAL_OPTS = f"-flags -global_header -hide_banner -loglevel error -nostats -tune zerolatency -threads 1 -filter:v fps={FPS} -flush_packets 0"
+            GENERAL_OPTS = f"-flags -global_header -hide_banner -loglevel error -nostats -tune zerolatency -filter:v fps={fps} -flush_packets 0"
+            VIDEO_OPTS = "-f mpegts -movflags faststart -crf 28"
+            cmd_str = (
+                f"ffmpeg -y -i {video_path} {GENERAL_OPTS} {VIDEO_OPTS} {modified_video_path}"
+                # f"ffmpeg -y -i {video_path} -filter:v fps={FPS} -movflags faststart {modified_video_path}"
+            )
+            cmd = shlex.split(cmd_str)
+
+            try:
+                subprocess.run(cmd, check=True)
+                # ffmpeg_result = subprocess.run(cmd, capture_output=True, text=True)
+                # if ffmpeg_result.returncode > 0:
+                #     print("ffmpeg Error:", ffmpeg_result.stderr, flush=True)
+
+                # Reload video
+                video_obj.release()
+                video_obj = cv2.VideoCapture(modified_video_path)
+            except Exception as e:
+                raise ValueError(f"Error occurred while processing video: {e}")
+
+        # Check that object is opened successfully
+        stream_available = False
+        while not stream_available:
+            if video_obj.isOpened():
+                stream_available = True
+
+        # Setup VideoWriter
+        # fourcc = cv2.VideoWriter_fourcc(*"XVID")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # MJPG mp4v  No: h264 avc1 X264
+        _out_vid = None
+
+        clip_filename = ""
+        fps = float(video_obj.get(cv2.CAP_PROP_FPS))  # 30
+        clip_num = 0
+        frame_count = int(video_obj.get(cv2.CAP_PROP_FRAME_COUNT))
+        clip_total_frames = int(float(clip_length_in_secs * fps))
+        while video_obj.isOpened():
+            # Read frame
+            grabbed, frame = video_obj.read()
+
+            if grabbed:
+                frameNum = int(video_obj.get(cv2.CAP_PROP_POS_FRAMES))
+                # print(f"Current Frame:\t{frameNum}", flush=True)
+                frameWH = (frame.shape[1], frame.shape[0])
+                # frameHW = frame.shape[:2]
+
+                # Start video clip
+                if (frameNum - 1) % clip_total_frames < (clip_total_frames - 1):
+                    if _out_vid is None:
+                        # Initialize file
+                        clip_filename = Path(outdir) / f"{file_prefix}_{clip_num}.mp4"
+                        _out_vid = cv2.VideoWriter(
+                            clip_filename,
+                            fourcc=fourcc,
+                            fps=fps,
+                            frameSize=frameWH,
+                        )
+                        clip_num += 1
+                    _out_vid.write(frame)
+
+                # mod_val = (frameNum - 1) % clip_total_frames
+                # print(f"frame: {frameNum} of {frame_count}\tmod: {mod_val}", flush=True)
+
+                if ((frameNum - 1) % clip_total_frames == (clip_total_frames - 1)) or (
+                    frameNum == frame_count
+                ):
+                    _out_vid.write(frame)
+                    _out_vid, clip_filename, all_clips = write_video(
+                        all_clips, frameNum, _out_vid, clip_filename
+                    )
+
+            else:
+                _out_vid, clip_filename, all_clips = write_video(
+                    all_clips, frameNum, _out_vid, clip_filename
+                )
+
+                break
+
+        # _out_vid, clip_filename = write_video(file_queue, frameNum, _out_vid, clip_filename)
+
+        # file_queue.put(None)  # Signal end of data
+        video_obj.release()
+        cv2.destroyAllWindows()
+
+    elif method == "ffmpeg":
+        time_segment_half = (
+            clip_length_in_secs / 2
+        )  # forces a keyframe at t=5,10,15 seconds.
+        clip_filename = str(Path(outdir) / f"{file_prefix}_%d.mp4")
+        clip_list_path = f"/tmp/{file_prefix}.ffconcat"
+
+        GENERAL_OPTS = f"-flags -global_header -hide_banner -loglevel error -nostats -tune zerolatency -threads 1 -filter:v fps={fps} -flush_packets 0"
+        VIDEO_OPTS = (
+            "-f mpegts -movflags faststart -crf 28"  # -vcodec libx264   -s 640x360
+        )
+        SEGMENT_OPTS = f"-map 0  -segment_time {clip_length_in_secs} -force_key_frames expr:gte(t,n_forced*{time_segment_half})"
+        SEGMENT_OPTS += f" -f segment -reset_timestamps 1 -segment_list {clip_list_path} -segment_format mp4 {clip_filename}"
+
+        cmd_str = (
+            f"ffmpeg -y -i {video_path} {GENERAL_OPTS} {VIDEO_OPTS} {SEGMENT_OPTS}"
+        )
+        cmd_list = shlex.split(cmd_str)
+
+        subprocess.run(cmd_list, check=True)
+        # ffmpeg_result = subprocess.run(cmd_list, capture_output=True, text=True, shell=False)
+        # if ffmpeg_result.returncode > 0:
+        #     print("ffmpeg Error:", ffmpeg_result.stderr, flush=True)
+        # else:
+        #     os.remove(filename_path)
+
+        with open(clip_list_path, "r") as stream_list:
+            file_keyword = "file "
+            for line in stream_list:
+                if line.strip().startswith(file_keyword):
+                    clip_filename = line[len(file_keyword) :].strip()
+                    if clip_filename.startswith("'") and clip_filename.endswith("'"):
+                        clip_filename = clip_filename[1:-1]
+                    clip_filename = str(Path(outdir) / clip_filename)
+                    # process_clip(clip_filename)
+                    # file_queue.put(clip_filename)
+                    # print(f"Added {clip_filename} to queue", flush=True)
+                    all_clips.append(clip_filename)
+    else:
+        raise ValueError(f"{method} is invalid method. Valid methods: opencv, ffmpeg")
+
+    print(f"\tCreated {len(all_clips)} clips")
+    return all_clips
+
+
 def main(watch_folder=os.getcwd()):
     if DEBUG == "1":
         print("[TIMING],start_watchandsend,," + str(time.time()), flush=True)
     if "videos" in in_source:
-        sorted_files = sort_files_in_directory_by_size(video_store_dir)
-        for filename_path, _ in sorted_files:
-            video_info = get_video_details(filename_path)
-            for ingest_mode in ingestion.split(","):
-                ingest_video(ingest_mode, filename_path, video_info)
+        tmp_dir = "/var/www/archive"
+        # sorted_files = sort_files_in_directory_by_size("/var/www/archive")
+        for filename in os.listdir(tmp_dir):
+            if filename.endswith(".mp4"):
+                full_filename_path = os.path.join(tmp_dir, filename)
+                file_prefix = Path(full_filename_path).stem
+                all_clips = video_clip_producer(
+                    None,
+                    full_filename_path,
+                    file_prefix,
+                    method="ffmpeg",
+                    fps=FPS,
+                    clip_length_in_secs=10,
+                    outdir=video_store_dir,
+                )
+                for filename_path in all_clips:
+                    video_info = get_video_details(filename_path)
+                    for ingest_mode in ingestion.split(","):
+                        ingest_video(ingest_mode, filename_path, video_info)
 
     if "stream" in in_source:
         i = Inotify()

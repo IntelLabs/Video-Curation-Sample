@@ -34,6 +34,7 @@ define(`PROFILE_GPU', `depends_on:
         volumes:
             - /etc/localtime:/etc/localtime:ro
             - app-content:/var/www
+            - ./camera_config.yaml:/home/camera_config.yaml
         networks:
             - appnet
         restart: always

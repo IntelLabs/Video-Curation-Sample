@@ -64,6 +64,8 @@ def setup(tmp_path):
 
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = None  # 16 * 1024 * 1024  # 16 Megabytes
+app.config["MAX_FORM_MEMORY_SIZE"] = None  # 16 * 1024 * 1024  # 16 Megabytes
 
 
 def get_current_timestamp():
@@ -198,7 +200,7 @@ def video_api():
             print("Error in file read:", str(e), file=sys.stderr)
             return "Error in file read"
     except Exception as e2:
-        print("Internal error occurred:", str(e2), file=sys.stderr)
+        print("Internal error occurred in video_api:", str(e2), file=sys.stderr)
         return "An internal error has occurred. Please try again later."
 
 
@@ -246,7 +248,7 @@ def main():
             setup(sys.argv[2])
             app.run(host="0.0.0.0", port=int(sys.argv[1]))
     except Exception as e2:
-        print("Internal error occurred:", str(e2), file=sys.stderr)
+        print("Internal error occurred in main:", str(e2), file=sys.stderr)
 
 
 if __name__ == "__main__":

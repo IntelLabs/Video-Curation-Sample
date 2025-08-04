@@ -96,11 +96,11 @@ class SearchHandler(web.RequestHandler):
                         "results": {
                             "list": [
                                 "Name",
-                                "fps",
-                                "duration",
-                                "width",
-                                "height",
-                                "frame_count",
+                                # "fps",
+                                # "duration",
+                                # "width",
+                                # "height",
+                                # "frame_count",
                             ],
                         }
                     }
@@ -148,20 +148,21 @@ class SearchHandler(web.RequestHandler):
 
                     for ent in entities:
                         name = ent["Name"]
-                        duration = ent["duration"]
+                        r = get(vdhost + "/api/info", params={"video": name}).json()
+                        duration = r["duration"]
                         seg1c = {
                             "name": name,
                             "stream": quote(
                                 "/api/segment/0/" + str(duration) + "/" + name
                             ),
                             "thumbnail": quote("/api/thumbnail/0/" + name + ".png"),
-                            "fps": ent["fps"],
+                            "fps": r["fps"],
                             "time": 0,
                             "duration": duration,
                             "offset": 0,
-                            "width": ent["width"],
-                            "height": ent["height"],
-                            "frames": [x for x in range(0, ent["frame_count"])],
+                            "width": r["width"],
+                            "height": r["height"],
+                            "frames": [x for x in range(0, r["frame_count"])],
                         }
                         segs.append(seg1c)
         else:

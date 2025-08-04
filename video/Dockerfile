@@ -41,10 +41,11 @@ COPY manage.sh /home/
 COPY *.conf /etc/nginx/
 RUN rm /var/www/mp4/* || true
 RUN rm /var/www/stream/* || true
-COPY archive/*.mp4 /var/www/mp4/
+# COPY archive/*.mp4 /var/www/mp4/
+COPY archive/*.* /var/www/archive/
 RUN rm /var/www/mp4/.gitignore || true
 COPY segment_archive.py /home/
-RUN if [ "${IN_SOURCE}" = "videos" ]; then python3 /home/segment_archive.py; fi;
+# RUN if [ "${IN_SOURCE}" = "videos" ]; then mkdir -p /var/www/mp4 && python3 /home/segment_archive.py /var/www/archive; fi;
 CMD  ["/bin/bash","-c","python3 /home/resources/models/download_yolo.py && /home/manage.sh"]
 
 ####
