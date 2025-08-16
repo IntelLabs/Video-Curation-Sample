@@ -9,9 +9,10 @@ half_flag = True
 dynamic_flag = True
 DEVICE = os.environ.get("DEVICE", "CPU")
 if DEVICE == "GPU":
-    batch_size = 1
+    batch_size = int(os.environ.get("GPU_BATCH_SIZE", 1))
 else:
-    batch_size = 8
+    # batch_size = 8
+    batch_size = int(os.environ.get("CPU_BATCH_SIZE", 1))  # 8
 
 
 def get_model(model_dir, run_platform, device_input, batch=1):
@@ -50,7 +51,7 @@ def get_model(model_dir, run_platform, device_input, batch=1):
         )
         # pt_detection_model.export(format='engine')  # Rohit
 
-        final_model_path = f"{model_dir}/{model_name}n.engine/"
+        final_model_path = f"{model_dir}/{model_name}n.engine"
         object_detection_model = YOLO(
             final_model_path,
             verbose=False,

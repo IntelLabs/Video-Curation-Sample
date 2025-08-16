@@ -334,11 +334,6 @@ int FindVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     results["list"].append(VDMS_DM_VID_NAME_PROP);
     results["list"].append(VDMS_DM_VID_IDX_PROP);
     results["list"].append("server_filepath");
-    results["list"].append("fps");
-    results["list"].append("duration");
-    results["list"].append("width");
-    results["list"].append("height");
-    results["list"].append("frame_count");
 
     for (auto member : cmd["metaconstraints"].getMemberNames()) {
       results["list"].append(member);
@@ -364,15 +359,6 @@ int FindVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     results["list"].append(VDMS_DM_VID_NAME_PROP);
     results["list"].append(VDMS_DM_VID_IDX_PROP);
     results["list"].append("server_filepath");
-    results["list"].append("fps");
-    results["list"].append("duration");
-    results["list"].append("width");
-    results["list"].append("height");
-    results["list"].append("frame_count");
-
-    // for (auto member : cmd["frameconstraints"].getMemberNames()) {
-    //   results["list"].append(member);
-    // }
 
     query.QueryNode(get_value<int>(cmd, "_ref", -1), VDMS_DM_VID_TAG,
                     cmd["link"], cmd["frameconstraints"], results,

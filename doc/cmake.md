@@ -11,6 +11,7 @@ Use the following definitions to customize the building process:
 - **NCURATIONS**: Specify the number of curation processes running in the background.
 - **NSTREAMS**: Specify the number of video streams
 - **PLATFORM**: Specify the target platform: `Xeon`
+- **RESIZE_FLAG**: Specify `True` to resize videos to model input size or `False` (default) to use video resolution.
 <!-- - **REGISTRY**: Name of private registry to push image. If registry secret is available, update `imagePullSecrets` field in [frontend.yaml.m4](../deployment/kubernetes/frontend.yaml.m4), [video_stream.yaml.m4](../deployment/kubernetes/video_stream.yaml.m4), and/or [video.yaml.m4](../deployment/kubernetes/video.yaml.m4) for Kubernetes. `docker login` may be necessary. -->
 <br>
 

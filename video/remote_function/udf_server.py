@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import sys
+import traceback
 import uuid
 from datetime import datetime, timezone
 from zipfile import ZipFile
@@ -63,6 +64,8 @@ def setup(tmp_path):
 
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = None  # 16 * 1024 * 1024  # 16 Megabytes
+app.config["MAX_FORM_MEMORY_SIZE"] = None  # 16 * 1024 * 1024  # 16 Megabytes
 
 
 def get_current_timestamp():
@@ -143,7 +146,7 @@ def video_api():
         video_data = request.files["videoData"]
         format = json_data["format"] if "format" in json_data else "mp4"
         # json_data['host'] = request.remote_addr
-        json_data['host'] = "vdms-service"
+        json_data["host"] = "vdms-service"
 
         tmpfile = secure_filename(
             os.path.join(tmp_dir_path, "tmpfile" + uuid.uuid1().hex + "." + str(format))
@@ -198,8 +201,22 @@ def video_api():
         except Exception as e:
             print("Error in file read:", str(e), file=sys.stderr)
             return "Error in file read"
-    except Exception:
+    except Exception as e2:
+        print("Internal error occurred in video_api:", str(e2), file=sys.stderr)
         return "An internal error has occurred. Please try again later."
+
+
+def set_global_exception_handler(app):
+    @app.errorhandler(Exception)
+    def unhandled_exception(e):
+        response = dict()
+        error_message = traceback.format_exc()
+        app.logger.error("Caught Exception: {}".format(error_message))
+        response["errorMessage"] = error_message
+        return response, 500
+
+
+set_global_exception_handler(app)
 
 
 @app.errorhandler(400)
@@ -217,18 +234,23 @@ def handle_bad_request(e):
 
 
 def main():
-    num_args = len(sys.argv)
-    if sys.argv[1] is None:
-        print("Port missing\n Correct Usage: python3 udf_server.py <port> [tmp_path]")
-    elif num_args > 2 and sys.argv[2] is None:
-        print(
-            "Warning: Path to the temporary directory is missing\nBy default the path will be the current directory"
-        )
-        setup(None)
-        app.run(host="0.0.0.0", port=int(sys.argv[1]))
-    else:
-        setup(sys.argv[2])
-        app.run(host="0.0.0.0", port=int(sys.argv[1]))
+    try:
+        num_args = len(sys.argv)
+        if sys.argv[1] is None:
+            print(
+                "Port missing\n Correct Usage: python3 udf_server.py <port> [tmp_path]"
+            )
+        elif num_args > 2 and sys.argv[2] is None:
+            print(
+                "Warning: Path to the temporary directory is missing\nBy default the path will be the current directory"
+            )
+            setup(None)
+            app.run(host="0.0.0.0", port=int(sys.argv[1]))
+        else:
+            setup(sys.argv[2])
+            app.run(host="0.0.0.0", port=int(sys.argv[1]))
+    except Exception as e2:
+        print("Internal error occurred in main:", str(e2), file=sys.stderr)
 
 
 if __name__ == "__main__":

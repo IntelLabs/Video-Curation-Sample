@@ -1,7 +1,7 @@
 #!/bin/bash -e
 
 DIR=$(dirname $(readlink -f "$0"))
-mkdir -p "${DIR}/archive" "${DIR}/log/"
+mkdir -p "${DIR}/archive"
 
 CLIPS=($(cat "${DIR}"/streamlist.txt))
 

@@ -57,7 +57,13 @@ class InfoHandler(web.RequestHandler):
             p.wait()
         if fps == 0 and (nb_frames != 0 and duration != 0):
             fps = nb_frames / duration
-        return {"width": width, "height": height, "duration": duration, "fps": fps}
+        return {
+            "width": width,
+            "height": height,
+            "duration": duration,
+            "fps": fps,
+            "frame_count": nb_frames,
+        }
 
     @gen.coroutine
     def get(self):

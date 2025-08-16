@@ -8,7 +8,9 @@ from openvino.runtime import Core
 from ultralytics import YOLO
 
 detection_threshold = 0.7
-iou_threshold = 0.5
+# More detections: Higher IoU values (e.g., 0.7 or 0.8) will be more lenient with overlapping boxes,
+# potentially retaining more detections, even if they are closely clustered.
+iou_threshold = 0.9  # 0.5
 model_w, model_h = (640, 640)
 model_precision_object = "FP16"
 model_name = "yolo11"
@@ -25,11 +27,11 @@ device_input = DEVICE.lower() if DEVICE == "CPU" else 0
 yolo_path = f"/home/resources/models/ultralytics/{model_name}/{model_precision_object}/{model_name}n"
 
 if DEVICE == "GPU":
-    yolo_path += ".engine/"
-    batch_size = 1
+    yolo_path += ".engine"
+    batch_size = int(os.environ.get("GPU_BATCH_SIZE", 1))
 else:
     yolo_path += "_openvino_model/"
-    batch_size = 8
+    batch_size = int(os.environ.get("CPU_BATCH_SIZE", 1))  # 8
 
 
 """ MODEL DEFINITIONS """
@@ -38,6 +40,7 @@ object_detection_model = YOLO(
     verbose=False,
     task="detect",
 )
+OBJ_COUNTER = dict()
 
 
 ie = Core()
@@ -72,8 +75,8 @@ em_compiled_model = ie.compile_model(emotions_classification_model, DEVICE_OV)
 """ DETECTION FUNCTIONS """
 
 
-def yolo_object_detection(frame, H, W):
-    global object_detection_model
+def yolo_object_detection(frame, H, W, frameNum):
+    global object_detection_model, OBJ_COUNTER
     results = object_detection_model.predict(
         frame,
         imgsz=(H, W),
@@ -111,6 +114,14 @@ def yolo_object_detection(frame, H, W):
                 ]
                 # print(object_res)
                 objects.append(object_res)
+                class_name = str(object_res[4])
+                OBJ_COUNTER.setdefault(class_name, 0)
+                OBJ_COUNTER[class_name] += 1
+                current_cnt = OBJ_COUNTER[class_name]
+                print(
+                    f"[OBJECT DETECTION] {class_name} detected in frame {frameNum} (Total detected: {current_cnt})",
+                    flush=True,
+                )
 
     return objects
 
@@ -232,7 +243,7 @@ def run(ipfilename, format, options, tmp_dir_path):
         if frame is not None and options["otype"] == "face":
             # face detection for each frame
             faces = face_detection(frame, H, W)
-            for face in faces:
+            for oidx, face in enumerate(faces):
                 tdict = {
                     "x": int(face[0]),
                     "y": int(face[1]),
@@ -249,32 +260,39 @@ def run(ipfilename, format, options, tmp_dir_path):
                     },
                 }
 
-                METADATA[frameNum] = {"frameId": frameNum, "bbox": tdict}
+                framenum_str = f"{frameNum}_{oidx}"
                 if DEBUG == "1":
                     meta_str = ",".join([str(o) for o in face])
                     print(f"[METADATA],{meta_str}", flush=True)
 
+                METADATA[framenum_str] = {"frameId": frameNum, "bbox": tdict}
+
         elif frame is not None:
             # object detection
-            objects = yolo_object_detection(frame, H, W)
-            for object in objects:
+            objects = yolo_object_detection(frame, H, W, frameNum)
+            for oidx, object_res in enumerate(objects):
                 tdict = {
-                    "x": int(object[0]),
-                    "y": int(object[1]),
-                    "height": int(object[2]),
-                    "width": int(object[3]),
-                    "object": str(object[4]),
+                    "x": int(object_res[0]),
+                    "y": int(object_res[1]),
+                    "height": int(object_res[2]),
+                    "width": int(object_res[3]),
+                    "object": str(object_res[4]),
                     "object_det": {
-                        "confidence": float(object[5]),
+                        "confidence": float(object_res[5]),
                         "frameH": H,  # int(object[6]),
                         "frameW": W,  # int(object[7]),
                     },
                 }
 
-                METADATA[frameNum] = {"frameId": frameNum, "bbox": tdict}
+                framenum_str = f"{frameNum}_{oidx}"
                 if DEBUG == "1":
-                    meta_str = ",".join([str(o) for o in object])
+                    meta_str = ",".join([str(o) for o in object_res + [framenum_str]])
                     print(f"[METADATA],{meta_str}", flush=True)
+
+                METADATA[framenum_str] = {
+                    "frameId": frameNum,
+                    "bbox": tdict,
+                }
 
     video_obj.release()
 
@@ -295,6 +313,11 @@ def run(ipfilename, format, options, tmp_dir_path):
         json.dump(response, f, indent=4)
 
     if DEBUG == "1":
+        num_detections = len(metadata.keys())
         print(f"[TIMING],end_udf_metadata,{ipfilename}," + str(time.time()), flush=True)
+
+        print(
+            f"[METADATA_INFO],{ipfilename},{otype},{num_detections},{W},{H}", flush=True
+        )
 
     return ipfilename, jsonfile

@@ -1,0 +1,6 @@
+# This directory is watched for mp4 files and/or camera configuration files
+
+!.gitignore
+!camera_config.yaml
+
+*.*

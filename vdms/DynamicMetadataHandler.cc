@@ -44,7 +44,7 @@ void DynamicMetadataHandler::initiate(){
     add_metadata_bg_vid();
 }
 
-void DynamicMetadataHandler::add_metadata_bg_vid(){    
+void DynamicMetadataHandler::add_metadata_bg_vid(){
     std::string url = "http://video-service:5011/video";
     Json::Value options;
     // options["port"] = VDMSConfig::instance()->get_int_value("port", DEFAULT_PORT);
@@ -66,11 +66,11 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
         frame_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
         frame_props[VDMS_DM_VID_NAME_PROP] = _props[VDMS_VID_PATH_PROP];
         frame_props["server_filepath"] = _props["Name"].asString();
-        frame_props["fps"] = _props["fps"].asFloat();
-        frame_props["duration"] = _props["duration"].asFloat();
-        frame_props["width"] = _props["width"].asFloat();
-        frame_props["height"] = _props["height"].asFloat();
-        frame_props["frame_count"] = _props["frame_count"].asInt();
+        // frame_props["fps"] = _props["fps"].asFloat();
+        // frame_props["duration"] = _props["duration"].asFloat();
+        // frame_props["width"] = _props["width"].asFloat();
+        // frame_props["height"] = _props["height"].asFloat();
+        // frame_props["frame_count"] = _props["frame_count"].asInt();
 
         curr_frame_metadata["frame_props"] = frame_props;
 
@@ -78,11 +78,11 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
         edge_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
         edge_props[VDMS_DM_VID_NAME_PROP] = _props[VDMS_VID_PATH_PROP];
         edge_props["server_filepath"] = _props["Name"].asString();
-        edge_props["fps"] = _props["fps"].asFloat();
-        edge_props["duration"] = _props["duration"].asFloat();
-        edge_props["width"] = _props["width"].asFloat();
-        edge_props["height"] = _props["height"].asFloat();
-        edge_props["frame_count"] = _props["frame_count"].asInt();
+        // edge_props["fps"] = _props["fps"].asFloat();
+        // edge_props["duration"] = _props["duration"].asFloat();
+        // edge_props["width"] = _props["width"].asFloat();
+        // edge_props["height"] = _props["height"].asFloat();
+        // edge_props["frame_count"] = _props["frame_count"].asInt();
 
         curr_frame_metadata["edge_props"] = edge_props;
 
@@ -90,11 +90,11 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
             Json::Value bbox_props;
             bbox_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
             bbox_props["server_filepath"] = _props["Name"].asString();
-            bbox_props["fps"] = _props["fps"].asFloat();
-            bbox_props["duration"] = _props["duration"].asFloat();
-            bbox_props["width"] = _props["width"].asFloat();
-            bbox_props["height"] = _props["height"].asFloat();
-            bbox_props["frame_count"] = _props["frame_count"].asInt();
+            // bbox_props["fps"] = _props["fps"].asFloat();
+            // bbox_props["duration"] = _props["duration"].asFloat();
+            // bbox_props["width"] = _props["width"].asFloat();
+            // bbox_props["height"] = _props["height"].asFloat();
+            // bbox_props["frame_count"] = _props["frame_count"].asInt();
             bbox_props[VDMS_DM_VID_NAME_PROP] = _props[VDMS_VID_PATH_PROP];
             bbox_props[VDMS_DM_VID_OBJECT_PROP] =
                 vframe["bbox"]["object"].asString();
@@ -120,11 +120,11 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
             bb_edge_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
             bb_edge_props[VDMS_DM_VID_NAME_PROP] = _props[VDMS_VID_PATH_PROP];
             bb_edge_props["server_filepath"] = _props["Name"].asString();
-            bb_edge_props["fps"] = _props["fps"].asFloat();
-            bb_edge_props["duration"] = _props["duration"].asFloat();
-            bb_edge_props["width"] = _props["width"].asFloat();
-            bb_edge_props["height"] = _props["height"].asFloat();
-            bb_edge_props["frame_count"] = _props["frame_count"].asInt();
+            // bb_edge_props["fps"] = _props["fps"].asFloat();
+            // bb_edge_props["duration"] = _props["duration"].asFloat();
+            // bb_edge_props["width"] = _props["width"].asFloat();
+            // bb_edge_props["height"] = _props["height"].asFloat();
+            // bb_edge_props["frame_count"] = _props["frame_count"].asInt();
 
             curr_frame_metadata["bb_edge_props"] = bb_edge_props;
 
@@ -133,7 +133,7 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
         }
         counter++;
         if (counter == int(frame_count/chunk_count) || curr_frame == frame_count){
-            options["metadata"] = metadata_chunk;            
+            options["metadata"] = metadata_chunk;
             VCL::Video video(_video);
             video.remoteOperation(url, options);
             videoLoop.enqueue(video);
@@ -144,5 +144,5 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
 
     while (videoLoop.is_loop_running()) {
       continue;
-    }    
+    }
 }

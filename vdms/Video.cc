@@ -1040,6 +1040,7 @@ Json::Value process_response(std::string zip_file_name,
 
   int numFiles = zip_get_num_files(archive);
 
+  const size_t buffer_size=1024;
   for (int i = 0; i < numFiles; ++i) {
     struct zip_stat fileInfo;
     zip_stat_init(&fileInfo);
@@ -1058,7 +1059,7 @@ Json::Value process_response(std::string zip_file_name,
             continue;
           }
 
-          char buffer[1024];
+          char buffer[buffer_size];
           int bytes_read;
           while ((bytes_read = zip_fread(file, buffer, sizeof(buffer))) > 0) {
             fwrite(buffer, 1, bytes_read, new_file);
@@ -1066,11 +1067,11 @@ Json::Value process_response(std::string zip_file_name,
 
           fclose(new_file);
         } else {
-          char buffer[1024];
-          std::string jsonString;
-          int bytes_read;
-          while ((bytes_read = zip_fread(file, buffer, sizeof(buffer))) > 0) {
-            jsonString += buffer;
+          std::string jsonString;  // Accumulates JSON data
+          std::vector<char> buffer(buffer_size);
+          ssize_t bytes_read;
+          while ((bytes_read = zip_fread(file, buffer.data(), buffer_size)) > 0) {
+            jsonString.append(buffer.data(), bytes_read);
           }
 
           Json::Reader reader;

@@ -14,6 +14,7 @@ SOURCE="-DIN_SOURCE=${IN_SOURCE}"
 DEBUG="0"
 DEVICE="CPU"
 DOCKER_TAR="0"
+RESIZE_FLAG="False"
 
 DIR=$(dirname $(readlink -f "$0"))
 BUILD_DIR=$DIR/build
@@ -22,6 +23,7 @@ LONG_LIST=(
     "ingestion:"
     "type:"
     "registry:"
+    "resize"
     "ncurations:"
     "nstreams:"
     "ncpu:"
@@ -34,7 +36,7 @@ LONG_LIST=(
 OPTS=$(getopt \
     --longoptions "$(printf "%s," "${LONG_LIST[@]}")" \
     --name "$(basename "$0")" \
-    --options "hdli:t:r:n:v:c:s:e:" \
+    --options "hdlzi:t:r:n:v:c:s:e:" \
     -- "$@"
 )
 
@@ -66,6 +68,7 @@ script_usage()
         -s or --source      optional    Input source type (videos, stream) [Default: stream]
         -t or --type        optional    Deployment method (compose) [Default: compose]
         -v or --nstreams    optional    Number of video streams [Default: 1]
+        -z or --resize      optional    Flag to resize video to model input size
 
 EOF
 }
@@ -88,6 +91,7 @@ while true; do
             ;;
         -t | --type) shift; EXP_TYPE="$1"; shift ;;
         -v | --nstreams) shift; NSTREAMS=$1; shift ;;
+        -z | --resize) shift; RESIZE_FLAG="True" ;;
         --) shift; break ;;
         *) script_usage; exit 0 ;;
     esac
@@ -107,6 +111,7 @@ if [ $REGISTRY == "None" ]; then
         -DNCPU=$NCPU \
         -DNCURATIONS=$NCURATIONS \
         -DNSTREAMS=$NSTREAMS \
+        -DRESIZE_FLAG=$RESIZE_FLAG \
         ..
 else
     cmake \
@@ -118,6 +123,7 @@ else
         -DNCPU=$NCPU \
         -DNCURATIONS=$NCURATIONS \
         -DNSTREAMS=$NSTREAMS \
+        -DRESIZE_FLAG=$RESIZE_FLAG \
         -DREGISTRY=$REGISTRY \
         ..
 fi

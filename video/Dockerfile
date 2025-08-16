@@ -1,12 +1,6 @@
 
 FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1
 
-ARG DEVICE="CPU"
-ENV DEVICE="${DEVICE}"
-
-ARG IN_SOURCE="videos"
-ENV IN_SOURCE="${IN_SOURCE}"
-
 ENV VIRTUAL_ENV=/opt/venv
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -19,6 +13,10 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 COPY remote_function /home/remote_function
 COPY resources /home/resources
+COPY requirements.txt /home/requirements.txt
+
+ARG DEVICE="CPU"
+ENV DEVICE="${DEVICE}"
 
 RUN pip3 install pip --upgrade && \
     if [ "${DEVICE}" = "CPU" ]; then \
@@ -26,10 +24,16 @@ RUN pip3 install pip --upgrade && \
     else \
         pip3 install torch torchvision; \
     fi;
-RUN pip3 install wheel 'kafka-python>=1.4.7' inotify vdms && \
+RUN pip3 install -r /home/requirements.txt && \
     pip3 install -r /home/remote_function/requirements.${DEVICE}.txt
 
 RUN omz_downloader --list /home/resources/models/models.lst -o /home/resources/models --precisions FP16
+
+ARG IN_SOURCE="videos"
+ENV IN_SOURCE="${IN_SOURCE}"
+
+ARG RESIZE_FLAG="False"
+ENV RESIZE_FLAG="${RESIZE_FLAG}"
 
 WORKDIR /home
 COPY *.py /home/
@@ -38,10 +42,11 @@ COPY manage.sh /home/
 COPY *.conf /etc/nginx/
 RUN rm /var/www/mp4/* || true
 RUN rm /var/www/stream/* || true
-COPY archive/*.mp4 /var/www/mp4/
+# COPY archive/*.mp4 /var/www/mp4/
+# COPY archive/*.* /var/www/archive/
 RUN rm /var/www/mp4/.gitignore || true
 COPY segment_archive.py /home/
-RUN if [ "${IN_SOURCE}" = "videos" ]; then python3 /home/segment_archive.py; fi;
+# RUN if [ "${IN_SOURCE}" = "videos" ]; then mkdir -p /var/www/mp4 && python3 /home/segment_archive.py /var/www/archive; fi;
 CMD  ["/bin/bash","-c","python3 /home/resources/models/download_yolo.py && /home/manage.sh"]
 
 ####

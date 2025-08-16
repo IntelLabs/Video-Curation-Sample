@@ -18,10 +18,14 @@ define(`PROFILE_GPU', `depends_on:
             SHOST: "http://stream-service:8080"
             ZKHOST: "zookeeper-service:2181"
             DBHOST: "vdms-service"
+            `RESIZE_FLAG': "defn(`RESIZE_FLAG')"
+            CPU_BATCH_SIZE: 1
+            GPU_BATCH_SIZE: 1
             `DEBUG': "defn(`DEBUG')"
             `DEVICE': "defn(`DEVICE')"
             `IN_SOURCE': "defn(`IN_SOURCE')"
             `INGESTION': "defn(`INGESTION')"
+            WATCH_DIR: "/watch_dir"
             http_proxy: "${http_proxy}"
             HTTP_PROXY: "${HTTP_PROXY}"
             https_proxy: "${https_proxy}"
@@ -31,6 +35,8 @@ define(`PROFILE_GPU', `depends_on:
         volumes:
             - /etc/localtime:/etc/localtime:ro
             - app-content:/var/www
+            - ../../inputs/camera_config.yaml:/home/camera_config.yaml:ro
+            - ../../inputs:/watch_dir:ro
         networks:
             - appnet
         restart: always

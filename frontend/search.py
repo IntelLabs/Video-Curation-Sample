@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, unquote
 
 from merge_iv import merge_iv
+from requests import get
 from tornado import gen, web
 from tornado.concurrent import run_on_executor
 
@@ -48,8 +49,6 @@ class SearchHandler(web.RequestHandler):
                 "constraints": {
                     "category": ["==", "video_path_rop"],
                 },
-                # "results": {"list": ['video_name', "video_filename"]},
-                # "results": {"list": ["fps", "duration", "width", "height"]}
             }
         }
         q_vid2 = {
@@ -60,24 +59,23 @@ class SearchHandler(web.RequestHandler):
                 "link": {"ref": ref},
             }
         }
-
         q_frame = {
-            "FindVideo": {
-                # "metaconstraints" : {
-                #     # "objectID" : ["==", "car"],
-                #     "objectID" : ["==", "face"],
-                #     "emotion" : ["==", "happy"],
-                # },
+            "FindBoundingBox": {
                 "link": {"ref": ref + 1},
-                # "operations": [
-                #     {
-                #         "type": "remoteOp",
-                #         "url": "http://video-service:5011/video",
-                #         "options": {
-                #             "id": "framesofinterest",
-                #         },
-                #     }
-                # ],
+                "results": {
+                    "list": [
+                        "objectID",
+                        "server_filepath",
+                        "frameID",
+                        "VD:x1",
+                        "VD:y1",
+                        "VD:width",
+                        "VD:height",
+                        "frameW",
+                        "frameH",
+                        "confidence",
+                    ]
+                },
             }
         }
 
@@ -98,11 +96,11 @@ class SearchHandler(web.RequestHandler):
                         "results": {
                             "list": [
                                 "Name",
-                                "fps",
-                                "duration",
-                                "width",
-                                "height",
-                                "frame_count",
+                                # "fps",
+                                # "duration",
+                                # "width",
+                                # "height",
+                                # "frame_count",
                             ],
                         }
                     }
@@ -112,7 +110,7 @@ class SearchHandler(web.RequestHandler):
         metaconstraints = {}
         if query1["name"] == "object":
             metaconstraints["objectID"] = ["==", self._value(query1, "Object List")]
-            q_frame["FindVideo"].update({"metaconstraints": metaconstraints})
+            q_frame["FindBoundingBox"].update({"constraints": metaconstraints})
 
         if query1["name"] == "person":
             metaconstraints["age"] = [
@@ -132,7 +130,7 @@ class SearchHandler(web.RequestHandler):
                 metaconstraints["gender"] = ["==", gender]
 
             if len(metaconstraints) > 0:
-                q_frame["FindVideo"].update({"metaconstraints": metaconstraints})
+                q_frame["FindBoundingBox"].update({"constraints": metaconstraints})
 
         return [q_vid, q_vid2, q_frame]
 
@@ -150,103 +148,99 @@ class SearchHandler(web.RequestHandler):
 
                     for ent in entities:
                         name = ent["Name"]
-                        duration = ent["duration"]
+                        r = get(vdhost + "/api/info", params={"video": name}).json()
+                        duration = r["duration"]
                         seg1c = {
                             "name": name,
                             "stream": quote(
                                 "/api/segment/0/" + str(duration) + "/" + name
                             ),
                             "thumbnail": quote("/api/thumbnail/0/" + name + ".png"),
-                            "fps": ent["fps"],
+                            "fps": r["fps"],
                             "time": 0,
                             "duration": duration,
                             "offset": 0,
-                            "width": ent["width"],
-                            "height": ent["height"],
-                            "frames": [x for x in range(0, ent["frame_count"])],
+                            "width": r["width"],
+                            "height": r["height"],
+                            "frames": [x for x in range(0, r["frame_count"])],
                         }
                         segs.append(seg1c)
-
         else:
             for i in range(0, len(response), 3):
                 if (
                     "FindVideo" in response[i]
                     and response[i]["FindVideo"]["status"] == 0
-                    and response[i + 2]["FindVideo"]["status"] == 0
-                    and "entities" in response[i + 2]["FindVideo"]
+                    and response[i + 2]["FindBoundingBox"]["status"] == 0
+                    and "entities" in response[i + 2]["FindBoundingBox"]
                 ):
-                    entities = response[i + 2]["FindVideo"]["entities"]
-                    # if response[i+1]["FindConnection"]["status"]==0 and response[i]["FindBoundingBox"]["status"]==0:
-                    #     # connections=response[i+1]["FindConnection"]["connections"]
-                    #     bboxes=response[i]["FindBoundingBox"]["entities"]
-                    #     # if len(connections)!=len(bboxes): continue
+                    entities = response[i + 2]["FindBoundingBox"]["entities"]
                     print(entities)
-                    for j in range(0, len(entities)):
-                        for ent_bbox in entities[j]["bbox"]:
-                            stream = ent_bbox["server_filepath"]
-                            if stream not in clips:
-                                clips[stream] = {
-                                    "fps": ent_bbox["fps"],
-                                    "duration": ent_bbox["duration"],
-                                    "width": ent_bbox["width"],
-                                    "height": ent_bbox["height"],
-                                    "segs": [],
-                                    "frames": {},
-                                }
+                    for ent_bbox in entities:
+                        stream = ent_bbox["server_filepath"]
+                        if stream not in clips:
+                            r = get(
+                                vdhost + "/api/info", params={"video": stream}
+                            ).json()
+                            clips[stream] = {
+                                "fps": r["fps"],
+                                "duration": r["duration"],
+                                "width": r["width"],
+                                "height": r["height"],
+                                "segs": [],
+                                "frames": {},
+                            }
 
-                            # time stamp and duration
-                            stream1 = clips[stream]
-                            ts = float(ent_bbox["frameID"]) / stream1["fps"]
+                        # time stamp and duration
+                        stream1 = clips[stream]
+                        ts = float(ent_bbox["frameID"]) / stream1["fps"]
 
-                            # merge segs
-                            segmin = 1  # 1, 2
-                            seg1 = [
-                                max(ts - segmin, 0),
-                                min(ts + segmin, stream1["duration"]),
-                            ]
-                            stream1["segs"] = merge_iv(stream1["segs"], seg1)
+                        # merge segs
+                        segmin = 1  # 1, 2
+                        seg1 = [
+                            max(ts - segmin, 0),
+                            min(ts + segmin, stream1["duration"]),
+                        ]
+                        stream1["segs"] = merge_iv(stream1["segs"], seg1)
 
-                            if ts not in stream1["frames"]:
-                                stream1["frames"][ts] = {"time": ts, "objects": []}
+                        if ts not in stream1["frames"]:
+                            stream1["frames"][ts] = {"time": ts, "objects": []}
 
-                            if "objectID" in ent_bbox:
-                                bbc = {
-                                    "x": ent_bbox["VD:x1"],
-                                    "y": ent_bbox["VD:y1"],
-                                    "w": ent_bbox["VD:width"],
-                                    "h": ent_bbox["VD:height"],
-                                }
+                        if "objectID" in ent_bbox:
+                            bbc = {
+                                "x": ent_bbox["VD:x1"],
+                                "y": ent_bbox["VD:y1"],
+                                "w": ent_bbox["VD:width"],
+                                "h": ent_bbox["VD:height"],
+                            }
 
-                                # Normalize BBs to frame size
-                                frameW = (
-                                    ent_bbox["frameW"]
-                                    if not isinstance(ent_bbox["frameW"], str)
-                                    else ent_bbox["width"]
-                                )
-                                frameH = (
-                                    ent_bbox["frameH"]
-                                    if not isinstance(ent_bbox["frameH"], str)
-                                    else ent_bbox["height"]
-                                )
+                            # Normalize BBs to frame size
+                            frameW = (
+                                ent_bbox["frameW"]
+                                if not isinstance(ent_bbox["frameW"], str)
+                                else stream1["width"]
+                            )
+                            frameH = (
+                                ent_bbox["frameH"]
+                                if not isinstance(ent_bbox["frameH"], str)
+                                else stream1["height"]
+                            )
 
-                                obj = {
-                                    "detection": {
-                                        "bounding_box": {
-                                            "x_max": float(bbc["w"] + bbc["x"])
-                                            / float(frameW),
-                                            "x_min": float(bbc["x"]) / float(frameW),
-                                            "y_max": float(bbc["h"] + bbc["y"])
-                                            / float(frameH),
-                                            "y_min": float(bbc["y"]) / float(frameH),
-                                        },
-                                        "label": ent_bbox["objectID"],
+                            obj = {
+                                "detection": {
+                                    "bounding_box": {
+                                        "x_max": float(bbc["w"] + bbc["x"])
+                                        / float(frameW),
+                                        "x_min": float(bbc["x"]) / float(frameW),
+                                        "y_max": float(bbc["h"] + bbc["y"])
+                                        / float(frameH),
+                                        "y_min": float(bbc["y"]) / float(frameH),
                                     },
-                                }
-                                if "confidence" in ent_bbox:
-                                    obj["detection"]["confidence"] = ent_bbox[
-                                        "confidence"
-                                    ]
-                                stream1["frames"][ts]["objects"].append(obj)
+                                    "label": ent_bbox["objectID"],
+                                },
+                            }
+                            if "confidence" in ent_bbox:
+                                obj["detection"]["confidence"] = ent_bbox["confidence"]
+                            stream1["frames"][ts]["objects"].append(obj)
 
             print("clips:", flush=True)
             print(clips, flush=True)
