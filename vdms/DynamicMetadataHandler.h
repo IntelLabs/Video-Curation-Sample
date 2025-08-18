@@ -30,45 +30,42 @@
  */
 
 #pragma once
-#include "vcl/Image.h"
-#include "vcl/Video.h"
+#include <jsoncpp/json/json.h>
+#include <jsoncpp/json/value.h>
 
 #include <condition_variable>
 #include <functional>
 #include <future>
-#include <thread>
-#include <vector>
-
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/videoio.hpp>
+#include <thread>
+#include <vector>
 
 #include "ExceptionsCommand.h"
 #include "RSCommand.h"
-#include "defines.h"
 #include "VDMSConfig.h"
+#include "defines.h"
+#include "vcl/Image.h"
+#include "vcl/Video.h"
 
-#include <jsoncpp/json/json.h>
-#include <jsoncpp/json/value.h>
+class DynamicMetadataHandler {
+ public:
+  DynamicMetadataHandler() = default;
+  DynamicMetadataHandler(VCL::Video video, Json::Value props,
+                         std::vector<Json::Value> metadata);
 
-class DynamicMetadataHandler{
-    public:
-        DynamicMetadataHandler() = default;
-        DynamicMetadataHandler(VCL::Video video, Json::Value props, std::vector<Json::Value> metadata);
+  void initiate();
 
-        void initiate();
-        
-    private:
-
-        VCL::Video _video;
-        std::vector<Json::Value> _metadata;
-        Json::Value _props;
-        /**
-         * Initiate background dynamic metadata addition for the video object
-         * @param video the video to which metadata is to be added
-         * @param props the metadata added by the user
-        */
-        void add_metadata_bg_vid();
-
+ private:
+  VCL::Video _video;
+  std::vector<Json::Value> _metadata;
+  Json::Value _props;
+  /**
+   * Initiate background dynamic metadata addition for the video object
+   * @param video the video to which metadata is to be added
+   * @param props the metadata added by the user
+   */
+  void add_metadata_bg_vid();
 };
