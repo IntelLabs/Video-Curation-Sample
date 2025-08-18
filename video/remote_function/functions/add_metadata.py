@@ -1,61 +1,71 @@
-import json
 import os
-import time
-import uuid
+
 import vdms
 
-def run(ipfilename, format, options, tmp_dir_path):
-    print("Adding metadata from UDF to host: {} and port: {}".format(options['host'], options['port']))
-    db = vdms.vdms()
-    db.connect(options['host'], options['port'])
+DEBUG = os.environ.get("DEBUG", "0")
 
-    print(options["metadata"].keys())
+
+def run(ipfilename, format, options, tmp_dir_path):
+    print(
+        "Adding metadata for {} from UDF to host: {} and port: {}".format(
+            options["Name"], options["host"], options["port"]
+        ),
+        flush=True,
+    )
+    db = vdms.vdms()
+    db.connect(options["host"], options["port"])
+
+    if DEBUG == "1":
+        print(
+            "{} metadata keys: {}".format(
+                options["Name"], list(options["metadata"].keys())
+            ),
+            flush=True,
+        )
 
     ref = 1
     query = [
         {
             "FindVideo": {
                 "_ref": ref,
-                "constraints" : {
-                    "uid" : ["==", options['uid']],
+                "constraints": {
+                    "uid": ["==", options["uid"]],
                 },
-                "results":{
-                    "limit":1
-                }
+                "results": {"limit": 1},
             }
         }
     ]
     fref = 0
     for k in options["metadata"]:
         metadata = options["metadata"][k]
-        fref+=2
+        fref += 2
         add_query = {
-            "AddEntity" : {
+            "AddEntity": {
                 "_ref": fref,
                 "class": "Frame",
-                "properties": metadata["frame_props"]
+                "properties": metadata["frame_props"],
             }
         }
-        
+
         add_frame_conn_query = {
             "AddConnection": {
                 "class": "Vid2Frame",
                 "properties": metadata["edge_props"],
                 "ref1": 1,
-                "ref2": fref
+                "ref2": fref,
             }
         }
 
         add_bbox_query = {
-            "AddBoundingBox" : {
-                "_ref": fref+1,
+            "AddBoundingBox": {
+                "_ref": fref + 1,
                 "properties": metadata["bbox_props"],
                 "rectangle": {
                     "h": int(metadata["bbox_props"]["VD:height"]),
                     "w": int(metadata["bbox_props"]["VD:width"]),
                     "x": int(metadata["bbox_props"]["VD:x1"]),
                     "y": int(metadata["bbox_props"]["VD:y1"]),
-                }
+                },
             }
         }
 
@@ -64,7 +74,7 @@ def run(ipfilename, format, options, tmp_dir_path):
                 "class": "Frame2BB",
                 "properties": metadata["bb_edge_props"],
                 "ref1": fref,
-                "ref2": fref+1
+                "ref2": fref + 1,
             }
         }
 
@@ -74,5 +84,12 @@ def run(ipfilename, format, options, tmp_dir_path):
         query.append(add_bbox_conn_query)
 
     response, res_arr = db.query(query, [[]])
-    print(response)
+
+    if DEBUG == "1":
+        print(
+            "[DEBUG] {} BACKGROUND ADD_METADATA RESPONSE: {}".format(
+                options["Name"], response
+            ),
+            flush=True,
+        )
     return ipfilename, None

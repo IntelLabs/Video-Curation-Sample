@@ -134,6 +134,7 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
         counter++;
         if (counter == int(frame_count/chunk_count) || curr_frame == frame_count){
             options["metadata"] = metadata_chunk;
+            options["Name"] = _props["Name"].asString();
             VCL::Video video(_video);
             video.remoteOperation(url, options);
             videoLoop.enqueue(video);
