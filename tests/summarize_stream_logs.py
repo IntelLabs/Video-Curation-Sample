@@ -60,6 +60,13 @@ def get_input_args():
         help="Directory containing log from app run with extension '.log'",
     )
 
+    parser.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="Search recursively for *.log files",
+    )
+
     args = parser.parse_args()
     args.log_dir = args.log_dir.resolve()
     args.csv_file = str(args.log_dir / "log_summary.csv")
@@ -68,7 +75,7 @@ def get_input_args():
     return args
 
 
-def summarize_info(log_filename, info, out_log_file=None):
+def summarize_info(log_filename, info, out_log_file=None, method=None):
     app_info = {}
     camera_info = {}
 
@@ -236,6 +243,7 @@ def summarize_info(log_filename, info, out_log_file=None):
     for name, cam_details in camera_info.items():
         cam_dict = {
             "log": log_filename,
+            "Method": method,
             "stream name": name,
         }
 
@@ -248,6 +256,7 @@ def summarize_info(log_filename, info, out_log_file=None):
     # Reorder
     new_col_order = [
         "log",
+        "Method",
         "stream name",
         "video",
         "video duration (s)",
@@ -491,12 +500,23 @@ def get_log_info(args, log_path):  # Extract timing from logs
 def main(args):
     df = pd.DataFrame()
 
-    for log_path in args.log_dir.glob("*.log"):
+    if args.recursive:
+        glob_cmd = args.log_dir.rglob("*.log")
+    else:
+        glob_cmd = args.log_dir.glob("*.log")
+
+    for log_path in glob_cmd:
+        method = None
+        if args.recursive:
+            method = log_path.parent.name
+
         # Extract timing from logs
         info = get_log_info(args, log_path)
 
         # Summarize info
-        new_df = summarize_info(log_path.name, info, out_log_file=args.out_log_file)
+        new_df = summarize_info(
+            log_path.name, info, out_log_file=args.out_log_file, method=method
+        )
 
         # Accumulate results
         df = pd.concat([df, new_df], ignore_index=True)

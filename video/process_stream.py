@@ -24,6 +24,7 @@ DBHOST = os.getenv("DBHOST", "vdms-service")
 DEBUG = os.getenv("DEBUG", "0")
 DEVICE = os.getenv("DEVICE", "CPU")
 INGESTION = os.getenv("INGESTION", "object,face")
+LOCKTIMEOUT_RETRIES = 5
 RESIZE_FLAG = str2bool(os.getenv("RESIZE_FLAG", False))
 SHARED_OUTPUT = os.getenv("SHARED_OUTPUT", "/var/www/mp4")
 TEST_MODE = str2bool(os.getenv("TEST_FLAG", False))
@@ -393,7 +394,13 @@ def get_udf_query(
             flush=True,
         )
     try:
-        res, res_arr = db.query([query], [video_blob])
+        # res, res_arr = db.query([query], [video_blob])
+        for _ in range(LOCKTIMEOUT_RETRIES):
+            res, _ = db.query([query], [video_blob])
+            if "FailedCommand" in res[0] and "timeout" in res[0]["info"].lower():
+                pass  # Rerun
+            else:
+                break  # Continue
 
         if DEBUG_FLAG:
             print(

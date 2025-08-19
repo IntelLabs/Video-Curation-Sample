@@ -3,6 +3,7 @@ import os
 import vdms
 
 DEBUG = os.environ.get("DEBUG", "0")
+LOCKTIMEOUT_RETRIES = 5
 
 
 def run(ipfilename, format, options, tmp_dir_path):
@@ -83,7 +84,13 @@ def run(ipfilename, format, options, tmp_dir_path):
         query.append(add_bbox_query)
         query.append(add_bbox_conn_query)
 
-    response, res_arr = db.query(query, [[]])
+    # response, res_arr = db.query(query, [[]])
+    for _ in range(LOCKTIMEOUT_RETRIES):
+        response, _ = db.query(query, [[]])
+        if "FailedCommand" in response[0] and "timeout" in response[0]["info"].lower():
+            pass  # Rerun
+        else:
+            break  # Continue
 
     if DEBUG == "1":
         print(

@@ -77,7 +77,12 @@ def run_cmds(stream_details):
     # cmd = f"ffmpeg -re -stream_loop 1 -i {TEST_VIDEO} {GENERAL_OPTS} -filter:v fps={FPS} -f rtsp -rtsp_transport tcp {URL}"
     # cmd = f"ffmpeg -re -i {TEST_VIDEO} -preset medium -tune zerolatency -filter:v fps=fps={FPS} -f rtsp -rtsp_transport tcp {URL}"
 
-    cmd = f"ffmpeg -re -stream_loop {num_repeats} -i {TEST_VIDEO} {GENERAL_OPTS} -filter:v fps=fps={FPS} -f rtsp -rtsp_transport tcp {URL}"
+    # cmd = f"ffmpeg -re -stream_loop {num_repeats} -i {TEST_VIDEO} {GENERAL_OPTS} -preset medium -crf 23-filter:v fps=fps={FPS} -f rtsp -rtsp_transport tcp {URL}"
+    cmd = f"ffmpeg -re -stream_loop {num_repeats} -i {TEST_VIDEO} {GENERAL_OPTS} "
+    cmd += (
+        "-vcodec libx264 -preset fast -crf 23 -bufsize 8M -pix_fmt yuv420p "  # -g 60 "
+    )
+    cmd += f"-filter:v fps=fps={FPS} -f rtsp -rtsp_transport tcp {URL}"
     # cmd = f"ffmpeg -re -i {TEST_VIDEO} {GENERAL_OPTS} -filter:v fps=fps={FPS} -f rtsp -rtsp_transport tcp {URL}"
     cmd_list = shlex.split(cmd)
 

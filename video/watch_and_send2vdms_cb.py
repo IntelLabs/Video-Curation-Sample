@@ -65,7 +65,9 @@ def watch_video_files(queue, watch_dir):
 
         # New file created in watched directory
         # if "IN_CREATE" in type_names:
-        if "IN_CLOSE_WRITE" in type_names:
+        if "IN_CLOSE_WRITE" in type_names and any(
+            filename.endswith(ext) for ext in [".mp4", ".mkv", ".avi"]
+        ):
             source = os.path.join(path, filename)
             print(f"{source} added to queue: {time.time()}", flush=True)
             queue.put((source, None))
