@@ -45,7 +45,24 @@ KEYWORDS = [
     # "OBJECT DETECTION]",
     # "METADATA]",
     "Clip,contains,frames",
+    "struct.error: unpack requires a buffer of 4 bytes",
 ]
+
+PROCESSING_DEFAULT_DICT = {
+    "num clips": 0,
+    "total clip frames": 0,  # info_details["Num Frames"]
+    "frameW": 0,
+    "frameH": 0,
+    "object detections": 0,
+    "face detections": 0,
+    "Num Failures": 0,
+    "Num Bkgd Failures": 0,
+    "Time to create clip (s)": 0,  # info_details["Save clip"] - info_details["Start new clip"]
+    "UDF object db.query runtime (s)": 0,
+    "UDF object run func runtime (s)": 0,
+    "UDF face db.query runtime (s)": 0,
+    "UDF face run func runtime (s)": 0,
+}
 
 
 def get_input_args():
@@ -81,6 +98,7 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
 
     for key, info_details in info.items():
         if key == "Overall":
+            VDMS_crashes = 0
             if "end_watchandsend" not in info_details:
                 app_end_time = info_details["Max Timestamp"]
             else:
@@ -106,8 +124,19 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
             )
             app_info["Stream processing time (s)"] = stream_process_elapsed_time
 
+            if "VDMS crashes" in info_details:
+                VDMS_crashes = info_details["VDMS crashes"]
+
+            app_info["Log VDMS crashes"] = VDMS_crashes
+
         elif ".mp4" not in key:
             camera_info.setdefault(key, {})
+            frames_received = 0
+            received_expected_clips = 0
+            frames_processed = 0
+            stream_processing_time = 0
+            delta_streamend_2_processing_end = 0
+
             video_name = info_details["streamed video"]
             camera_info[key]["video"] = video_name
             camera_info[key]["video duration (s)"] = info_details["video duration (s)"]
@@ -131,25 +160,22 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                 camera_info[key]["target frames"]
                 / (clip_length_in_secs * new_target_fps)
             )
-            camera_info[key]["received expected clips"] = ceil(
-                (info_details["frames received"] / info_details["video fps"])
-                / clip_length_in_secs
-            )
-            camera_info[key]["frames received"] = info_details["frames received"]
-            camera_info[key]["frames processed"] = info_details["frames processed"]
+
+            if "frames received" in info_details:
+                frames_received = info_details["frames received"]
+                received_expected_clips = ceil(
+                    (frames_received / info_details["video fps"]) / clip_length_in_secs
+                )
+
+            if "frames processed" in info_details:
+                frames_processed = info_details["frames processed"]
+
+            camera_info[key]["frames received"] = frames_received
+            camera_info[key]["received expected clips"] = received_expected_clips
+            camera_info[key]["frames processed"] = frames_processed
             camera_info[key]["stream send elapsed time (s)"] = info_details[
                 "stream elapsed time (s)"
             ]
-            camera_info[key]["stream processing time (s)"] = (
-                info_details["Completed processing"] - info_details["Start processing"]
-            )
-            camera_info[key]["delta stream start to processing start (s)"] = abs(
-                info_details["Start processing"] - info_details["stream start time"]
-            )
-            camera_info[key]["delta stream end to processing end (s)"] = abs(
-                info_details["Completed processing"] - info_details["stream end time"]
-            )
-
             time_str = secs2HMS_str(camera_info[key]["stream send elapsed time (s)"])
             print(
                 f"\t[{key}] Took {time_str} to send {video_name}",
@@ -157,27 +183,42 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                 file=out_log_file,
             )
 
-            time_str = secs2HMS_str(camera_info[key]["stream processing time (s)"])
-            print(
-                f"\t[{key}] Took {time_str} to process {video_name}",
-                flush=True,
-                file=out_log_file,
+            if "Completed processing" in info_details:
+                stream_processing_time = (
+                    info_details["Completed processing"]
+                    - info_details["Start processing"]
+                )
+                time_str = secs2HMS_str(stream_processing_time)
+                print(
+                    f"\t[{key}] Took {time_str} to process {video_name}",
+                    flush=True,
+                    file=out_log_file,
+                )
+
+                delta_streamend_2_processing_end = abs(
+                    info_details["Completed processing"]
+                    - info_details["stream end time"]
+                )
+                time_str = secs2HMS_str(delta_streamend_2_processing_end)
+                print(
+                    f"\t[{key}] Took {time_str} after stream ended to complete processing {video_name}",
+                    flush=True,
+                    file=out_log_file,
+                )
+
+            camera_info[key]["stream processing time (s)"] = stream_processing_time
+            camera_info[key]["delta stream end to processing end (s)"] = (
+                delta_streamend_2_processing_end
             )
 
+            camera_info[key]["delta stream start to processing start (s)"] = abs(
+                info_details["Start processing"] - info_details["stream start time"]
+            )
             time_str = secs2HMS_str(
                 camera_info[key]["delta stream start to processing start (s)"]
             )
             print(
-                f"\t[{key}] Took {time_str} after starting stream to start processing {video_name}",
-                flush=True,
-                file=out_log_file,
-            )
-
-            time_str = secs2HMS_str(
-                camera_info[key]["delta stream end to processing end (s)"]
-            )
-            print(
-                f"\t[{key}] Took {time_str} after stream ended to complete processing {video_name}\n",
+                f"\t[{key}] Took {time_str} after starting stream to start processing {video_name}\n",
                 flush=True,
                 file=out_log_file,
             )
@@ -185,59 +226,66 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
         elif ".mp4" in key:
             camera_name = key.split("_")[0]
             if "num clips" not in camera_info[camera_name]:
-                camera_info[camera_name].update(
-                    {
-                        "num clips": 0,
-                        "total clip frames": 0,
-                        "frameW": 0,
-                        "frameH": 0,
-                        "object detections": 0,
-                        "face detections": 0,
-                        "Num Failures": 0,
-                        "Time to create clip (s)": 0,
-                        "UDF object db.query runtime (s)": 0,
-                        # "VDMS object e2e runtime (s)": 0,
-                        "UDF object run func runtime (s)": 0,
-                        "UDF face db.query runtime (s)": 0,
-                        # "VDMS face e2e runtime (s)": 0,
-                        "UDF face run func runtime (s)": 0,
-                    }
-                )
+                camera_info[camera_name].update(PROCESSING_DEFAULT_DICT)
+
             camera_info[camera_name]["num clips"] += 1
-            camera_info[camera_name]["total clip frames"] += info_details["Num Frames"]
-            camera_info[camera_name]["frameW"] = info_details["frameW"]
-            camera_info[camera_name]["frameH"] = info_details["frameH"]
-            camera_info[camera_name]["object detections"] += info_details[
-                "object detections"
-            ]
-            camera_info[camera_name]["face detections"] += info_details[
-                "face detections"
-            ]
-            camera_info[camera_name]["Num Failures"] += info_details["Num Failures"]
 
-            camera_info[camera_name]["Time to create clip (s)"] += (
-                info_details["Save clip"] - info_details["Start new clip"]
-            )
+            if "Num Frames" in info_details:
+                camera_info[camera_name]["total clip frames"] += info_details[
+                    "Num Frames"
+                ]
 
-            camera_info[camera_name]["UDF object db.query runtime (s)"] += (
-                info_details["end_udf_ingest_object"]
-                - info_details["start_udf_ingest_object"]
-            )
+            if "frameW" in info_details:
+                camera_info[camera_name]["frameW"] = info_details["frameW"]
+                camera_info[camera_name]["frameH"] = info_details["frameH"]
+
+            if "object detections" in info_details:
+                camera_info[camera_name]["object detections"] += info_details[
+                    "object detections"
+                ]
+
+            if "face detections" in info_details:
+                camera_info[camera_name]["face detections"] += info_details[
+                    "face detections"
+                ]
+
+            if "Num Failures" in info_details:
+                camera_info[camera_name]["Num Failures"] += info_details["Num Failures"]
+
+            if "Num Bkgd Failures" in info_details:
+                camera_info[camera_name]["Num Bkgd Failures"] += info_details[
+                    "Num Bkgd Failures"
+                ]
+
+            if "Save clip" in info_details:
+                camera_info[camera_name]["Time to create clip (s)"] += (
+                    info_details["Save clip"] - info_details["Start new clip"]
+                )
+
+            if "end_udf_ingest_object" in info_details:
+                camera_info[camera_name]["UDF object db.query runtime (s)"] += (
+                    info_details["end_udf_ingest_object"]
+                    - info_details["start_udf_ingest_object"]
+                )
             # camera_info[camera_name]["VDMS object e2e runtime (s)"] += info_details["object e2e_query_processing (s)"]
-            camera_info[camera_name]["UDF object run func runtime (s)"] += (
-                info_details["end_udf_metadata_object"]
-                - info_details["start_udf_metadata_object"]
-            )
 
-            camera_info[camera_name]["UDF face db.query runtime (s)"] += (
-                info_details["end_udf_ingest_face"]
-                - info_details["start_udf_ingest_face"]
-            )
+            if "end_udf_metadata_object" in info_details:
+                camera_info[camera_name]["UDF object run func runtime (s)"] += (
+                    info_details["end_udf_metadata_object"]
+                    - info_details["start_udf_metadata_object"]
+                )
+
+            if "end_udf_ingest_face" in info_details:
+                camera_info[camera_name]["UDF face db.query runtime (s)"] += (
+                    info_details["end_udf_ingest_face"]
+                    - info_details["start_udf_ingest_face"]
+                )
             # camera_info[camera_name]["VDMS face e2e runtime (s)"] += info_details["face e2e_query_processing (s)"]
-            camera_info[camera_name]["UDF face run func runtime (s)"] += (
-                info_details["end_udf_metadata_face"]
-                - info_details["start_udf_metadata_face"]
-            )
+            if "end_udf_metadata_face" in info_details:
+                camera_info[camera_name]["UDF face run func runtime (s)"] += (
+                    info_details["end_udf_metadata_face"]
+                    - info_details["start_udf_metadata_face"]
+                )
 
     details = []
     for name, cam_details in camera_info.items():
@@ -245,10 +293,18 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
             "log": log_filename,
             "Method": method,
             "stream name": name,
+            "Log VDMS crashes": int(app_info["Log VDMS crashes"]),
         }
+
+        if "num clips" not in cam_dict:
+            cam_dict.update(PROCESSING_DEFAULT_DICT)
+
+        # if "Log VDMS crashes" in app_info:
+        #     cam_dict["Log VDMS crashes"] += int(app_info["Log VDMS crashes"])
 
         for k, v in cam_details.items():
             cam_dict[k] = v
+
         details.append(cam_dict)
 
     new_df = pd.DataFrame(details)
@@ -276,6 +332,8 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
         "object detections",
         "face detections",
         "Num Failures",
+        "Num Bkgd Failures",
+        "Log VDMS crashes",
         "stream send elapsed time (s)",
         "stream processing time (s)",
         "delta stream start to processing start (s)",
@@ -296,7 +354,7 @@ def remove_value_from_list(the_list, value):
     return the_list
 
 
-def get_log_info(args, log_path):  # Extract timing from logs
+def get_log_info(args, log_path, method=None):  # Extract timing from logs
     min_timestamp = time.time()
     max_timestamp = 0
     camera_details = None
@@ -306,7 +364,10 @@ def get_log_info(args, log_path):  # Extract timing from logs
     # meta_mp4_file = None
     # meta_ingest_type = None
     with open(log_path, "r") as log:
-        print(f"[{log_path.name}]", flush=True, file=args.out_log_file)
+        file_desc = f"{log_path.name}"
+        if method is not None:
+            file_desc += f" ({method})"
+        print(f"\n[{file_desc}]", flush=True, file=args.out_log_file)
 
         # Get streaming details
         stream_video_results = str(log_path).replace(".log", ".videos.yaml")
@@ -373,9 +434,9 @@ def get_log_info(args, log_path):  # Extract timing from logs
                             response = eval(
                                 line.split("BACKGROUND ADD_METADATA RESPONSE: ")[1]
                             )
-                            info[file].setdefault("Num Failures", 0)
+                            info[file].setdefault("Num Bkgd Failures", 0)
                             if "FailedCommand" in response[0]:
-                                info[file]["Num Failures"] += 1
+                                info[file]["Num Bkgd Failures"] += 1
 
                     elif "[METADATA_INFO]" in line:
                         (
@@ -411,6 +472,11 @@ def get_log_info(args, log_path):  # Extract timing from logs
                 #     info[meta_mp4_file][f"{meta_ingest_type} e2e_query_processing (s)"] += e2etime
                 #     meta_mp4_file = None
                 #     meta_ingest_type = None
+
+                elif "struct.error: unpack requires a buffer of 4 bytes" in line:
+                    info.setdefault("Overall", {})
+                    info["Overall"].setdefault("VDMS crashes", 0)
+                    info["Overall"]["VDMS crashes"] += 1
 
                 elif "_watchandsend" in line:
                     prefix, method_name, _, timestamp = (
@@ -466,28 +532,6 @@ def get_log_info(args, log_path):  # Extract timing from logs
             if len(info[stream_name].keys()) == 8:
                 del info[stream_name]
 
-        # # Get streaming details
-        # stream_video_results = str(log_path).replace(".log", ".videos.yaml")
-        # if Path(stream_video_results).exists():
-        #     camera_details = read_config(stream_video_results)
-        #     for camera_name, details in camera_details.items():
-        #         if camera_name in info:  # Interested in those captured in logs
-        #             # info.setdefault(camera_name, {})
-        #             info[camera_name]["type"] = details["type"]
-        #             info[camera_name]["url"] = details["url"]
-        #             info[camera_name]["streamed video"] = details["video"].split("/")[
-        #                 -1
-        #             ]
-        #             info[camera_name]["video duration (s)"] = details["duration"]
-        #             info[camera_name]["video fps"] = details["FPS"]
-        #             info[camera_name]["stream start time"] = details["start_time"]
-        #             info[camera_name]["stream end time"] = details["end_time"]
-        #             info[camera_name]["stream elapsed time (s)"] = details[
-        #                 "elapsed_time_s"
-        #             ]
-        #             min_timestamp = min(min_timestamp, float(details["start_time"]))
-        #             max_timestamp = max(max_timestamp, float(details["end_time"]))
-
         info["Overall"]["Min Timestamp"] = min_timestamp
         info["Overall"]["Max Timestamp"] = max_timestamp
 
@@ -511,7 +555,7 @@ def main(args):
             method = log_path.parent.name
 
         # Extract timing from logs
-        info = get_log_info(args, log_path)
+        info = get_log_info(args, log_path, method=method)
 
         # Summarize info
         new_df = summarize_info(
