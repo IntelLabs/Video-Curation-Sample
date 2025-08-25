@@ -39,6 +39,7 @@
 #include "VideoLoop.h"
 #include "defines.h"
 #include "DynamicMetadataHandler.h"
+#include "VDMSThreadPool.h"
 
 using namespace VDMS;
 namespace fs = std::filesystem;
@@ -249,9 +250,13 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
 
   std::vector<Json::Value> video_metadata = video.get_ingest_metadata();
   if (video_metadata.size() > 0) {
+    // Create a copy of the handler object to be processed in the background.
     DynamicMetadataHandler dmh(video, props, video_metadata);
-    std::thread dmh_thread(&DynamicMetadataHandler::initiate, dmh);
-    dmh_thread.detach();
+
+    // Enqueue the task to the single VDMS thread pool instance.
+    VDMSThreadPool::instance().enqueue([dmh]() {
+        &DynamicMetadataHandler::initiate;
+    });
   }
 
   return 0;
