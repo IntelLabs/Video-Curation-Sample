@@ -1,0 +1,4 @@
+inotify
+kafka-python>=1.4.7
+vdms
+wheel

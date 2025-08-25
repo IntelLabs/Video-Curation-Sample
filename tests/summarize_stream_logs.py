@@ -81,7 +81,7 @@ def get_input_args():
         "-r",
         "--recursive",
         action="store_true",
-        help="Search recursively for *.log files",
+        help="Search recursively for camera_config_*.log files",
     )
 
     args = parser.parse_args()
@@ -92,42 +92,88 @@ def get_input_args():
     return args
 
 
+def get_overall_details(info_details, out_log_file):
+    app_info = {}
+    VDMS_crashes = 0
+    if "start_watchandsend" not in info_details:
+        app_end_time = info_details["Min Timestamp"]
+    else:
+        app_end_time = info_details["start_watchandsend"]
+
+    if "end_watchandsend" not in info_details:
+        app_end_time = info_details["Max Timestamp"]
+    else:
+        app_end_time = info_details["end_watchandsend"]
+
+    watch_process_elapsed_time = app_end_time - info_details["start_watchandsend"]
+    time_str = secs2HMS_str(watch_process_elapsed_time)
+    print(
+        f"\t[Overall] App took {time_str} to process all videos/streams",
+        flush=True,
+        file=out_log_file,
+    )
+    app_info["App processing time (s)"] = watch_process_elapsed_time
+
+    stream_process_elapsed_time = app_end_time - info_details["Min Timestamp"]
+    time_str = secs2HMS_str(stream_process_elapsed_time)
+    print(
+        f"\t[Overall] Took {time_str} from stream start to all videos/streams processed\n",
+        flush=True,
+        file=out_log_file,
+    )
+    app_info["Stream processing time (s)"] = stream_process_elapsed_time
+
+    if "VDMS crashes" in info_details:
+        VDMS_crashes = info_details["VDMS crashes"]
+
+    app_info["Log VDMS crashes"] = VDMS_crashes
+
+    return app_info
+
+
 def summarize_info(log_filename, info, out_log_file=None, method=None):
     app_info = {}
     camera_info = {}
 
     for key, info_details in info.items():
         if key == "Overall":
-            VDMS_crashes = 0
-            if "end_watchandsend" not in info_details:
-                app_end_time = info_details["Max Timestamp"]
-            else:
-                app_end_time = info_details["end_watchandsend"]
+            # VDMS_crashes = 0
+            # if "start_watchandsend" not in info_details:
+            #     app_end_time = info_details["Min Timestamp"]
+            # else:
+            #     app_end_time = info_details["start_watchandsend"]
 
-            watch_process_elapsed_time = (
-                app_end_time - info_details["start_watchandsend"]
-            )
-            time_str = secs2HMS_str(watch_process_elapsed_time)
-            print(
-                f"\t[Overall] App took {time_str} to process all videos/streams",
-                flush=True,
-                file=out_log_file,
-            )
-            app_info["App processing time (s)"] = watch_process_elapsed_time
+            # if "end_watchandsend" not in info_details:
+            #     app_end_time = info_details["Max Timestamp"]
+            # else:
+            #     app_end_time = info_details["end_watchandsend"]
 
-            stream_process_elapsed_time = app_end_time - info_details["Min Timestamp"]
-            time_str = secs2HMS_str(stream_process_elapsed_time)
-            print(
-                f"\t[Overall] Took {time_str} from stream start to all videos/streams processed\n",
-                flush=True,
-                file=out_log_file,
-            )
-            app_info["Stream processing time (s)"] = stream_process_elapsed_time
+            # watch_process_elapsed_time = (
+            #     app_end_time - info_details["start_watchandsend"]
+            # )
+            # time_str = secs2HMS_str(watch_process_elapsed_time)
+            # print(
+            #     f"\t[Overall] App took {time_str} to process all videos/streams",
+            #     flush=True,
+            #     file=out_log_file,
+            # )
+            # app_info["App processing time (s)"] = watch_process_elapsed_time
 
-            if "VDMS crashes" in info_details:
-                VDMS_crashes = info_details["VDMS crashes"]
+            # stream_process_elapsed_time = app_end_time - info_details["Min Timestamp"]
+            # time_str = secs2HMS_str(stream_process_elapsed_time)
+            # print(
+            #     f"\t[Overall] Took {time_str} from stream start to all videos/streams processed\n",
+            #     flush=True,
+            #     file=out_log_file,
+            # )
+            # app_info["Stream processing time (s)"] = stream_process_elapsed_time
 
-            app_info["Log VDMS crashes"] = VDMS_crashes
+            # if "VDMS crashes" in info_details:
+            #     VDMS_crashes = info_details["VDMS crashes"]
+
+            # app_info["Log VDMS crashes"] = VDMS_crashes
+
+            app_info.update(get_overall_details(info_details, out_log_file))
 
         elif ".mp4" not in key:
             camera_info.setdefault(key, {})
@@ -357,9 +403,9 @@ def remove_value_from_list(the_list, value):
 def get_log_info(args, log_path, method=None):  # Extract timing from logs
     min_timestamp = time.time()
     max_timestamp = 0
-    camera_details = None
+    camera_details = {}
     lines = []
-    info = {}
+    info = {"Overall": {}}
     mp4_pattern = r"\b(\S+\.mp4)\b"
     # meta_mp4_file = None
     # meta_ingest_type = None
@@ -392,7 +438,8 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                     ]
                     min_timestamp = min(min_timestamp, float(details["start_time"]))
                     max_timestamp = max(max_timestamp, float(details["end_time"]))
-
+        else:
+            return {}
         # Get processing details
         del_camera_names = list(camera_details.keys())
         for line in log:
@@ -474,7 +521,6 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                 #     meta_ingest_type = None
 
                 elif "struct.error: unpack requires a buffer of 4 bytes" in line:
-                    info.setdefault("Overall", {})
                     info["Overall"].setdefault("VDMS crashes", 0)
                     info["Overall"]["VDMS crashes"] += 1
 
@@ -482,7 +528,6 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                     prefix, method_name, _, timestamp = (
                         line.split("|")[-1].strip().split(",")
                     )
-                    info.setdefault("Overall", {})
                     info["Overall"][method_name] = float(timestamp)
                     # min_timestamp = min(min_timestamp, float(timestamp))
                     max_timestamp = max(max_timestamp, float(timestamp))
@@ -545,9 +590,9 @@ def main(args):
     df = pd.DataFrame()
 
     if args.recursive:
-        glob_cmd = args.log_dir.rglob("*.log")
+        glob_cmd = args.log_dir.rglob("camera_config_*.log")
     else:
-        glob_cmd = args.log_dir.glob("*.log")
+        glob_cmd = args.log_dir.glob("camera_config_*.log")
 
     for log_path in glob_cmd:
         method = None
@@ -557,13 +602,14 @@ def main(args):
         # Extract timing from logs
         info = get_log_info(args, log_path, method=method)
 
-        # Summarize info
-        new_df = summarize_info(
-            log_path.name, info, out_log_file=args.out_log_file, method=method
-        )
+        if info != {}:
+            # Summarize info
+            new_df = summarize_info(
+                log_path.name, info, out_log_file=args.out_log_file, method=method
+            )
 
-        # Accumulate results
-        df = pd.concat([df, new_df], ignore_index=True)
+            # Accumulate results
+            df = pd.concat([df, new_df], ignore_index=True)
 
     # Write to file
     df.to_csv(args.csv_file, index=False)

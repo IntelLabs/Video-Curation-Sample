@@ -1,6 +1,8 @@
 define(`PROFILE_DEFAULT', `depends_on:
+            - udf-service
             - vdms-service')
 define(`PROFILE_GPU', `depends_on:
+            - udf-service
             - vdms-service
         runtime: nvidia
         deploy:
@@ -18,6 +20,7 @@ define(`PROFILE_GPU', `depends_on:
             SHOST: "http://stream-service:8080"
             ZKHOST: "zookeeper-service:2181"
             DBHOST: "vdms-service"
+            UDF_HOST: "udf-service"
             `RESIZE_FLAG': "defn(`RESIZE_FLAG')"
             CPU_BATCH_SIZE: 1
             GPU_BATCH_SIZE: 1
@@ -25,13 +28,14 @@ define(`PROFILE_GPU', `depends_on:
             `DEVICE': "defn(`DEVICE')"
             `IN_SOURCE': "defn(`IN_SOURCE')"
             `INGESTION': "defn(`INGESTION')"
+            `NCURATIONS': "defn(`NCURATIONS')"
             WATCH_DIR: "/watch_dir"
             http_proxy: "${http_proxy}"
             HTTP_PROXY: "${HTTP_PROXY}"
             https_proxy: "${https_proxy}"
             HTTPS_PROXY: "${HTTPS_PROXY}"
-            no_proxy: "stream-service,vdms-service,${no_proxy}"
-            NO_PROXY: "stream-service,vdms-service,${NO_PROXY}"
+            no_proxy: "stream-service,vdms-service,udf-service,${no_proxy}"
+            NO_PROXY: "stream-service,vdms-service,udf-service,${NO_PROXY}"
         volumes:
             - /etc/localtime:/etc/localtime:ro
             - app-content:/var/www

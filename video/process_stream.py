@@ -24,12 +24,16 @@ DBHOST = os.getenv("DBHOST", "vdms-service")
 DEBUG = os.getenv("DEBUG", "0")
 DEVICE = os.getenv("DEVICE", "CPU")
 INGESTION = os.getenv("INGESTION", "object,face")
-LOCKTIMEOUT_RETRIES = 5
+# NUM_UDFS = int(os.getenv("NCURATIONS", 1))
 RESIZE_FLAG = str2bool(os.getenv("RESIZE_FLAG", False))
 SHARED_OUTPUT = os.getenv("SHARED_OUTPUT", "/var/www/mp4")
 TEST_MODE = str2bool(os.getenv("TEST_FLAG", False))
 TMP_LOCATION = os.getenv("TMP_LOCATION", "/var/www/streams/")
 UDF_HOST = os.getenv("UDF_HOST", "video-service")
+# vdms_pool_size = 10
+
+LOCKTIMEOUT_RETRIES = 5
+ERR_KEYWORDS = ["timeout", "null search iterator", "outoftransactions"]
 
 BATCH_SIZE = 1
 DBPORT = 55555
@@ -43,6 +47,34 @@ MODEL_W, MODEL_H = (640, 640)
 TARGET_FPS = 15  # 15  30
 UDF_PORT = 5011
 WRITER_FOURCC = cv2.VideoWriter_fourcc(*"mp4v")  # avc1, mp4v, AVC1
+
+
+def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0):
+    # ridx = 0
+    # while True:
+    for ridx in range(num_retries + 1):
+        response, _ = db.query(query, [[]])
+        if "FailedCommand" in response[0] and any(
+            k in response[0]["info"].lower() for k in ERR_KEYWORDS
+        ):
+            err = response[0]["info"]
+            if DEBUG == "1":
+                print(
+                    f"DEBUG [process_stream Attempt #{ridx}] Received '{err}' for {query} ",
+                    flush=True,
+                )
+            if sleep_timer > 0:
+                time.sleep(sleep_timer)
+            # ridx += 1
+            # pass  # Rerun
+        else:
+            if DEBUG == "1":
+                print(
+                    f"[DEBUG process_stream] Successful query response: {response}",
+                    flush=True,
+                )
+            break  # Continue
+    return response
 
 
 """ MODEL DEFINITIONS """
@@ -176,12 +208,17 @@ def face_detection(stream_name, frameNum, frame, img_size):
                     "frameW": int(W),
                 },
             }
-            framenum_str = f"{frameNum}_{oidx}"
+            # framenum_str = f"{frameNum}_{oidx}"
+            framenum_str = f"{frameNum:04d}_{oidx:04d}"
             if DEBUG_FLAG:
                 meta_str = ",".join([str(o) for o in face_res + [framenum_str]])
                 print(f"[{stream_name} METADATA],{meta_str}", flush=True)
 
-            metadata[framenum_str] = {"frameId": frameNum, "bbox": tdict}
+            metadata[framenum_str] = {
+                "frameId": frameNum,
+                "bbId": framenum_str,
+                "bbox": tdict,
+            }
             oidx += 1
 
     return metadata
@@ -241,7 +278,8 @@ def extract_metadata_from_results(
                         },
                     }
 
-                    framenum_str = f"{frameNum}_{oidx}"
+                    # framenum_str = f"{frameNum}_{oidx}"
+                    framenum_str = f"{frameNum:04d}_{oidx:04d}"
                     if DEBUG_FLAG:
                         meta_str = ",".join(
                             [str(o) for o in object_res + [framenum_str]]
@@ -250,6 +288,7 @@ def extract_metadata_from_results(
 
                     metadata[framenum_str] = {
                         "frameId": frameNum,
+                        "bbId": framenum_str,
                         "bbox": tdict,
                     }
                     oidx += 1
@@ -338,6 +377,7 @@ def manual_fps_calculation(src, num_frames=10):
 
 # Generate and run UDF query
 def get_udf_query(
+    # db,
     # start_t,
     filename_path,
     properties,
@@ -380,14 +420,15 @@ def get_udf_query(
         # print(f"{filename_path} Query: {query}", flush=True)
         return
 
-    video_blob = []
+    # video_blob = []
     # with open(filename_path, "rb") as fd:
     #     video_blob.append(fd.read())
     # return query, video_blob
 
     filename = str(Path(filename_path).name)
     db = vdms.vdms()
-    db.connect(DBHOST, DBPORT)
+    if not db.is_connected():
+        db.connect(DBHOST, DBPORT)
     if DEBUG_FLAG:
         print(
             f"[TIMING],start_udf_ingest_{ingest_mode},{filename}," + str(time.time()),
@@ -395,12 +436,7 @@ def get_udf_query(
         )
     try:
         # res, res_arr = db.query([query], [video_blob])
-        for _ in range(LOCKTIMEOUT_RETRIES):
-            res, _ = db.query([query], [video_blob])
-            if "FailedCommand" in res[0] and "timeout" in res[0]["info"].lower():
-                pass  # Rerun
-            else:
-                break  # Continue
+        res = retry_query(db, [query], num_retries=10, sleep_timer=5)
 
         if DEBUG_FLAG:
             print(
@@ -750,6 +786,8 @@ class VideoStream:
         clip must be ready
         all clip frames inference ready
         """
+        # db = vdms.vdms()
+
         while True:
             try:
                 queue_details = self.metadata_queue.get()  # noqa: F841
@@ -767,6 +805,7 @@ class VideoStream:
                 # ingest_mode= "object"
                 for ingest_mode in INGESTION.split(","):
                     get_udf_query(
+                        # db,
                         # start_t,
                         clip_filename,
                         properties,
@@ -778,6 +817,8 @@ class VideoStream:
                     )
             except queue.Empty:
                 pass
+
+        # db.disconnect()
 
     # method to start thread
     def start(self):
