@@ -21,6 +21,7 @@ define(`PROFILE_GPU', `depends_on:
             ZKHOST: "zookeeper-service:2181"
             DBHOST: "vdms-service"
             UDF_HOST: "udf-service"
+            MODEL_NAME: "yolo11"
             `RESIZE_FLAG': "defn(`RESIZE_FLAG')"
             CPU_BATCH_SIZE: 1
             GPU_BATCH_SIZE: 1

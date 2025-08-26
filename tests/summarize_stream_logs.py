@@ -1,11 +1,46 @@
 import argparse
 import re
 import time
+from io import StringIO
 from math import ceil
 from pathlib import Path
 
 import pandas as pd
 import yaml
+
+PROJECT_PATH = Path(__file__).parent.parent.absolute()
+clip_length_in_secs = 10
+TARGET_FPS = 15
+KEYWORDS = [
+    "[TIMING]",
+    "[METADATA_INFO]",
+    # "e2e_query_processing",
+    "[DEBUG]",
+    # "OBJECT DETECTION]",
+    # "METADATA]",
+    "Clip,contains,frames",
+    "struct.error: unpack requires a buffer of 4 bytes",
+]
+
+PROCESSING_DEFAULT_DICT = {
+    "num clips": 0,
+    "total clip frames": 0,  # info_details["Num Frames"]
+    "frameW": 0,
+    "frameH": 0,
+    "object detections": 0,
+    "face detections": 0,
+    "Num Failures": 0,
+    "Num Bkgd Failures": 0,
+    "Time to create clip (s)": 0,  # info_details["Save clip"] - info_details["Start new clip"]
+    "total inference runtime (s)": 0,
+    "total get_clip runtime (s)": 0,
+    "total get_frames runtime (s)": 0,
+    "total process_clip_metadata runtime (s)": 0,
+    "UDF object db.query runtime (s)": 0,
+    "UDF object run func runtime (s)": 0,
+    "UDF face db.query runtime (s)": 0,
+    "UDF face run func runtime (s)": 0,
+}
 
 
 def secs2HMS_str(sec):
@@ -34,35 +69,137 @@ def read_config(file_path):
             return None
 
 
-PROJECT_PATH = Path(__file__).parent.parent.absolute()
-clip_length_in_secs = 10
-TARGET_FPS = 15
-KEYWORDS = [
-    "[TIMING]",
-    "[METADATA_INFO]",
-    # "e2e_query_processing",
-    "[DEBUG]",
-    # "OBJECT DETECTION]",
-    # "METADATA]",
-    "Clip,contains,frames",
-    "struct.error: unpack requires a buffer of 4 bytes",
-]
+def units2bytes(eng_terms):
+    if eng_terms is None:
+        return 0
+    eng_terms = str(eng_terms).lower()
 
-PROCESSING_DEFAULT_DICT = {
-    "num clips": 0,
-    "total clip frames": 0,  # info_details["Num Frames"]
-    "frameW": 0,
-    "frameH": 0,
-    "object detections": 0,
-    "face detections": 0,
-    "Num Failures": 0,
-    "Num Bkgd Failures": 0,
-    "Time to create clip (s)": 0,  # info_details["Save clip"] - info_details["Start new clip"]
-    "UDF object db.query runtime (s)": 0,
-    "UDF object run func runtime (s)": 0,
-    "UDF face db.query runtime (s)": 0,
-    "UDF face run func runtime (s)": 0,
-}
+    # Extract value
+    match = re.search(r"([\d.]+)\s*(mib|gib|tib|kib)?", eng_terms)
+    if not match:
+        return 0
+
+    value_portion = float(match.group(1))
+    unit_portion = match.group(2)
+
+    if unit_portion == "tib":
+        return value_portion * 1024**4
+    elif unit_portion == "gib":
+        return value_portion * 1024**3
+    elif unit_portion == "mib":
+        return value_portion * 1024**2
+    elif unit_portion == "kib":
+        return value_portion * 1024**1
+    else:
+        # Default is in bytes
+        return value_portion
+
+
+def sort_byte_size(byte_size_list, reverse=False):
+    return sorted(byte_size_list, key=lambda x: units2bytes(x), reverse=reverse)
+
+
+def update_stats(max_info_dict, row):
+    curr_container_name = row["CONTAINER NAME"].values[0]
+
+    # Update values without engineering units: 'CPU %','MEM %','PIDS'
+    for col in ["CPU %", "MEM %", "PIDS"]:
+        max_info_dict[curr_container_name][col] = max(
+            max_info_dict[curr_container_name][col], row[col].values[0]
+        )
+
+    # Update values with engineering units: 'MEM USAGE', 'MEM LIMIT', 'NET I', 'NET O','BLOCK I','BLOCK O',
+    for col in ["MEM USAGE", "MEM LIMIT", "NET I", "NET O", "BLOCK I", "BLOCK O"]:
+        max_info_dict[curr_container_name][col] = sort_byte_size(
+            [row[col].values[0], max_info_dict[curr_container_name][col]], reverse=True
+        )[0]
+
+    return max_info_dict
+
+
+def stat2df(file_txt):
+    df = pd.read_fwf(StringIO(file_txt))
+    container_names = []
+    expected_cols = [
+        "CONTAINER ID",
+        "NAME",
+        "CPU %",
+        "MEM USAGE / LIMIT",
+        "MEM %",
+        "NET I/O",
+        "BLOCK I/O",
+        "PIDS",
+    ]
+    col_order = [
+        "CONTAINER NAME",
+        "CPU %",
+        "MEM USAGE",
+        "MEM LIMIT",
+        "MEM %",
+        "NET I",
+        "NET O",
+        "BLOCK I",
+        "BLOCK O",
+        "PIDS",
+    ]
+
+    if all(c in df.columns.to_list() for c in expected_cols):
+        df.drop("CONTAINER ID", axis=1, inplace=True)
+        df.rename(columns={"NAME": "CONTAINER NAME"}, inplace=True)
+
+        # Format "CPU %" to float
+        df["CPU %"] = pd.to_numeric(df["CPU %"].str.replace("%", ""))
+
+        # Remove limit from "MEM USAGE / LIMIT"
+        df[["MEM USAGE", "MEM LIMIT"]] = df["MEM USAGE / LIMIT"].str.split(
+            " /", n=1, expand=True
+        )
+        df.drop("MEM USAGE / LIMIT", axis=1, inplace=True)
+
+        # Format "MEM %" to float
+        df["MEM %"] = pd.to_numeric(df["MEM %"].str.replace("%", ""))
+
+        # Split "NET I/O"
+        # if len(df["NET I/O"].values[0].split(" / ")):
+        df[["NET I", "NET O"]] = df["NET I/O"].str.split(" /", n=1, expand=True)
+        df.drop("NET I/O", axis=1, inplace=True)
+
+        # Split "BLOCK I/O"
+        df[["BLOCK I", "BLOCK O"]] = df["BLOCK I/O"].str.split(" /", n=1, expand=True)
+        df.drop("BLOCK I/O", axis=1, inplace=True)
+
+        # Format "PIDS" to int
+        df["PIDS"] = pd.to_numeric(df["PIDS"])
+
+        # col_order = ['CONTAINER NAME', 'CPU %', 'MEM USAGE', 'MEM LIMIT', 'MEM %', 'NET I', 'NET O', 'BLOCK I', 'BLOCK O', 'PIDS']
+
+        df = df[col_order]
+
+        container_names = sorted(list(set(df["CONTAINER NAME"])))
+
+    return container_names, df
+
+
+def get_common_method_substrings(methods):
+    if len(methods) == 0:
+        return []
+
+    # Shortest string
+    smallest_string = min(methods, key=len)
+    smallest_string_len = len(smallest_string)
+    common_method_substring = set()
+
+    for i in range(smallest_string_len):
+        for j in range(i + 1, smallest_string_len + 1):
+            method_substring = smallest_string[i:j]
+            match_exist = True
+            for method in methods:
+                if method_substring not in method:
+                    match_exist = False
+                    break
+            if match_exist:
+                common_method_substring.add(method_substring)
+    return sorted(list(common_method_substring), key=len, reverse=True)
 
 
 def get_input_args():
@@ -128,6 +265,25 @@ def get_overall_details(info_details, out_log_file):
 
     app_info["Log VDMS crashes"] = VDMS_crashes
 
+    # stats_available = False
+    for k, v in info_details.items():
+        if "lcc_" in k:
+            for stat_k, stat_v in v.items():
+                col_name = f"{k} Max {stat_k}"
+                app_info[col_name] = stat_v
+    #             print(
+    #                 f"\t[Overall dockerstat] {col_name}: {stat_v}",
+    #                 flush=True,
+    #                 file=out_log_file,
+    #             )
+    #             stats_available = True
+    # if stats_available:
+    #     print(
+    #         f"",
+    #         flush=True,
+    #         file=out_log_file,
+    #     )
+
     return app_info
 
 
@@ -137,42 +293,6 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
 
     for key, info_details in info.items():
         if key == "Overall":
-            # VDMS_crashes = 0
-            # if "start_watchandsend" not in info_details:
-            #     app_end_time = info_details["Min Timestamp"]
-            # else:
-            #     app_end_time = info_details["start_watchandsend"]
-
-            # if "end_watchandsend" not in info_details:
-            #     app_end_time = info_details["Max Timestamp"]
-            # else:
-            #     app_end_time = info_details["end_watchandsend"]
-
-            # watch_process_elapsed_time = (
-            #     app_end_time - info_details["start_watchandsend"]
-            # )
-            # time_str = secs2HMS_str(watch_process_elapsed_time)
-            # print(
-            #     f"\t[Overall] App took {time_str} to process all videos/streams",
-            #     flush=True,
-            #     file=out_log_file,
-            # )
-            # app_info["App processing time (s)"] = watch_process_elapsed_time
-
-            # stream_process_elapsed_time = app_end_time - info_details["Min Timestamp"]
-            # time_str = secs2HMS_str(stream_process_elapsed_time)
-            # print(
-            #     f"\t[Overall] Took {time_str} from stream start to all videos/streams processed\n",
-            #     flush=True,
-            #     file=out_log_file,
-            # )
-            # app_info["Stream processing time (s)"] = stream_process_elapsed_time
-
-            # if "VDMS crashes" in info_details:
-            #     VDMS_crashes = info_details["VDMS crashes"]
-
-            # app_info["Log VDMS crashes"] = VDMS_crashes
-
             app_info.update(get_overall_details(info_details, out_log_file))
 
         elif ".mp4" not in key:
@@ -308,6 +428,28 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                     info_details["Save clip"] - info_details["Start new clip"]
                 )
 
+            if "end_infer_worker" in info_details:
+                camera_info[camera_name]["total inference runtime (s)"] += (
+                    info_details["end_infer_worker"]
+                    - info_details["start_infer_worker"]
+                )
+
+            if "end_get_clips" in info_details:
+                camera_info[camera_name]["total get_clip runtime (s)"] += (
+                    info_details["end_get_clips"] - info_details["start_get_clips"]
+                )
+
+            if "end_get_frames" in info_details:
+                camera_info[camera_name]["total get_frames runtime (s)"] += (
+                    info_details["end_get_frames"] - info_details["start_get_frames"]
+                )
+
+            if "end_clip_metadata" in info_details:
+                camera_info[camera_name]["total process_clip_metadata runtime (s)"] += (
+                    info_details["end_clip_metadata"]
+                    - info_details["start_clip_metadata"]
+                )
+
             if "end_udf_ingest_object" in info_details:
                 camera_info[camera_name]["UDF object db.query runtime (s)"] += (
                     info_details["end_udf_ingest_object"]
@@ -336,11 +478,18 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
     details = []
     for name, cam_details in camera_info.items():
         cam_dict = {
-            "log": log_filename,
+            # "log": log_filename,
+            "Num Streams": int(log_filename.split("_")[-1].split(".log")[0]),
             "Method": method,
             "stream name": name,
             "Log VDMS crashes": int(app_info["Log VDMS crashes"]),
         }
+
+        stat_cols = []
+        for k, v in app_info.items():
+            if "lcc_" in k:
+                cam_dict[k] = v
+                stat_cols.append(k)
 
         if "num clips" not in cam_dict:
             cam_dict.update(PROCESSING_DEFAULT_DICT)
@@ -351,16 +500,33 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
         for k, v in cam_details.items():
             cam_dict[k] = v
 
+        cam_dict["% frames received"] = (
+            100 * (cam_dict["frames received"] / cam_dict["target frames"])
+            if cam_dict["target frames"] > 0
+            else 0
+        )
+        cam_dict["% rcvd frames processed"] = (
+            100 * (cam_dict["frames processed"] / cam_dict["frames received"])
+            if cam_dict["frames received"] > 0
+            else 0
+        )
+        cam_dict["Total Failures"] = (
+            cam_dict["Num Failures"] + cam_dict["Num Bkgd Failures"]
+        )
         details.append(cam_dict)
 
     new_df = pd.DataFrame(details)
 
     # Reorder
     new_col_order = [
-        "log",
+        # "log",
+        "Num Streams",
         "Method",
         "stream name",
         "video",
+        "% frames received",
+        "% rcvd frames processed",
+        "Total Failures",
         "video duration (s)",
         "video fps",
         "video frames",
@@ -385,11 +551,18 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
         "delta stream start to processing start (s)",
         "delta stream end to processing end (s)",
         "Time to create clip (s)",
+        "total inference runtime (s)",
+        "total get_clip runtime (s)",
+        "total get_frames runtime (s)",
+        "total process_clip_metadata runtime (s)",
         "UDF object db.query runtime (s)",
         "UDF object run func runtime (s)",
         "UDF face db.query runtime (s)",
         "UDF face run func runtime (s)",
     ]
+
+    new_col_order.extend(stat_cols)
+
     new_df = new_df[new_col_order]
     return new_df
 
@@ -398,6 +571,39 @@ def remove_value_from_list(the_list, value):
     if value in the_list:
         the_list.remove(value)
     return the_list
+
+
+def get_docker_stats(stat_path):
+    max_info = {}
+    if Path(stat_path).exists():
+        # Read log
+        with open(stat_path, "r") as f:
+            file_txt = ""
+            for line in f:
+                if "CONTAINER ID" in line and file_txt != "":
+                    # Get max results
+                    container_names, df = stat2df(file_txt)
+
+                    for name in container_names:
+                        max_info.setdefault(
+                            name,
+                            {
+                                k: 0
+                                for k in df.columns.to_list()
+                                if k != "CONTAINER NAME"
+                            },
+                        )
+
+                        max_info = update_stats(
+                            max_info, df[df["CONTAINER NAME"] == name]
+                        )
+
+                    # Reset text
+                    file_txt = ""
+
+                file_txt += line
+
+    return max_info
 
 
 def get_log_info(args, log_path, method=None):  # Extract timing from logs
@@ -409,6 +615,7 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
     mp4_pattern = r"\b(\S+\.mp4)\b"
     # meta_mp4_file = None
     # meta_ingest_type = None
+
     with open(log_path, "r") as log:
         file_desc = f"{log_path.name}"
         if method is not None:
@@ -440,6 +647,7 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                     max_timestamp = max(max_timestamp, float(details["end_time"]))
         else:
             return {}
+
         # Get processing details
         del_camera_names = list(camera_details.keys())
         for line in log:
@@ -582,6 +790,11 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
 
         info = dict(sorted(info.items(), key=lambda item: item[0], reverse=False))
 
+        # Get Docker stats
+        stat_path = str(log_path).replace(".log", ".stats.log")
+        if Path(stat_path).exists():
+            docker_max_stats = get_docker_stats(stat_path)
+            info["Overall"].update(docker_max_stats)
     # print(lines)
     return info
 
@@ -610,6 +823,21 @@ def main(args):
 
             # Accumulate results
             df = pd.concat([df, new_df], ignore_index=True)
+
+    # Sort by log	Method	stream name	video
+    sort_cols = []
+    if args.recursive:
+        sort_cols = ["Method"]
+    sort_cols += ["video", "Num Streams"]
+    df.sort_values(by=sort_cols, inplace=True)
+
+    # Fill in missing values with N/A
+    df.fillna("N/A", inplace=True)
+
+    methods = list(set(df["Method"].values))
+    substrings = get_common_method_substrings(methods)
+    if len(substrings) > 0:
+        df["Method"] = df["Method"].str.replace(substrings[0], "")
 
     # Write to file
     df.to_csv(args.csv_file, index=False)

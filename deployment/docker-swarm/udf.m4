@@ -76,4 +76,4 @@ define(`PROFILE_GPU', `depends_on:
         restart: always
         ifdef(`GPU', PROFILE_GPU, PROFILE_DEFAULT)
         deploy:
-            replicas: 1
+            replicas: 2

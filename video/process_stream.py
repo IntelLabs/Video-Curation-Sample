@@ -6,8 +6,9 @@ import subprocess
 import sys
 import time  # time library
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from threading import Lock, Thread  # library for multi-threading
+from threading import Lock  # library for multi-threading
 
 import cv2  # OpenCV library
 import psutil
@@ -30,6 +31,7 @@ SHARED_OUTPUT = os.getenv("SHARED_OUTPUT", "/var/www/mp4")
 TEST_MODE = str2bool(os.getenv("TEST_FLAG", False))
 TMP_LOCATION = os.getenv("TMP_LOCATION", "/var/www/streams/")
 UDF_HOST = os.getenv("UDF_HOST", "video-service")
+MODEL_NAME = os.getenv("MODEL_NAME", "yolo11")
 # vdms_pool_size = 10
 
 LOCKTIMEOUT_RETRIES = 5
@@ -47,6 +49,21 @@ MODEL_W, MODEL_H = (640, 640)
 TARGET_FPS = 15  # 15  30
 UDF_PORT = 5011
 WRITER_FOURCC = cv2.VideoWriter_fourcc(*"mp4v")  # avc1, mp4v, AVC1
+model_path = f"{CODE_DIR}/resources/models/ultralytics/{MODEL_NAME}/{MODEL_PRECISION}/{MODEL_NAME}n"
+
+# if hasattr(os, "process_cpu_count"):
+#     num_usuable_cpus = os.process_cpu_count()
+# elif hasattr(os, "sched_getaffinity"):
+#     num_usuable_cpus = len(os.sched_getaffinity(0))
+# else:
+num_usuable_cpus = os.cpu_count()
+
+if DEVICE == "GPU":
+    model_path += ".engine"
+    batch_size = int(os.environ.get("GPU_BATCH_SIZE", 1))
+else:
+    model_path += "_openvino_model/"
+    batch_size = int(os.environ.get("CPU_BATCH_SIZE", 1))  # 8
 
 
 def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0):
@@ -78,7 +95,7 @@ def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0
 
 
 """ MODEL DEFINITIONS """
-model_path = f"{CODE_DIR}/resources/models/ultralytics/yolo11/{MODEL_PRECISION}/yolo11n_openvino_model"
+# model_path = f"{CODE_DIR}/resources/models/ultralytics/yolo11/{MODEL_PRECISION}/yolo11n_openvino_model"
 model = YOLO(model_path, verbose=False, task="detect")
 
 
@@ -520,13 +537,46 @@ class VideoStream:
 
         self.setup_stream(fps)
 
-        # thread instantiation
-        # daemon threads run in background
+        # Create ThreadPoolExecutor
+        self.executor = ThreadPoolExecutor(max_workers=num_usuable_cpus)
+
+    # method to start thread
+    def start(self):
+        self.stopped = False
+        # [t.start() for t in self.t]
         self.t = []
-        self.t.append(Thread(target=self.get_frames, args=(), daemon=True))
-        self.t.append(Thread(target=self.get_clips, args=(), daemon=True))
-        self.t.append(Thread(target=self.run_inference, args=(), daemon=True))
-        self.t.append(Thread(target=self.process_clip_metadata, args=(), daemon=True))
+        self.t.append(
+            self.executor.submit(
+                self.get_frames,
+            )
+        )
+        self.t.append(
+            self.executor.submit(
+                self.get_clips,
+            )
+        )
+        self.t.append(
+            self.executor.submit(
+                self.run_inference,
+            )
+        )
+        self.t.append(
+            self.executor.submit(
+                self.process_clip_metadata,
+            )
+        )
+
+    # method to stop reading frames
+    def stop(self):
+        # [t.join() for t in self.t]
+        for t in as_completed(self.t):
+            try:
+                _ = t.result()
+            except Exception as t_e:
+                print(f"[DEBUG] Exception occurred in thread: {t_e}")
+
+        self.stopped = True
+        self.video_obj.release()
 
     # method to open stream/video within 5min (default) limit
     def connect_to_stream(self, time_limit_mins=5):
@@ -611,6 +661,7 @@ class VideoStream:
         clip_frame_idx = 0
         clip_id = 0
         _out_vid = None
+        print(f"[TIMING],start_get_frames,{self.stream_name},{time.time()}", flush=True)
         while True:
             if self.stopped:
                 break
@@ -664,6 +715,8 @@ class VideoStream:
             # cv2.waitKey(delay_ms)
             # time.sleep(delay_ms / 1000 )
 
+        print(f"[TIMING],end_get_frames,{self.stream_name},{time.time()}", flush=True)
+
     # method to create clips
     def get_clips(self):
         _out_vid = None
@@ -690,6 +743,10 @@ class VideoStream:
                             tmp_file,
                             self.target_fps,
                         )
+                        print(
+                            f"[TIMING],end_get_clips,{clip_key},{time.time()}",
+                            flush=True,
+                        )
                         self.clip_end_frame[clip_key] = frameNum
                     break
 
@@ -699,6 +756,9 @@ class VideoStream:
                 clip_key = Path(clip_filename).name
 
                 if clip_frame_idx == 0:
+                    print(
+                        f"[TIMING],start_get_clips,{clip_key},{time.time()}", flush=True
+                    )
                     _out_vid = cv2.VideoWriter(
                         tmp_file,
                         fourcc=self.fourcc,
@@ -724,6 +784,9 @@ class VideoStream:
                         tmp_file,
                         self.target_fps,
                     )
+                    print(
+                        f"[TIMING],end_get_clips,{clip_key},{time.time()}", flush=True
+                    )
 
                     self.clip_end_frame[clip_key] = frameNum
             except queue.Empty:
@@ -742,6 +805,9 @@ class VideoStream:
                     queue_details
                 )
                 clip_key = Path(clip_filename).name
+                print(
+                    f"[TIMING],start_infer_worker,{clip_key},{time.time()}", flush=True
+                )
                 _, metadata, metadata_face = infer_worker(
                     self.stream_name,
                     clip_frame_idx,
@@ -751,6 +817,7 @@ class VideoStream:
                     INGESTION,
                     fps=self.target_fps,
                 )
+                print(f"[TIMING],end_infer_worker,{clip_key},{time.time()}", flush=True)
                 self.all_metadata.setdefault(clip_key, {})
                 self.all_metadata[clip_key].setdefault("object", {})
                 self.all_metadata[clip_key]["object"].update(metadata)
@@ -796,6 +863,9 @@ class VideoStream:
                     break
 
                 clip_key, clip_filename, clip_metadata, width, height = queue_details
+                print(
+                    f"[TIMING],start_clip_metadata,{clip_key},{time.time()}", flush=True
+                )
 
                 # Send metadata to UDF
                 properties = {
@@ -815,21 +885,13 @@ class VideoStream:
                         metadata=clip_metadata[ingest_mode],
                         test_mode=TEST_MODE,
                     )
+                print(
+                    f"[TIMING],end_clip_metadata,{clip_key},{time.time()}", flush=True
+                )
             except queue.Empty:
                 pass
 
         # db.disconnect()
-
-    # method to start thread
-    def start(self):
-        self.stopped = False
-        [t.start() for t in self.t]
-
-    # method to stop reading frames
-    def stop(self):
-        [t.join() for t in self.t]
-        self.stopped = True
-        self.video_obj.release()
 
 
 """ MAIN FUNCTION """
