@@ -15,10 +15,8 @@ docker_compose)
         exit 0
     fi
 
-    # if [ "$DEVICE" == "GPU" ]; then
-    #     docker compose -f "$yml" -p lcc --compatibility down -v
-    # else
     docker compose -f "$yml" -p lcc --compatibility down -v
+    docker volume rm app-content || true
     # fi
     ;;
 *)
