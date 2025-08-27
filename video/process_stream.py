@@ -94,8 +94,10 @@ def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0
         ):
             err = response[0]["info"]
             if DEBUG == "1":
+                query_type = query[0].keys()[0]
                 print(
-                    f"DEBUG [process_stream Attempt #{ridx}] Received '{err}' for {query} ",
+                    # f"DEBUG [process_stream Attempt #{ridx}] Received '{err}' for {query}",
+                    f"DEBUG [process_stream Attempt #{ridx}] Received '{err}' for {query_type} query",
                     flush=True,
                 )
             if sleep_timer > 0:
@@ -417,7 +419,7 @@ def get_udf_query(
     properties,
     ingest_mode,
     new_size,
-    id="metadata_callback",
+    id="udf_metadata",
     metadata=None,
     test_mode=TEST_MODE,
 ):
@@ -435,7 +437,6 @@ def get_udf_query(
                         "id": id,
                         "otype": ingest_mode,
                         "media_type": "video",
-                        # "fps": properties["fps"],
                         "input_sizeWH": new_size,
                         "filename": properties["Name"],
                     },

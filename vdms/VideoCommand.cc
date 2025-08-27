@@ -254,9 +254,20 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     DynamicMetadataHandler dmh(video, props, video_metadata);
 
     // Enqueue the task to the single VDMS thread pool instance.
-    VDMSThreadPool::instance().enqueue([dmh]() {
-        &DynamicMetadataHandler::initiate;
-    });
+    VDMSThreadPool& pool = VDMSThreadPool::instance();
+    // pool.enqueue([dmh]() {&DynamicMetadataHandler::initiate;});
+    // pool.enqueue([dmh]() mutable {dmh.initiate();});  // many failures
+    pool.enqueue(std::bind(&DynamicMetadataHandler::initiate, dmh));
+
+    // auto dmh = std::make_shared<DynamicMetadataHandler>(video, props, video_metadata);
+    // // auto task = [dmh]() { dmh->initiate(); };
+    // pool.enqueue([dmh]() { dmh->initiate(); });
+
+    // pool.enqueue(std::bind(&DynamicMetadataHandler::initiate, dmh));
+
+    // pool.enqueue([dmh]() {&DynamicMetadataHandler::initiate;});
+    // pool.enqueue([&dmh]() {dmh.initiate();});
+
   }
 
   return 0;

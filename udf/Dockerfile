@@ -12,27 +12,14 @@ RUN python3 -m venv ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 COPY remote_function /home/remote_function
-COPY resources /home/resources
 COPY requirements.txt /home/requirements.txt
 
-ARG DEVICE="CPU"
-ENV DEVICE="${DEVICE}"
-
-RUN pip3 install pip --upgrade && \
-    if [ "${DEVICE}" = "CPU" ]; then \
-        pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu; \
-    else \
-        pip3 install torch torchvision; \
-    fi;
-RUN pip3 install -r /home/requirements.txt && \
-    pip3 install -r /home/remote_function/requirements.${DEVICE}.txt
-
-RUN omz_downloader --list /home/resources/models/models.lst -o /home/resources/models --precisions FP16
+RUN pip3 install pip --upgrade && pip3 install -r /home/requirements.txt
 
 WORKDIR /home
 COPY *.py /home/
 COPY manage.sh /home/
-CMD  ["/bin/bash","-c","python3 /home/resources/models/download_yolo.py && /home/manage.sh"]
+CMD  ["/bin/bash","-c","/home/manage.sh"]
 
 ####
 ARG  USER
@@ -45,7 +32,7 @@ RUN if [ ${GID} -gt 0 ]; then groupadd -f -g ${GID} ${GROUP}; fi; \
     if [ ${UID} -gt 0 ]; then useradd --no-log-init -d /home/${USER} -g ${GID} -K UID_MAX=${UID} -K UID_MIN=${UID} ${USER}; fi; \
     touch /var/run/nginx.pid && \
     mkdir -p /var/log/nginx /var/lib/nginx /var/www/cache /var/www/gen /var/www/mp4 /var/www/streams && \
-    chown -R ${UID}.${GID} /var/run/nginx.pid /var/log/nginx /var/lib/nginx /var/www /etc/nginx/nginx.conf /home/resources /home/remote_function
+    chown -R ${UID}.${GID} /var/run/nginx.pid /var/log/nginx /var/lib/nginx /var/www /etc/nginx/nginx.conf /home/remote_function
 # VOLUME ["/var/www"]
 USER ${UID}
 ####

@@ -72,7 +72,7 @@ def run(ipfilename, format, options, tmp_dir_path):
     # query = []
 
     fref = 2
-    last_frame = -1
+    # last_frame = -1
     add_query_ref = 0
     for k in options["metadata"].keys():
         metadata = options["metadata"][k]
@@ -98,13 +98,13 @@ def run(ipfilename, format, options, tmp_dir_path):
         }
         query.append(add_query)
         add_query_ref = fref
-        last_frame = metadata["frame_props"]["frameID"]
-        vid_name = options["Name"]
+        # last_frame = metadata["frame_props"]["frameID"]
+        # vid_name = options["Name"]
         fref += 1
-        print(
-            f"[DEBUG add_metadata] Frame {last_frame} added to {vid_name} query",
-            flush=True,
-        )
+        # print(
+        #     f"[DEBUG add_metadata] Frame {last_frame} added to {vid_name} query",
+        #     flush=True,
+        # )
 
         # add_frame_conn_query = {
         #     "AddConnection": {

@@ -37,7 +37,6 @@ COPY *.conf /etc/nginx/
 RUN rm /var/www/mp4/* || true
 RUN rm /var/www/stream/* || true
 RUN rm /var/www/mp4/.gitignore || true
-COPY segment_archive.py /home/
 CMD  ["/bin/bash","-c","python3 /home/resources/models/download_yolo.py && /home/manage.sh"]
 
 ####

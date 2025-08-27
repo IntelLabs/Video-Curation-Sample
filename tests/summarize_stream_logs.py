@@ -824,20 +824,21 @@ def main(args):
             # Accumulate results
             df = pd.concat([df, new_df], ignore_index=True)
 
-    # Sort by log	Method	stream name	video
-    sort_cols = []
-    if args.recursive:
-        sort_cols = ["Method"]
-    sort_cols += ["video", "Num Streams"]
-    df.sort_values(by=sort_cols, inplace=True)
+            # Sort by log	Method	stream name	video
+            sort_cols = []
+            if args.recursive:
+                sort_cols = ["Method"]
+            sort_cols += ["video", "Num Streams"]
+            df.sort_values(by=sort_cols, inplace=True)
 
     # Fill in missing values with N/A
     df.fillna("N/A", inplace=True)
 
-    methods = list(set(df["Method"].values))
-    substrings = get_common_method_substrings(methods)
-    if len(substrings) > 0:
-        df["Method"] = df["Method"].str.replace(substrings[0], "")
+    if "Method" in df.columns.to_list():
+        methods = list(set(df["Method"].values))
+        substrings = get_common_method_substrings(methods)
+        if len(substrings) > 0:
+            df["Method"] = df["Method"].str.replace(substrings[0], "")
 
     # Write to file
     df.to_csv(args.csv_file, index=False)

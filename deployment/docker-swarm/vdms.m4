@@ -16,3 +16,5 @@
             disable: true
         environment:
             OVERRIDE_print_high_level_timing: "true"
+            no_proxy: "udf-bkgd-service,udf-service,${no_proxy}"
+            NO_PROXY: "udf-bkgd-service,udf-service,${NO_PROXY}"

@@ -95,9 +95,9 @@ inline VDMSThreadPool::~VDMSThreadPool() {
 }
 
 inline VDMSThreadPool& VDMSThreadPool::instance() {
-  static VDMSThreadPool pool(
-      std::thread::hardware_concurrency());  // This creates number of threads =
-                                             // number of SMT cores
+  static VDMSThreadPool pool(4);
+  // std::thread::hardware_concurrency());  // This creates number of threads =
+  //                                        // number of SMT cores
   return pool;
 }
 
