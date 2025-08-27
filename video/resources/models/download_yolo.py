@@ -3,11 +3,26 @@ from pathlib import Path
 
 from ultralytics import YOLO
 
+
+def str2bool(in_val):
+    if isinstance(in_val, bool):
+        return in_val
+
+    if not isinstance(in_val, str):
+        raise ValueError(f"{in_val} is not a bool or string")
+
+    if in_val.title() == "True":
+        return True
+    else:
+        return False
+
+
 model_precision_object = "FP16"
-model_name = "yolo11"
 half_flag = True
 dynamic_flag = True
+CUSTOM_MODEL_FLAG = str2bool(os.getenv("CUSTOM_MODEL_FLAG", False))
 DEVICE = os.environ.get("DEVICE", "CPU")
+MODEL_NAME = os.environ.get("MODEL_NAME", "yolo11n")
 if DEVICE == "GPU":
     batch_size = int(os.environ.get("GPU_BATCH_SIZE", 1))
 else:
@@ -16,7 +31,7 @@ else:
 
 
 def get_model(model_dir, run_platform, device_input, batch=1):
-    final_model_path = f"{model_dir}/{model_name}n.pt"
+    final_model_path = f"{model_dir}/{MODEL_NAME}.pt"
     pt_detection_model = YOLO(final_model_path, verbose=False, task="detect")
     if run_platform == "openvino":
         pt_detection_model.export(
@@ -27,7 +42,7 @@ def get_model(model_dir, run_platform, device_input, batch=1):
             batch=batch,
         )
 
-        final_model_path = f"{model_dir}/{model_name}n_openvino_model/"
+        final_model_path = f"{model_dir}/{MODEL_NAME}_openvino_model/"
         object_detection_model = YOLO(
             final_model_path,
             verbose=False,
@@ -51,7 +66,7 @@ def get_model(model_dir, run_platform, device_input, batch=1):
         )
         # pt_detection_model.export(format='engine')  # Rohit
 
-        final_model_path = f"{model_dir}/{model_name}n.engine"
+        final_model_path = f"{model_dir}/{MODEL_NAME}.engine"
         object_detection_model = YOLO(
             final_model_path,
             verbose=False,
@@ -68,7 +83,7 @@ def get_model(model_dir, run_platform, device_input, batch=1):
             else "onnxruntime"
         )
 
-        final_model_path = f"{model_dir}/{model_name}n.onnx"
+        final_model_path = f"{model_dir}/{MODEL_NAME}.onnx"
         pt_detection_model.export(
             format="onnx",
             half=half_flag,
@@ -94,9 +109,14 @@ def get_model(model_dir, run_platform, device_input, batch=1):
 
 
 if __name__ == "__main__":
-    ydir = Path(
-        f"/home/resources/models/ultralytics/{model_name}/{model_precision_object}"
-    )
+    if CUSTOM_MODEL_FLAG:
+        dir_path = "/home/resources/models/ultralytics/custom_models"
+    else:
+        dir_path = (
+            f"/home/resources/models/ultralytics/{MODEL_NAME}/{model_precision_object}"
+        )
+
+    ydir = Path(dir_path)
     device = os.environ.get("DEVICE", "CPU")
     if device == "GPU":
         run_platform = "engine"
@@ -108,4 +128,4 @@ if __name__ == "__main__":
     device_input = device.lower() if device == "CPU" else 0
     _, _ = get_model(ydir, run_platform, device_input, batch=batch_size)
 
-    os.remove(f"{ydir}/{model_name}n.pt")
+    os.remove(f"{ydir}/{MODEL_NAME}.pt")

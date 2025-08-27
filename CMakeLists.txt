@@ -10,6 +10,16 @@ elseif (NOT ${REGISTRY} MATCHES "/$")
     set(REGISTRY "${REGISTRY}/")
 endif()
 
+if(MODEL_NAME STREQUAL "")
+    set(MODEL_NAME "yolo11n")
+endif()
+
+if (MODEL_NAME STREQUAL "yolo11n")
+    set(CUSTOM_MODEL_FLAG "False")
+else()
+    set(CUSTOM_MODEL_FLAG "True")
+endif()
+
 if (NOT DEFINED PLATFORM)
     set(PLATFORM "Xeon")
 endif()
@@ -111,5 +121,5 @@ execute_process(COMMAND printf "\n\nThis script will build third party component
 
 execute_process(COMMAND printf "PLATFORM=${PLATFORM}, NSTREAMS=${NSTREAMS}, NCURATIONS=${NCURATIONS}, INGESTION=${INGESTION}\n")
 execute_process(COMMAND printf "IN_SOURCE=${IN_SOURCE}, NCPU=${NCPU}, DEVICE=${DEVICE}, DEBUG=${DEBUG}, RESIZE_FLAG=${RESIZE_FLAG}\n")
-execute_process(COMMAND printf "DOCKER_TAR=${DOCKER_TAR}, DOCKER_TAR_DIR=${DOCKER_TAR_DIR}, REGISTRY=${REGISTRY}\n\n")
+execute_process(COMMAND printf "DOCKER_TAR=${DOCKER_TAR}, DOCKER_TAR_DIR=${DOCKER_TAR_DIR}, REGISTRY=${REGISTRY}, MODEL_NAME=${MODEL_NAME}, CUSTOM_MODEL_FLAG=${CUSTOM_MODEL_FLAG}\n\n")
 

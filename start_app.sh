@@ -10,11 +10,11 @@ NCPU=0
 NCURATIONS=1
 NSTREAMS=1
 IN_SOURCE=stream
-SOURCE="-DIN_SOURCE=${IN_SOURCE}"
 DEBUG="0"
 DEVICE="CPU"
 DOCKER_TAR="0"
 RESIZE_FLAG="False"
+MODEL_NAME=""
 
 DIR=$(dirname $(readlink -f "$0"))
 BUILD_DIR=$DIR/build
@@ -24,6 +24,7 @@ LONG_LIST=(
     "type:"
     "registry:"
     "resize"
+    "model:"
     "ncurations:"
     "nstreams:"
     "ncpu:"
@@ -36,7 +37,7 @@ LONG_LIST=(
 OPTS=$(getopt \
     --longoptions "$(printf "%s," "${LONG_LIST[@]}")" \
     --name "$(basename "$0")" \
-    --options "hdlzi:t:r:n:v:c:s:e:" \
+    --options "hdlzi:t:r:m:n:v:c:s:e:" \
     -- "$@"
 )
 
@@ -63,6 +64,7 @@ script_usage()
         -e or --device      optional    Device for inference (CPU, GPU) [Default: CPU]
         -i or --ingestion   optional    Ingestion type (object, face) [Default: "object,face"]
         -l or --tars        optional    Flag to load docker images instead of building from Dockerfiles
+        -m or --model       optional    Custom YOLO model name (<model name>.pt). If not provided model YOLO11n is used.
         -n or --ncurations  optional    Number of ingestion containers [Default: 1]
         -r or --registry    optional    Registry [Default: None]
         -s or --source      optional    Input source type (videos, stream) [Default: stream]
@@ -81,14 +83,10 @@ while true; do
         -l | --tars) shift; DOCKER_TAR="1" ;;
         -e | --device) shift; DEVICE=$1; shift ;;
         -i | --ingestion) shift; INGESTION=$1; shift ;;
+        -m | --model) shift; MODEL_NAME=$1; shift ;;
         -n | --ncurations) shift; NCURATIONS=$1; shift ;;
         -r | --registry) shift; REGISTRY="$1"; shift ;;
-        -s | --source)
-            shift;
-            IN_SOURCE="$1";
-            SOURCE="-DIN_SOURCE=${IN_SOURCE}";
-            shift;
-            ;;
+        -s | --source) shift; IN_SOURCE="$1"; shift ;;
         -t | --type) shift; EXP_TYPE="$1"; shift ;;
         -v | --nstreams) shift; NSTREAMS=$1; shift ;;
         -z | --resize) shift; RESIZE_FLAG="True" ;;
@@ -107,11 +105,12 @@ if [ $REGISTRY == "None" ]; then
         -DDEVICE=$DEVICE \
         -DDOCKER_TAR=$DOCKER_TAR \
         -DINGESTION=$INGESTION \
-        $SOURCE \
+        -DIN_SOURCE=$IN_SOURCE \
         -DNCPU=$NCPU \
         -DNCURATIONS=$NCURATIONS \
         -DNSTREAMS=$NSTREAMS \
         -DRESIZE_FLAG=$RESIZE_FLAG \
+        -DMODEL_NAME=$MODEL_NAME \
         ..
 else
     cmake \
@@ -119,11 +118,12 @@ else
         -DDEVICE=$DEVICE \
         -DDOCKER_TAR=$DOCKER_TAR \
         -DINGESTION=$INGESTION \
-        $SOURCE \
+        -DIN_SOURCE=$IN_SOURCE \
         -DNCPU=$NCPU \
         -DNCURATIONS=$NCURATIONS \
         -DNSTREAMS=$NSTREAMS \
         -DRESIZE_FLAG=$RESIZE_FLAG \
+        -DMODEL_NAME=$MODEL_NAME \
         -DREGISTRY=$REGISTRY \
         ..
 fi

@@ -5,9 +5,9 @@ Use the following definitions to customize the building process:
 - **DEBUG**: Flag to enable debug messages
 - **DEVICE**: Specify the device: `CPU` or `GPU`
 - **DOCKER_TAR**: Flag to load docker images instead of building from Dockerfiles
-- **IN_SOURCE**: Specify the input video source: `videos` and/or `stream`.
-    <!-- Use comma as the deliminator to specify more than 1 source. -->
+- **IN_SOURCE**: Specify the input video source: `videos` and/or `stream` (comma-delimited).
 - **INGESTION**: Specify the ingestion mode: `face` and/or `object`. Use comma as the deliminator to specify more than 1 ingestion mode.
+- **MODEL_NAME**: Specify the custom YOLO model name which is expected to be in `video/resources/models/ultralytics/custom_models/<model name>.pt`. If not provided, the Ultralytics YOLO11n (`yolo11n`) is used.
 - **NCURATIONS**: Specify the number of curation processes running in the background.
 - **NSTREAMS**: Specify the number of video streams
 - **PLATFORM**: Specify the target platform: `Xeon`

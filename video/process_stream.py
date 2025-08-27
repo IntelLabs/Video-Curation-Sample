@@ -13,14 +13,28 @@ from threading import Lock  # library for multi-threading
 import cv2  # OpenCV library
 import psutil
 from openvino.runtime import Core
-from segment_archive import str2bool
 from ultralytics import YOLO
 from ultralytics.utils.checks import check_imgsz
 
 import vdms
 
+
+def str2bool(in_val):
+    if isinstance(in_val, bool):
+        return in_val
+
+    if not isinstance(in_val, str):
+        raise ValueError(f"{in_val} is not a bool or string")
+
+    if in_val.title() == "True":
+        return True
+    else:
+        return False
+
+
 """ GENERAL VARIABLES """
 CODE_DIR = os.getenv("CODE_DIR", "/home")
+CUSTOM_MODEL_FLAG = str2bool(os.getenv("CUSTOM_MODEL_FLAG", False))
 DBHOST = os.getenv("DBHOST", "vdms-service")
 DEBUG = os.getenv("DEBUG", "0")
 DEVICE = os.getenv("DEVICE", "CPU")
@@ -31,7 +45,7 @@ SHARED_OUTPUT = os.getenv("SHARED_OUTPUT", "/var/www/mp4")
 TEST_MODE = str2bool(os.getenv("TEST_FLAG", False))
 TMP_LOCATION = os.getenv("TMP_LOCATION", "/var/www/streams/")
 UDF_HOST = os.getenv("UDF_HOST", "video-service")
-MODEL_NAME = os.getenv("MODEL_NAME", "yolo11")
+MODEL_NAME = os.getenv("MODEL_NAME", "yolo11n")
 # vdms_pool_size = 10
 
 LOCKTIMEOUT_RETRIES = 5
@@ -49,7 +63,11 @@ MODEL_W, MODEL_H = (640, 640)
 TARGET_FPS = 15  # 15  30
 UDF_PORT = 5011
 WRITER_FOURCC = cv2.VideoWriter_fourcc(*"mp4v")  # avc1, mp4v, AVC1
-model_path = f"{CODE_DIR}/resources/models/ultralytics/{MODEL_NAME}/{MODEL_PRECISION}/{MODEL_NAME}n"
+
+if CUSTOM_MODEL_FLAG:
+    model_path = f"{CODE_DIR}/resources/models/ultralytics/custom_models/{MODEL_NAME}"
+else:
+    model_path = f"{CODE_DIR}/resources/models/ultralytics/{MODEL_NAME}/{MODEL_PRECISION}/{MODEL_NAME}"
 
 # if hasattr(os, "process_cpu_count"):
 #     num_usuable_cpus = os.process_cpu_count()
@@ -95,7 +113,6 @@ def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0
 
 
 """ MODEL DEFINITIONS """
-# model_path = f"{CODE_DIR}/resources/models/ultralytics/yolo11/{MODEL_PRECISION}/yolo11n_openvino_model"
 model = YOLO(model_path, verbose=False, task="detect")
 
 
