@@ -11,23 +11,9 @@ from inotify.adapters import Inotify
 
 num_workers = mp.cpu_count()  #  5,  mp.cpu_count()
 
-# # REPO_DIR = Path(__file__).parent.parent
-# # TEST_VIDEO_PATH = REPO_DIR / "video/archive_custom/video8K__test-8k-26s.mp4"
-# SHARED_OUTPUT = os.getenv("SHARED_OUTPUT", "/var/www/mp4")
-# # Path(SHARED_OUTPUT).mkdir(parents=True, exist_ok=True)
-# tmp_dir = "/var/www/archive"
-# kkhost = os.environ["KKHOST"]
-# dbhost = "vdms-service"  # os.environ["DBHOST"]
-# dbport = 55555
-# ingestion = os.environ["INGESTION"]
 in_source = os.environ["IN_SOURCE"]
-# resize_input = str2bool(os.getenv("RESIZE_FLAG", False))
 DEBUG = os.environ["DEBUG"]
 DEBUG_FLAG = True if DEBUG == "1" else False
-# # video_store_dir = "/home/resources"
-# video_store_dir = "/var/www/mp4"
-# model_w, model_h = (640, 640)
-# DEVICE = os.environ["DEVICE"]
 
 
 def run_processor(path_or_url, camera_name=None):
@@ -40,10 +26,6 @@ def run_processor(path_or_url, camera_name=None):
     if camera_name is not None:
         cmd.append(camera_name)
 
-    # process = subprocess.Popen(
-    #     cmd,
-    # )
-    # process.wait()
     subprocess.run(cmd, check=True)
 
 
@@ -74,35 +56,21 @@ def watch_video_files(queue, watch_dir):
 
 
 def retrieve_camera_details(queue, config_path):
+    config = None
     with open(config_path, "r") as inFile:
         config = yaml.safe_load(inFile)
 
-    for camera_name, camera_details in config.items():
-        # run_processor(camera_details["url"], camera_name=camera_name)
-        source = camera_details["url"]
-        print(f"{source} added to queue: {time.time()}", flush=True)
-        queue.put((source, camera_name))
+    if config is not None:
+        for camera_name, camera_details in config.items():
+            # run_processor(camera_details["url"], camera_name=camera_name)
+            source = camera_details["url"]
+            print(f"{source} added to queue: {time.time()}", flush=True)
+            queue.put((source, camera_name))
 
 
 def main(watch_folder=os.getcwd()):
     if DEBUG_FLAG:
         print("[TIMING],start_watchandsend,," + str(time.time()), flush=True)
-
-    print(f"in_source: {in_source}", flush=True)
-    # if "videos" in in_source:
-    #     # all_processes = []
-    #     for filename in os.listdir(tmp_dir):
-    #         if any(filename.endswith(ext) for ext in [".mp4", ".mkv", ".avi"]):
-    #             full_filename_path = os.path.join(tmp_dir, filename)
-    #             run_processor(full_filename_path, camera_name=None)
-
-    # if "stream" in in_source:
-    #     import yaml
-
-    #     with open("/home/camera_config.yaml", "r") as inFile:
-    #         config = yaml.safe_load(inFile)
-    #     for camera_name, camera_details in config.items():
-    #         run_processor(camera_details["url"], camera_name=camera_name)
 
     file_queue = mp.Queue()
 
