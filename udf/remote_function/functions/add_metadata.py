@@ -37,12 +37,13 @@ def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0
 
 
 def run(ipfilename, format, options, tmp_dir_path):
-    print(
-        "Adding metadata for {} from UDF to host: {} and port: {}".format(
-            options["Name"], options["host"], options["port"]
-        ),
-        flush=True,
-    )
+    if DEBUG == "1":
+        print(
+            "Adding metadata for {} from UDF to host: {} and port: {}".format(
+                options["Name"], options["host"], options["port"]
+            ),
+            flush=True,
+        )
     db = vdms.vdms()
     db.connect(options["host"], options["port"])
 

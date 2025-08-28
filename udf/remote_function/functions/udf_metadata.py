@@ -11,7 +11,6 @@ DEBUG = os.environ.get("DEBUG", "0")
 
 def _sort_dict_by_frame(in_dict):
     def _by_int(key):
-        # return int(key.split("_")[0])
         return tuple(int(k) for k in key.split("_"))
 
     return dict(sorted(in_dict.items(), key=lambda x: _by_int(x[0])))
@@ -30,13 +29,6 @@ def run(ipfilename, format, options, tmp_dir_path):
         )
 
     metadata = _sort_dict_by_frame(METADATA)
-
-    # Metadata is sorted here
-    keys = list(metadata.keys())
-    print(
-        f"[DEBUG UDF METADATA] Metadata ({otype}) keys for {local_filename}: {keys}",
-        flush=True,
-    )
 
     response = {"opFile": ipfilename, "metadata": metadata}
 

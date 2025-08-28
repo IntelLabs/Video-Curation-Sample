@@ -9,9 +9,16 @@ DEBUG = os.environ.get("DEBUG", "0")
 """ MAIN FUNCTION """
 
 
+def _sort_dict_by_frame(in_dict):
+    def _by_int(key):
+        return tuple(int(k) for k in key.split("_"))
+
+    return dict(sorted(in_dict.items(), key=lambda x: _by_int(x[0])))
+
+
 def run(ipfilename, format, options, tmp_dir_path):
     local_filename = options["filename"] if "filename" in options else ipfilename
-    METADATA = options["metadata"]  # json.loads(options["metadata"])
+    METADATA = options["metadata"]
     W, H = options["input_sizeWH"]
     otype = options["otype"]
 
@@ -21,13 +28,7 @@ def run(ipfilename, format, options, tmp_dir_path):
             flush=True,
         )
 
-    metadata = dict(
-        sorted(
-            METADATA.items(), key=lambda item: int(item[0].split("_")[0]), reverse=False
-        )
-    )
-
-    # print(f"[DEBUG UDF METADATA] {metadata}", flush=True)
+    metadata = _sort_dict_by_frame(METADATA)
 
     response = {"opFile": ipfilename, "metadata": metadata}
 

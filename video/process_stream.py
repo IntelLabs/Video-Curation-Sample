@@ -506,7 +506,8 @@ def release_clip_and_reencode(clip_key, _out_vid, clip_filename, tmp_file, targe
     subprocess.run(cmd_list, check=True)
 
     # filename = str(Path(clip_filename).name)
-    print(f"[TIMING],Save clip,{clip_key},{time.time()}", flush=True)
+    if DEBUG == "1":
+        print(f"[TIMING],Save clip,{clip_key},{time.time()}", flush=True)
     os.remove(tmp_file)
     return _out_vid
 
@@ -550,8 +551,11 @@ class VideoStream:
 
         # Check that object is opened successfully
         self.connect_to_stream(time_limit_mins=5)
-
-        print(f"[TIMING],Start processing,{self.stream_name},{time.time()}", flush=True)
+        if DEBUG == "1":
+            print(
+                f"[TIMING],Start processing,{self.stream_name},{time.time()}",
+                flush=True,
+            )
 
         self.setup_stream(fps)
 
@@ -679,7 +683,11 @@ class VideoStream:
         clip_frame_idx = 0
         clip_id = 0
         _out_vid = None
-        print(f"[TIMING],start_get_frames,{self.stream_name},{time.time()}", flush=True)
+        if DEBUG == "1":
+            print(
+                f"[TIMING],start_get_frames,{self.stream_name},{time.time()}",
+                flush=True,
+            )
         while True:
             if self.stopped:
                 break
@@ -733,7 +741,10 @@ class VideoStream:
             # cv2.waitKey(delay_ms)
             # time.sleep(delay_ms / 1000 )
 
-        print(f"[TIMING],end_get_frames,{self.stream_name},{time.time()}", flush=True)
+        if DEBUG == "1":
+            print(
+                f"[TIMING],end_get_frames,{self.stream_name},{time.time()}", flush=True
+            )
 
     # method to create clips
     def get_clips(self):
@@ -750,10 +761,11 @@ class VideoStream:
                 if queue_details is None:
                     if _out_vid is not None:
                         frame_count = clip_frame_idx + 1
-                        print(
-                            f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames (end of stream)",
-                            flush=True,
-                        )
+                        if DEBUG == "1":
+                            print(
+                                f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames (end of stream)",
+                                flush=True,
+                            )
                         _out_vid = release_clip_and_reencode(
                             clip_key,
                             _out_vid,
@@ -761,10 +773,11 @@ class VideoStream:
                             tmp_file,
                             self.target_fps,
                         )
-                        print(
-                            f"[TIMING],end_get_clips,{clip_key},{time.time()}",
-                            flush=True,
-                        )
+                        if DEBUG == "1":
+                            print(
+                                f"[TIMING],end_get_clips,{clip_key},{time.time()}",
+                                flush=True,
+                            )
                         self.clip_end_frame[clip_key] = frameNum
                     break
 
@@ -774,27 +787,31 @@ class VideoStream:
                 clip_key = Path(clip_filename).name
 
                 if clip_frame_idx == 0:
-                    print(
-                        f"[TIMING],start_get_clips,{clip_key},{time.time()}", flush=True
-                    )
+                    if DEBUG == "1":
+                        print(
+                            f"[TIMING],start_get_clips,{clip_key},{time.time()}",
+                            flush=True,
+                        )
                     _out_vid = cv2.VideoWriter(
                         tmp_file,
                         fourcc=self.fourcc,
                         fps=self.target_fps,
                         frameSize=(self.width, self.height),
                     )
-                    print(
-                        f"[TIMING],Start new clip,{clip_key},{time.time()}",
-                        flush=True,
-                    )
+                    if DEBUG == "1":
+                        print(
+                            f"[TIMING],Start new clip,{clip_key},{time.time()}",
+                            flush=True,
+                        )
                 _out_vid.write(frame)
 
                 if clip_frame_idx == self.clip_total_frames - 1:
                     frame_count = clip_frame_idx + 1
-                    print(
-                        f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames",
-                        flush=True,
-                    )
+                    if DEBUG == "1":
+                        print(
+                            f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames",
+                            flush=True,
+                        )
                     _out_vid = release_clip_and_reencode(
                         clip_key,
                         _out_vid,
@@ -802,9 +819,11 @@ class VideoStream:
                         tmp_file,
                         self.target_fps,
                     )
-                    print(
-                        f"[TIMING],end_get_clips,{clip_key},{time.time()}", flush=True
-                    )
+                    if DEBUG == "1":
+                        print(
+                            f"[TIMING],end_get_clips,{clip_key},{time.time()}",
+                            flush=True,
+                        )
 
                     self.clip_end_frame[clip_key] = frameNum
             except queue.Empty:
@@ -823,9 +842,11 @@ class VideoStream:
                     queue_details
                 )
                 clip_key = Path(clip_filename).name
-                print(
-                    f"[TIMING],start_infer_worker,{clip_key},{time.time()}", flush=True
-                )
+                if DEBUG == "1":
+                    print(
+                        f"[TIMING],start_infer_worker,{clip_key},{time.time()}",
+                        flush=True,
+                    )
                 _, metadata, metadata_face = infer_worker(
                     self.stream_name,
                     clip_frame_idx,
@@ -835,7 +856,11 @@ class VideoStream:
                     INGESTION,
                     fps=self.target_fps,
                 )
-                print(f"[TIMING],end_infer_worker,{clip_key},{time.time()}", flush=True)
+                if DEBUG == "1":
+                    print(
+                        f"[TIMING],end_infer_worker,{clip_key},{time.time()}",
+                        flush=True,
+                    )
                 self.all_metadata.setdefault(clip_key, {})
                 self.all_metadata[clip_key].setdefault("object", {})
                 self.all_metadata[clip_key]["object"].update(metadata)
@@ -881,9 +906,11 @@ class VideoStream:
                     break
 
                 clip_key, clip_filename, clip_metadata, width, height = queue_details
-                print(
-                    f"[TIMING],start_clip_metadata,{clip_key},{time.time()}", flush=True
-                )
+                if DEBUG == "1":
+                    print(
+                        f"[TIMING],start_clip_metadata,{clip_key},{time.time()}",
+                        flush=True,
+                    )
 
                 # Send metadata to UDF
                 properties = {
@@ -903,9 +930,11 @@ class VideoStream:
                         metadata=clip_metadata[ingest_mode],
                         test_mode=TEST_MODE,
                     )
-                print(
-                    f"[TIMING],end_clip_metadata,{clip_key},{time.time()}", flush=True
-                )
+                if DEBUG == "1":
+                    print(
+                        f"[TIMING],end_clip_metadata,{clip_key},{time.time()}",
+                        flush=True,
+                    )
             except queue.Empty:
                 pass
 
@@ -930,20 +959,22 @@ def processor(camera_src, camera_name=None):
 
     # printing time elapsed and fps
     elapsed = end - start
-    print(
-        "[DEBUG] Stream name:{}, FPS: {} , Elapsed Time: {}, Num. Retrieved Frames: {}, Num. Processed Frames: {}".format(
-            webcam_stream.stream_name,
-            webcam_stream.target_fps,
-            elapsed,
-            webcam_stream.retrieved_frames,
-            webcam_stream.num_frames_processed,
-        ),
-        flush=True,
-    )
+    if DEBUG == "1":
+        print(
+            "[DEBUG] Stream name:{}, FPS: {} , Elapsed Time: {}, Num. Retrieved Frames: {}, Num. Processed Frames: {}".format(
+                webcam_stream.stream_name,
+                webcam_stream.target_fps,
+                elapsed,
+                webcam_stream.retrieved_frames,
+                webcam_stream.num_frames_processed,
+            ),
+            flush=True,
+        )
 
-    print(
-        f"[TIMING],Completed processing,{webcam_stream.stream_name},{end}", flush=True
-    )
+        print(
+            f"[TIMING],Completed processing,{webcam_stream.stream_name},{end}",
+            flush=True,
+        )
 
     # closing all windows
     cv2.destroyAllWindows()

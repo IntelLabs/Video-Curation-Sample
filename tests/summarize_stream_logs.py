@@ -229,8 +229,8 @@ def get_input_args():
 
     args = parser.parse_args()
     args.log_dir = args.log_dir.resolve()
-    args.csv_file = str(args.log_dir / "log_summary_.csv")
-    txt_file = str(args.log_dir / "log_summary_.txt")
+    args.csv_file = str(args.log_dir / "log_summary.csv")
+    txt_file = str(args.log_dir / "log_summary.txt")
     args.out_log_file = open(txt_file, "w")
     return args
 

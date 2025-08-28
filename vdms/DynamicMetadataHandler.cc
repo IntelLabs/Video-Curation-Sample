@@ -64,11 +64,6 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
     VideoLoop videoLoop;
     videoLoop.set_nrof_entities(chunk_count);
 
-    std::cout << "[DEBUG] _metadata[0] size: " << num_bbs << std::endl;
-
-    // TODO: Frames are out of order here
-    // std::cout << "[DEBUG] add_metadata_bg_vid _metadata: " << _metadata[0] << std::endl;
-
     Json::Value metadata_chunk;
     for (Json::Value vframe : _metadata[0]) {
         // curr_frame++;
@@ -146,19 +141,10 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
 
         }
         counter++;
-        // std::cout << "[DEBUG Dynamic] frame_count: " << std::to_string(frame_count) << std::endl;
-        // std::cout << "[DEBUG Dynamic] curr_frame: " << std::to_string(curr_frame) << std::endl;
-        // std::cout << "[DEBUG Dynamic] bb_idx: " << std::to_string(bb_idx) << std::endl;
-        // std::cout << "[DEBUG Dynamic] int(frame_count/chunk_count): " << std::to_string(int(frame_count/chunk_count)) << std::endl;
-        // std::cout << "[DEBUG Dynamic] int(num_bbs/chunk_count): " << std::to_string(int(num_bbs/chunk_count)) << std::endl;
-        // std::cout << "[DEBUG] add_metadata_bg_vid counter: " << std::to_string(counter) << std::endl;
-        // if (counter == int(frame_count/chunk_count) || curr_frame == frame_count){
         if (bb_counter == int(num_bbs/chunk_count) || bb_idx == num_bbs){
             options["metadata"] = metadata_chunk;
             options["Name"] = _props["Name"].asString();
             VCL::Video video(_video);
-            // std::cout << "[DEBUG] add_metadata_bg_vid counter (" << std::to_string(counter) << ") for Video id: " << video.get_video_id() << std::endl;
-            // std::cout << "[DEBUG] add_metadata_bg_vid bb_counter (" << std::to_string(bb_counter) << ") for Video id: " << video.get_video_id() << std::endl;
             video.remoteOperation(url, options);
             videoLoop.enqueue(video);
             metadata_chunk.clear();
