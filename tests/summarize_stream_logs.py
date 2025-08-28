@@ -154,6 +154,8 @@ def stat2df(file_txt):
         df[["MEM USAGE", "MEM LIMIT"]] = df["MEM USAGE / LIMIT"].str.split(
             " /", n=1, expand=True
         )
+        df["MEM USAGE"] = df["MEM USAGE"].str.strip()
+        df["MEM LIMIT"] = df["MEM LIMIT"].str.strip()
         df.drop("MEM USAGE / LIMIT", axis=1, inplace=True)
 
         # Format "MEM %" to float
@@ -162,10 +164,14 @@ def stat2df(file_txt):
         # Split "NET I/O"
         # if len(df["NET I/O"].values[0].split(" / ")):
         df[["NET I", "NET O"]] = df["NET I/O"].str.split(" /", n=1, expand=True)
+        df["NET I"] = df["NET I"].str.strip()
+        df["NET O"] = df["NET O"].str.strip()
         df.drop("NET I/O", axis=1, inplace=True)
 
         # Split "BLOCK I/O"
         df[["BLOCK I", "BLOCK O"]] = df["BLOCK I/O"].str.split(" /", n=1, expand=True)
+        df["BLOCK I"] = df["BLOCK I"].str.strip()
+        df["BLOCK O"] = df["BLOCK O"].str.strip()
         df.drop("BLOCK I/O", axis=1, inplace=True)
 
         # Format "PIDS" to int
@@ -181,7 +187,7 @@ def stat2df(file_txt):
 
 
 def get_common_method_substrings(methods):
-    if len(methods) == 0:
+    if methods == [None] or len(methods) == 0:
         return []
 
     # Shortest string
@@ -223,8 +229,8 @@ def get_input_args():
 
     args = parser.parse_args()
     args.log_dir = args.log_dir.resolve()
-    args.csv_file = str(args.log_dir / "log_summary.csv")
-    txt_file = str(args.log_dir / "log_summary.txt")
+    args.csv_file = str(args.log_dir / "log_summary_.csv")
+    txt_file = str(args.log_dir / "log_summary_.txt")
     args.out_log_file = open(txt_file, "w")
     return args
 
@@ -233,16 +239,16 @@ def get_overall_details(info_details, out_log_file):
     app_info = {}
     VDMS_crashes = 0
     if "start_watchandsend" not in info_details:
-        app_end_time = info_details["Min Timestamp"]
+        app_start_time = info_details["Min Timestamp"]
     else:
-        app_end_time = info_details["start_watchandsend"]
+        app_start_time = info_details["start_watchandsend"]
 
     if "end_watchandsend" not in info_details:
         app_end_time = info_details["Max Timestamp"]
     else:
         app_end_time = info_details["end_watchandsend"]
 
-    watch_process_elapsed_time = app_end_time - info_details["start_watchandsend"]
+    watch_process_elapsed_time = app_end_time - app_start_time
     time_str = secs2HMS_str(watch_process_elapsed_time)
     print(
         f"\t[Overall] App took {time_str} to process all videos/streams",
@@ -296,52 +302,87 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
             app_info.update(get_overall_details(info_details, out_log_file))
 
         elif ".mp4" not in key:
-            camera_info.setdefault(key, {})
             frames_received = 0
             received_expected_clips = 0
             frames_processed = 0
+            stream_start_t = 0
+            stream_end_t = 0
+            stream_elapsed_t = 0
             stream_processing_time = 0
             delta_streamend_2_processing_end = 0
+            delta_streamstart_2_processing_start = 0
 
-            video_name = info_details["streamed video"]
+            if "video name" in info_details:
+                video_name = info_details["video name"]
+            else:
+                video_name = f"{key}.mp4"
+
+            camera_info.setdefault(
+                key,
+                {
+                    "video": video_name,
+                    "video duration (s)": 0,
+                    "video fps": 0,
+                    "video frames": 0,
+                    "video expected clips": 0,
+                    "target fps": 0,
+                    "target frames": 0,
+                    "target expected clips": 0,
+                },
+            )
             camera_info[key]["video"] = video_name
-            camera_info[key]["video duration (s)"] = info_details["video duration (s)"]
-            camera_info[key]["video fps"] = info_details["video fps"]
-            camera_info[key]["video frames"] = int(
-                info_details["video fps"] * info_details["video duration (s)"]
-            )
-            camera_info[key]["video expected clips"] = ceil(
-                info_details["video duration (s)"] / clip_length_in_secs
-            )
+
+            if "video duration (s)" in info_details:
+                camera_info[key]["video duration (s)"] = info_details[
+                    "video duration (s)"
+                ]
+                camera_info[key]["video expected clips"] = ceil(
+                    info_details["video duration (s)"] / clip_length_in_secs
+                )
+
+            if "video fps" in info_details:
+                camera_info[key]["video fps"] = info_details["video fps"]
+
+            if "video duration (s)" in info_details and "video fps" in info_details:
+                camera_info[key]["video frames"] = int(
+                    info_details["video fps"] * info_details["video duration (s)"]
+                )
+
             new_target_fps = (
                 TARGET_FPS
-                if info_details["video fps"] > TARGET_FPS
-                else info_details["video fps"]
+                if camera_info[key]["video fps"] > TARGET_FPS
+                else camera_info[key]["video fps"]
             )
             camera_info[key]["target fps"] = new_target_fps
-            camera_info[key]["target frames"] = int(
-                new_target_fps * info_details["video duration (s)"]
-            )
-            camera_info[key]["target expected clips"] = ceil(
-                camera_info[key]["target frames"]
-                / (clip_length_in_secs * new_target_fps)
-            )
+            if "video duration (s)" in info_details:
+                camera_info[key]["target frames"] = int(
+                    new_target_fps * info_details["video duration (s)"]
+                )
+
+            if new_target_fps > 0:
+                camera_info[key]["target expected clips"] = ceil(
+                    camera_info[key]["target frames"]
+                    / (clip_length_in_secs * new_target_fps)
+                )
 
             if "frames received" in info_details:
                 frames_received = info_details["frames received"]
-                received_expected_clips = ceil(
-                    (frames_received / info_details["video fps"]) / clip_length_in_secs
-                )
+                if camera_info[key]["video fps"] > 0:
+                    received_expected_clips = ceil(
+                        (frames_received / camera_info[key]["video fps"])
+                        / clip_length_in_secs
+                    )
 
             if "frames processed" in info_details:
                 frames_processed = info_details["frames processed"]
 
+            if "stream elapsed time (s)" in info_details:
+                stream_elapsed_t = info_details["stream elapsed time (s)"]
+
             camera_info[key]["frames received"] = frames_received
             camera_info[key]["received expected clips"] = received_expected_clips
             camera_info[key]["frames processed"] = frames_processed
-            camera_info[key]["stream send elapsed time (s)"] = info_details[
-                "stream elapsed time (s)"
-            ]
+            camera_info[key]["stream send elapsed time (s)"] = stream_elapsed_t
             time_str = secs2HMS_str(camera_info[key]["stream send elapsed time (s)"])
             print(
                 f"\t[{key}] Took {time_str} to send {video_name}",
@@ -361,32 +402,38 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                     file=out_log_file,
                 )
 
-                delta_streamend_2_processing_end = abs(
-                    info_details["Completed processing"]
-                    - info_details["stream end time"]
-                )
-                time_str = secs2HMS_str(delta_streamend_2_processing_end)
-                print(
-                    f"\t[{key}] Took {time_str} after stream ended to complete processing {video_name}",
-                    flush=True,
-                    file=out_log_file,
-                )
+                if "stream end time" in info_details:
+                    stream_end_t = info_details["stream end time"]
+
+                    delta_streamend_2_processing_end = abs(
+                        info_details["Completed processing"] - stream_end_t
+                    )
+                    time_str = secs2HMS_str(delta_streamend_2_processing_end)
+                    print(
+                        f"\t[{key}] Took {time_str} after stream ended to complete processing {video_name}",
+                        flush=True,
+                        file=out_log_file,
+                    )
 
             camera_info[key]["stream processing time (s)"] = stream_processing_time
             camera_info[key]["delta stream end to processing end (s)"] = (
                 delta_streamend_2_processing_end
             )
 
-            camera_info[key]["delta stream start to processing start (s)"] = abs(
-                info_details["Start processing"] - info_details["stream start time"]
-            )
-            time_str = secs2HMS_str(
-                camera_info[key]["delta stream start to processing start (s)"]
-            )
-            print(
-                f"\t[{key}] Took {time_str} after starting stream to start processing {video_name}\n",
-                flush=True,
-                file=out_log_file,
+            if "stream start time" in info_details:
+                stream_start_t = info_details["stream start time"]
+
+                delta_streamstart_2_processing_start = abs(
+                    info_details["Start processing"] - stream_start_t
+                )
+                time_str = secs2HMS_str(delta_streamstart_2_processing_start)
+                print(
+                    f"\t[{key}] Took {time_str} after starting stream to start processing {video_name}\n",
+                    flush=True,
+                    file=out_log_file,
+                )
+            camera_info[key]["delta stream start to processing start (s)"] = (
+                delta_streamstart_2_processing_start
             )
 
         elif ".mp4" in key:
@@ -476,20 +523,22 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                 )
 
     details = []
+    stat_cols = []
     for name, cam_details in camera_info.items():
         cam_dict = {
             # "log": log_filename,
-            "Num Streams": int(log_filename.split("_")[-1].split(".log")[0]),
+            # "Num Streams": int(log_filename.split("_")[-1].split(".log")[0]),
+            "Num Streams": len(camera_info),
             "Method": method,
             "stream name": name,
             "Log VDMS crashes": int(app_info["Log VDMS crashes"]),
         }
 
-        stat_cols = []
         for k, v in app_info.items():
             if "lcc_" in k:
                 cam_dict[k] = v
-                stat_cols.append(k)
+                if k not in stat_cols:
+                    stat_cols.append(k)
 
         if "num clips" not in cam_dict:
             cam_dict.update(PROCESSING_DEFAULT_DICT)
@@ -517,53 +566,54 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
 
     new_df = pd.DataFrame(details)
 
-    # Reorder
-    new_col_order = [
-        # "log",
-        "Num Streams",
-        "Method",
-        "stream name",
-        "video",
-        "% frames received",
-        "% rcvd frames processed",
-        "Total Failures",
-        "video duration (s)",
-        "video fps",
-        "video frames",
-        "video expected clips",
-        "target fps",
-        "target frames",
-        "target expected clips",
-        "received expected clips",
-        "frames received",
-        "frames processed",
-        "num clips",
-        "total clip frames",
-        "frameW",
-        "frameH",
-        "object detections",
-        "face detections",
-        "Num Failures",
-        "Num Bkgd Failures",
-        "Log VDMS crashes",
-        "stream send elapsed time (s)",
-        "stream processing time (s)",
-        "delta stream start to processing start (s)",
-        "delta stream end to processing end (s)",
-        "Time to create clip (s)",
-        "total inference runtime (s)",
-        "total get_clip runtime (s)",
-        "total get_frames runtime (s)",
-        "total process_clip_metadata runtime (s)",
-        "UDF object db.query runtime (s)",
-        "UDF object run func runtime (s)",
-        "UDF face db.query runtime (s)",
-        "UDF face run func runtime (s)",
-    ]
+    if len(new_df) > 0:
+        # Reorder
+        new_col_order = [
+            # "log",
+            "Num Streams",
+            "Method",
+            "stream name",
+            "video",
+            "% frames received",
+            "% rcvd frames processed",
+            "Total Failures",
+            "video duration (s)",
+            "video fps",
+            "video frames",
+            "video expected clips",
+            "target fps",
+            "target frames",
+            "target expected clips",
+            "received expected clips",
+            "frames received",
+            "frames processed",
+            "num clips",
+            "total clip frames",
+            "frameW",
+            "frameH",
+            "object detections",
+            "face detections",
+            "Num Failures",
+            "Num Bkgd Failures",
+            "Log VDMS crashes",
+            "stream send elapsed time (s)",
+            "stream processing time (s)",
+            "delta stream start to processing start (s)",
+            "delta stream end to processing end (s)",
+            "Time to create clip (s)",
+            "total inference runtime (s)",
+            "total get_clip runtime (s)",
+            "total get_frames runtime (s)",
+            "total process_clip_metadata runtime (s)",
+            "UDF object db.query runtime (s)",
+            "UDF object run func runtime (s)",
+            "UDF face db.query runtime (s)",
+            "UDF face run func runtime (s)",
+        ]
 
-    new_col_order.extend(stat_cols)
+        new_col_order.extend(stat_cols)
 
-    new_df = new_df[new_col_order]
+        new_df = new_df[new_col_order]
     return new_df
 
 
@@ -573,35 +623,54 @@ def remove_value_from_list(the_list, value):
     return the_list
 
 
-def get_docker_stats(stat_path):
+def get_maxinfo_results(file_txt, max_info):
+    container_names, df = stat2df(file_txt)
+
+    for name in container_names:
+        max_info.setdefault(
+            name,
+            {k: 0 for k in df.columns.to_list() if k != "CONTAINER NAME"},
+        )
+
+        max_info = update_stats(max_info, df[df["CONTAINER NAME"] == name])
+
+    return max_info
+
+
+def get_docker_stats(stat_path, container_names):
     max_info = {}
+    for container in container_names:
+        max_info.setdefault(
+            container,
+            {
+                "CPU %": 0,
+                "MEM USAGE": "0B",
+                "MEM LIMIT": "0B",
+                "MEM %": 0,
+                "NET I": "0B",
+                "NET O": "0B",
+                "BLOCK I": "0B",
+                "BLOCK O": "0B",
+                "PIDS": 0,
+            },
+        )
+
     if Path(stat_path).exists():
         # Read log
         with open(stat_path, "r") as f:
             file_txt = ""
             for line in f:
                 if "CONTAINER ID" in line and file_txt != "":
-                    # Get max results
-                    container_names, df = stat2df(file_txt)
-
-                    for name in container_names:
-                        max_info.setdefault(
-                            name,
-                            {
-                                k: 0
-                                for k in df.columns.to_list()
-                                if k != "CONTAINER NAME"
-                            },
-                        )
-
-                        max_info = update_stats(
-                            max_info, df[df["CONTAINER NAME"] == name]
-                        )
-
+                    # Get max
+                    max_info = get_maxinfo_results(file_txt, max_info)
                     # Reset text
                     file_txt = ""
 
                 file_txt += line
+
+            if file_txt != "":
+                max_info = get_maxinfo_results(file_txt, max_info)
+                file_txt = ""
 
     return max_info
 
@@ -633,9 +702,7 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                     # info.setdefault(camera_name, {})
                     info[camera_name]["type"] = details["type"]
                     info[camera_name]["url"] = details["url"]
-                    info[camera_name]["streamed video"] = details["video"].split("/")[
-                        -1
-                    ]
+                    info[camera_name]["video name"] = details["video"].split("/")[-1]
                     info[camera_name]["video duration (s)"] = details["duration"]
                     info[camera_name]["video fps"] = details["FPS"]
                     info[camera_name]["stream start time"] = details["start_time"]
@@ -646,11 +713,16 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                     min_timestamp = min(min_timestamp, float(details["start_time"]))
                     max_timestamp = max(max_timestamp, float(details["end_time"]))
         else:
-            return {}
+            camera_details = {}
 
         # Get processing details
         del_camera_names = list(camera_details.keys())
+        container_names = []
         for line in log:
+            if all(sub in line for sub in ["Container lcc_", "Created"]):
+                srv_name = line.split()[1]
+                if srv_name not in container_names:
+                    container_names.append(srv_name)
             if any(all(k in line for k in kl.split(",")) for kl in KEYWORDS):
                 line = line.replace("\n", "")
 
@@ -781,6 +853,7 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                     lines.append(line)
 
                 # line_idx += 1
+
         for stream_name in del_camera_names:
             if len(info[stream_name].keys()) == 8:
                 del info[stream_name]
@@ -792,9 +865,8 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
 
         # Get Docker stats
         stat_path = str(log_path).replace(".log", ".stats.log")
-        if Path(stat_path).exists():
-            docker_max_stats = get_docker_stats(stat_path)
-            info["Overall"].update(docker_max_stats)
+        docker_max_stats = get_docker_stats(stat_path, container_names)
+        info["Overall"].update(docker_max_stats)
     # print(lines)
     return info
 
@@ -803,42 +875,43 @@ def main(args):
     df = pd.DataFrame()
 
     if args.recursive:
-        glob_cmd = args.log_dir.rglob("camera_config_*.log")
+        glob_cmd = args.log_dir.rglob("*.log")
     else:
-        glob_cmd = args.log_dir.glob("camera_config_*.log")
+        glob_cmd = args.log_dir.glob("*.log")
 
     for log_path in glob_cmd:
-        method = None
-        if args.recursive:
-            method = log_path.parent.name
-
-        # Extract timing from logs
-        info = get_log_info(args, log_path, method=method)
-
-        if info != {}:
-            # Summarize info
-            new_df = summarize_info(
-                log_path.name, info, out_log_file=args.out_log_file, method=method
-            )
-
-            # Accumulate results
-            df = pd.concat([df, new_df], ignore_index=True)
-
-            # Sort by log	Method	stream name	video
-            sort_cols = []
+        if not log_path.name.endswith(".stats.log"):
+            method = None
             if args.recursive:
-                sort_cols = ["Method"]
-            sort_cols += ["video", "Num Streams"]
-            df.sort_values(by=sort_cols, inplace=True)
+                method = log_path.parent.name
 
-    # Fill in missing values with N/A
-    df.fillna("N/A", inplace=True)
+            # Extract timing from logs
+            info = get_log_info(args, log_path, method=method)
+
+            if info != {}:
+                # Summarize info
+                new_df = summarize_info(
+                    log_path.name, info, out_log_file=args.out_log_file, method=method
+                )
+
+                # Accumulate results
+                df = pd.concat([df, new_df], ignore_index=True)
+
+                # Sort by log	Method	stream name	video
+                sort_cols = []
+                if args.recursive:
+                    sort_cols = ["Method"]
+                sort_cols += ["video", "Num Streams"]
+                df.sort_values(by=sort_cols, inplace=True)
 
     if "Method" in df.columns.to_list():
         methods = list(set(df["Method"].values))
         substrings = get_common_method_substrings(methods)
         if len(substrings) > 0:
             df["Method"] = df["Method"].str.replace(substrings[0], "")
+
+    # Fill in missing values with N/A
+    # df.fillna("N/A", inplace=True)
 
     # Write to file
     df.to_csv(args.csv_file, index=False)
