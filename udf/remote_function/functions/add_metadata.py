@@ -39,7 +39,7 @@ def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0
 def run(ipfilename, format, options, tmp_dir_path):
     if DEBUG == "1":
         print(
-            "Adding metadata for {} from UDF to host: {} and port: {}".format(
+            "[DEBUG] Adding metadata for {} from UDF to host: {} and port: {}".format(
                 options["Name"], options["host"], options["port"]
             ),
             flush=True,
@@ -61,10 +61,13 @@ def run(ipfilename, format, options, tmp_dir_path):
             "FindVideo": {
                 "_ref": ref,
                 "constraints": {
-                    # "uid": ["==", options["uid"]],
-                    "Name": ["==", options["Name"]],
+                    "uid": ["==", options["uid"]],
+                    # "Name": ["==", options["Name"]],
                 },
-                "results": {"limit": 1, "list": ["uid", "Name"]},
+                "results": {
+                    "limit": 1,
+                    # "list": ["uid", "Name"],
+                },
             }
         }
     ]
@@ -86,10 +89,10 @@ def run(ipfilename, format, options, tmp_dir_path):
                 "_ref": fref,
                 "class": "Frame",
                 "properties": metadata["frame_props"],
-                "constraints": {
-                    "server_filepath": ["==", options["Name"]],
-                    "frameID": ["==", metadata["frame_props"]["frameID"]],
-                },
+                # "constraints": {
+                #     "server_filepath": ["==", options["Name"]],
+                #     "frameID": ["==", metadata["frame_props"]["frameID"]],
+                # },
                 "link": {
                     "ref": 1,
                     "class": "Vid2Frame",
@@ -157,8 +160,8 @@ def run(ipfilename, format, options, tmp_dir_path):
         fref += 1
         # query.append(add_bbox_conn_query)
 
-    # response, res_arr = db.query(query, [[]])
-    response = retry_query(db, query, num_retries=10, sleep_timer=5)
+    response, res_arr = db.query(query, [[]])
+    # response = retry_query(db, query, num_retries=10, sleep_timer=5)
 
     if DEBUG == "1":
         print(

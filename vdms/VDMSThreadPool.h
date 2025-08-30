@@ -1,8 +1,10 @@
 #ifndef VDMS_THREAD_POOL_H
 #define VDMS_THREAD_POOL_H
 
+#include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -44,39 +46,46 @@ class VDMSThreadPool {
 
 // Constructor to create a specified number of worker threads.
 // creating more than the number of SMT cores will add overhead un-necassarily
-
+// if one of the threads crashes for any reason it will log the crashing reason
+// and then a new thread is created in its place
 inline VDMSThreadPool::VDMSThreadPool(size_t threads) : stop(false) {
   if (threads == 0) {
     throw std::invalid_argument("Thread pool must have at least one thread.");
   }
-  for (size_t i = 0; i < threads; ++i) {
-    workers.emplace_back([this] {
-      // Each thread enters an infinite loop to process tasks.
-      for (;;) {
-        std::function<void()> task;
-        {
-          // Aquire a lock on the queue
-          std::unique_lock<std::mutex> lock(this->queue_mutex);
 
-          // Wait for a task to become available or for a shutdown signal.
-          this->condition.wait(
-              lock, [this] { return this->stop || !this->tasks.empty(); });
+  auto worker_task = [this] {
+    while (!stop) {
+      try {
+        for (;;) {
+          std::function<void()> task;
+          {
+            std::unique_lock<std::mutex> lock(this->queue_mutex);
+            this->condition.wait(
+                lock, [this] { return this->stop || !this->tasks.empty(); });
 
-          // If the pool is stopping and no more tasks are left, exit the loop.
-          if (this->stop && this->tasks.empty()) {
-            return;
+            if (this->stop && this->tasks.empty()) {
+              return;
+            }
+
+            task = std::move(this->tasks.front());
+            this->tasks.pop();
           }
-
-          // Take a task from the front of the queue.
-          task = std::move(this->tasks.front());
-          this->tasks.pop();
+          task();
         }
-
-        // Execute the task outside the lock to allow other threads to get
-        // tasks.
-        task();
+      } catch (const std::exception& e) {
+        std::cerr << "Worker thread caught std::exception and will restart: "
+                  << e.what() << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      } catch (...) {
+        std::cerr << "Worker thread caught unknown exception and will restart."
+                  << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
       }
-    });
+    }
+  };
+
+  for (size_t i = 0; i < threads; ++i) {
+    workers.emplace_back(worker_task);
   }
 }
 

@@ -19,6 +19,13 @@ from ultralytics.utils.checks import check_imgsz
 import vdms
 
 
+def _sort_dict_by_frame(in_dict):
+    def _by_int(key):
+        return tuple(int(k) for k in key.split("_"))
+
+    return dict(sorted(in_dict.items(), key=lambda x: _by_int(x[0])))
+
+
 def str2bool(in_val):
     if isinstance(in_val, bool):
         return in_val
@@ -94,7 +101,7 @@ def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0
         ):
             err = response[0]["info"]
             if DEBUG == "1":
-                query_type = query[0].keys()[0]
+                query_type = list(query[0].keys())[0]
                 print(
                     # f"DEBUG [process_stream Attempt #{ridx}] Received '{err}' for {query}",
                     f"DEBUG [process_stream Attempt #{ridx}] Received '{err}' for {query_type} query",
@@ -495,7 +502,17 @@ def get_udf_query(
 
 # Release Video Writer object and re-encode video to seek via ffmpeg later
 def release_clip_and_reencode(clip_key, _out_vid, clip_filename, tmp_file, target_fps):
+    if DEBUG == "1":
+        print(
+            f"[TIMING],start_release_clip,{clip_key},{time.time()}",
+            flush=True,
+        )
     _out_vid.release()
+    if DEBUG == "1":
+        print(
+            f"[TIMING],end_release_clip,{clip_key},{time.time()}",
+            flush=True,
+        )
     _out_vid = None
 
     # Re-encode video in order to seek via ffmpeg later
@@ -503,11 +520,20 @@ def release_clip_and_reencode(clip_key, _out_vid, clip_filename, tmp_file, targe
     CONVERSION = f"-c:v libx264 -preset ultrafast -filter:v fps=fps={target_fps}"  # "-c:v libx264 -preset medium"
     reencode_cmd = f"ffmpeg -y -i {tmp_file} {GENERAL_OPTS} {CONVERSION} -crf 23 -c:a copy {clip_filename}"
     cmd_list = shlex.split(reencode_cmd)
+    if DEBUG == "1":
+        print(
+            f"[TIMING],start_reencode,{clip_key},{time.time()}",
+            flush=True,
+        )
     subprocess.run(cmd_list, check=True)
-
+    end_time = time.time()
     # filename = str(Path(clip_filename).name)
     if DEBUG == "1":
-        print(f"[TIMING],Save clip,{clip_key},{time.time()}", flush=True)
+        print(
+            f"[TIMING],end_reencode,{clip_key},{end_time}",
+            flush=True,
+        )
+        print(f"[TIMING],Save clip,{clip_key},{end_time}", flush=True)
     os.remove(tmp_file)
     return _out_vid
 
@@ -582,11 +608,11 @@ class VideoStream:
                 self.run_inference,
             )
         )
-        self.t.append(
-            self.executor.submit(
-                self.process_clip_metadata,
-            )
-        )
+        # self.t.append(
+        #     self.executor.submit(
+        #         self.process_clip_metadata,
+        #     )
+        # )
 
     # method to stop reading frames
     def stop(self):
@@ -660,7 +686,7 @@ class VideoStream:
         self.frame_queue = mp.Queue()
         self.clip_queue = mp.Queue()
         self.inference_queue = mp.Queue()
-        self.metadata_queue = mp.Queue()
+        # self.metadata_queue = mp.Queue()
         self.retrieved_frames = 0
         self.num_frames_processed = 0
 
@@ -834,9 +860,9 @@ class VideoStream:
         while True:
             try:
                 queue_details = self.inference_queue.get()
-                if queue_details is None:
-                    self.metadata_queue.put(None)
-                    break
+                # if queue_details is None:
+                #     self.metadata_queue.put(None)
+                #     break
 
                 frameNum, clip_frame_idx, clip_id, clip_filename, tmp_file, frame = (
                     queue_details
@@ -868,6 +894,7 @@ class VideoStream:
                 self.all_metadata[clip_key]["face"].update(metadata_face)
                 self.num_frames_processed += 1
 
+                # Make sure clip is processed; frame added to dict after writing clip
                 lastFrame = 0
                 while True:
                     if clip_key in self.clip_end_frame:
@@ -884,7 +911,71 @@ class VideoStream:
                         self.width,
                         self.height,
                     )
-                    self.metadata_queue.put(queue_details)
+                    # self.metadata_queue.put(queue_details)
+                    clip_key, clip_filename, clip_metadata, width, height = (
+                        queue_details
+                    )
+                    if DEBUG == "1":
+                        print(
+                            f"[TIMING],start_clip_metadata,{clip_key},{time.time()}",
+                            flush=True,
+                        )
+
+                    # Send metadata to UDF
+                    properties = {
+                        "Name": clip_key,  # .split("/")[-1],
+                        "category": "video_path_rop",
+                    }
+                    # ingest_mode= "object"
+                    for ingest_mode in INGESTION.split(","):
+                        get_udf_query(
+                            # db,
+                            # start_t,
+                            clip_filename,
+                            properties,
+                            ingest_mode,
+                            (width, height),
+                            id="udf_metadata",
+                            metadata=clip_metadata[ingest_mode],
+                            test_mode=TEST_MODE,
+                        )
+
+                    # all_metadata = (
+                    #     clip_metadata["object"] if "object" in clip_metadata else {}
+                    # )
+                    # if "face" in clip_metadata:
+                    #     for face_frameidx_bbidx, value in clip_metadata["face"].items():
+                    #         face_frameidx, face_bbidx = face_frameidx_bbidx.split("_")
+                    #         max_obj_idx = 0
+                    #         for obj_frameidx_bbidx in all_metadata:
+                    #             if face_frameidx in obj_frameidx_bbidx:
+                    #                 _, obj_bbidx_ = obj_frameidx_bbidx.split("_")
+                    #                 max_obj_idx = max(max_obj_idx, int(obj_bbidx_))
+
+                    #         if max_obj_idx > 0:
+                    #             new_face_bbidx = max_obj_idx + 1
+                    #             new_key = f"{face_frameidx}_{new_face_bbidx:04d}"
+                    #             all_metadata[new_key] = value
+                    #             all_metadata[new_key]["bbId"] = new_key
+                    #         else:
+                    #             all_metadata[face_frameidx_bbidx] = value
+
+                    # all_metadata = _sort_dict_by_frame(all_metadata)
+                    # get_udf_query(
+                    #     clip_filename,
+                    #     properties,
+                    #     INGESTION.replace(",", " "),
+                    #     (width, height),
+                    #     id="udf_metadata",
+                    #     metadata=all_metadata,
+                    #     test_mode=TEST_MODE,
+                    # )
+
+                    if DEBUG == "1":
+                        print(
+                            f"[TIMING],end_clip_metadata,{clip_key},{time.time()}",
+                            flush=True,
+                        )
                 # else:
                 #     break
             except queue.Empty:
@@ -918,18 +1009,50 @@ class VideoStream:
                     "category": "video_path_rop",
                 }
                 # ingest_mode= "object"
-                for ingest_mode in INGESTION.split(","):
-                    get_udf_query(
-                        # db,
-                        # start_t,
-                        clip_filename,
-                        properties,
-                        ingest_mode,
-                        (width, height),
-                        id="udf_metadata",
-                        metadata=clip_metadata[ingest_mode],
-                        test_mode=TEST_MODE,
-                    )
+                # for ingest_mode in INGESTION.split(","):
+                #     get_udf_query(
+                #         # db,
+                #         # start_t,
+                #         clip_filename,
+                #         properties,
+                #         ingest_mode,
+                #         (width, height),
+                #         id="udf_metadata",
+                #         metadata=clip_metadata[ingest_mode],
+                #         test_mode=TEST_MODE,
+                #     )
+
+                all_metadata = (
+                    clip_metadata["object"] if "object" in clip_metadata else {}
+                )
+                if "face" in clip_metadata:
+                    for face_frameidx_bbidx, value in clip_metadata["face"].items():
+                        face_frameidx, face_bbidx = face_frameidx_bbidx.split("_")
+                        max_obj_idx = 0
+                        for obj_frameidx_bbidx in all_metadata:
+                            if face_frameidx in obj_frameidx_bbidx:
+                                _, obj_bbidx_ = obj_frameidx_bbidx.split("_")
+                                max_obj_idx = max(max_obj_idx, int(obj_bbidx_))
+
+                        if max_obj_idx > 0:
+                            new_face_bbidx = max_obj_idx + 1
+                            new_key = f"{face_frameidx}_{new_face_bbidx:04d}"
+                            all_metadata[new_key] = value
+                            all_metadata[new_key]["bbId"] = new_key
+                        else:
+                            all_metadata[face_frameidx_bbidx] = value
+
+                all_metadata = _sort_dict_by_frame(all_metadata)
+                get_udf_query(
+                    clip_filename,
+                    properties,
+                    INGESTION.replace(",", " "),
+                    (width, height),
+                    id="udf_metadata",
+                    metadata=all_metadata,
+                    test_mode=TEST_MODE,
+                )
+
                 if DEBUG == "1":
                     print(
                         f"[TIMING],end_clip_metadata,{clip_key},{time.time()}",

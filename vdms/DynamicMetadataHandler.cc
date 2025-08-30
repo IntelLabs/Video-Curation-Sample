@@ -45,6 +45,8 @@ void DynamicMetadataHandler::initiate(){
 }
 
 void DynamicMetadataHandler::add_metadata_bg_vid(){
+    std::cout << "[DEBUG add_metadata_bg_vid] Creating metadata chunks" << std::endl;
+
     // std::string url = "http://udf-service:5011/video";
     std::string url = "http://udf-bkgd-service:5012/video";
     Json::Value options;
@@ -54,19 +56,21 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
     options["uid"] = _props[VDMS_BG_UNIQUE_VID_ID];
 
     int frame_count = _video.get_frame_count();
-    int num_bbs = _metadata[0].size();
     int curr_frame = 0;
-    int bb_idx = 0;
     int counter = 0;
+    int chunk_count = 3;
+    int num_bbs = _metadata[0].size();
+    int bb_idx = 0;
     int bb_counter = 0;
     int desired_chunk_size = 50;
-    int chunk_count = static_cast<int>(std::ceil(static_cast<double>(num_bbs) / desired_chunk_size));  // std::ceil(num_bbs / desired_chunk_size);
+    int bb_count = static_cast<int>(std::ceil(static_cast<double>(num_bbs) / desired_chunk_size));  // std::ceil(num_bbs / desired_chunk_size);
     VideoLoop videoLoop;
-    videoLoop.set_nrof_entities(chunk_count);
+    std::cout << "set_nrof_entities set as " << bb_count << " (bb_count)" << std::endl;
+    videoLoop.set_nrof_entities(bb_count);
 
     Json::Value metadata_chunk;
     for (Json::Value vframe : _metadata[0]) {
-        // curr_frame++;
+        curr_frame++;
         Json::Value curr_frame_metadata;
         Json::Value frame_props;
         frame_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
@@ -141,7 +145,10 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
 
         }
         counter++;
-        if (bb_counter == int(num_bbs/chunk_count) || bb_idx == num_bbs){
+        // if (counter == int(frame_count/chunk_count) || curr_frame == frame_count){
+        if (bb_counter == int(num_bbs/bb_count) || bb_idx == num_bbs){
+            std::cout << "[DEBUG add_metadata_bg_vid] bb_counter: " << bb_counter << " bb_idx: " << bb_idx << " int(num_bbs/bb_count): " << int(num_bbs/bb_count) << std::endl;
+            std::cout << "[DEBUG add_metadata_bg_vid] Chunk created for " << _props["Name"].asString() << " and sending to add_metadata" << std::endl;
             options["metadata"] = metadata_chunk;
             options["Name"] = _props["Name"].asString();
             VCL::Video video(_video);
@@ -153,7 +160,9 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
         }
     }
 
+    std::cout << "[DEBUG add_metadata_bg_vid] Running videoloop" << std::endl;
     while (videoLoop.is_loop_running()) {
       continue;
     }
+    std::cout << "[DEBUG add_metadata_bg_vid] Completed videoloop" << std::endl;
 }
