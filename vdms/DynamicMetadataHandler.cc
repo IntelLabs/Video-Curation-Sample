@@ -29,6 +29,7 @@
  *
  */
 #include <chrono>
+#include <filesystem>
 #include "DynamicMetadataHandler.h"
 #include "vcl/Exception.h"
 #include "../utils/include/kubernetes/KubeHelper.h"
@@ -55,6 +56,8 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
     options["id"] = "add_metadata";
     options["uid"] = _props[VDMS_BG_UNIQUE_VID_ID];
 
+    const std::string &file_name =  _props[VDMS_BG_UNIQUE_VID_ID].asString();
+
     int frame_count = _video.get_frame_count();
     int curr_frame = 0;
     int counter = 0;
@@ -63,10 +66,11 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
     int bb_idx = 0;
     int bb_counter = 0;
     int desired_chunk_size = 50;
-    int bb_count = static_cast<int>(std::ceil(static_cast<double>(num_bbs) / desired_chunk_size));  // std::ceil(num_bbs / desired_chunk_size);
-    VideoLoop videoLoop;
-    std::cout << "set_nrof_entities set as " << bb_count << " (bb_count)" << std::endl;
-    videoLoop.set_nrof_entities(bb_count);
+    // int bb_count = static_cast<int>(std::ceil(static_cast<double>(num_bbs) / desired_chunk_size));  // std::ceil(num_bbs / desired_chunk_size);
+    int bb_count = static_cast<int>(static_cast<double>(num_bbs) / desired_chunk_size);
+    // VideoLoop videoLoop;
+    // std::cout << "set_nrof_entities set as " << bb_count << " (bb_count)" << std::endl;
+    // videoLoop.set_nrof_entities(bb_count);
 
     Json::Value metadata_chunk;
     for (Json::Value vframe : _metadata[0]) {
@@ -146,23 +150,43 @@ void DynamicMetadataHandler::add_metadata_bg_vid(){
         }
         counter++;
         // if (counter == int(frame_count/chunk_count) || curr_frame == frame_count){
-        if (bb_counter == int(num_bbs/bb_count) || bb_idx == num_bbs){
-            std::cout << "[DEBUG add_metadata_bg_vid] bb_counter: " << bb_counter << " bb_idx: " << bb_idx << " int(num_bbs/bb_count): " << int(num_bbs/bb_count) << std::endl;
+        // if (bb_counter == int(num_bbs/bb_count) || bb_idx == num_bbs){
+        if (bb_counter == desired_chunk_size || bb_idx == num_bbs){
+            std::cout << "[DEBUG add_metadata_bg_vid] bb_counter: " << bb_counter << " bb_idx: " << bb_idx << " int(num_bbs/bb_count): " << desired_chunk_size << std::endl;
             std::cout << "[DEBUG add_metadata_bg_vid] Chunk created for " << _props["Name"].asString() << " and sending to add_metadata" << std::endl;
             options["metadata"] = metadata_chunk;
             options["Name"] = _props["Name"].asString();
+            if (std::filesystem::exists(file_name)){
+                std::cout << "[DEBUG DMH:151] UID/File '" << file_name<< "' exists prior to syncop" << std::endl;
+            } else {
+                std::cout << "[DEBUG DMH:151] UID/File '" << file_name << "' DOES NOT exist prior to syncop" << std::endl;
+            }
             VCL::Video video(_video);
-            video.remoteOperation(url, options);
-            videoLoop.enqueue(video);
+            // video.remoteOperation(url, options);
+            // videoLoop.enqueue(video);
+            video.syncremoteOperation(url, options);  // Run each chunk in thread
+            video.execute_operations();
+
+            std::cout << "[DEBUG add_metadata_bg_vid] Chunk for " << _props["Name"].asString() << " added to syncremoteOperation" << std::endl;
             metadata_chunk.clear();
             counter = 0;
             bb_counter = 0;
         }
     }
 
-    std::cout << "[DEBUG add_metadata_bg_vid] Running videoloop" << std::endl;
-    while (videoLoop.is_loop_running()) {
-      continue;
-    }
-    std::cout << "[DEBUG add_metadata_bg_vid] Completed videoloop" << std::endl;
+    // auto start_t = std::chrono::steady_clock::now();
+    // int time_limit = 120;  // std::max(static_cast<int>(bb_count*60), 1);
+    // std::cout << "[DEBUG add_metadata_bg_vid] Running videoloop (limit=" << time_limit << ")" << std::endl;
+    // while (videoLoop.is_loop_running()) {
+    //     auto elapsed_t = std::chrono::steady_clock::now() - start_t;
+    //     long long elapsed_t_secs = std::chrono::duration_cast<std::chrono::seconds>(elapsed_t).count();
+    //     if (elapsed_t_secs < time_limit){
+    //         continue;
+    //     } else {
+    //         std::cout << "[DEBUG add_metadata_bg_vid] Terminating videoloop, timelimit (" << time_limit << ") reached" << std::endl;
+    //         break;
+    //     }
+    //     // continue;
+    // }
+    // std::cout << "[DEBUG add_metadata_bg_vid] Completed videoloop" << std::endl;
 }

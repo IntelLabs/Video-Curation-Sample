@@ -34,12 +34,15 @@ PROCESSING_DEFAULT_DICT = {
     "Time to create clip (s)": 0,  # info_details["Save clip"] - info_details["Start new clip"]
     "total inference runtime (s)": 0,
     "total get_clip runtime (s)": 0,
+    "total get_clip release_clip runtime (s)": 0,
+    "total get_clip reencode runtime (s)": 0,
     "total get_frames runtime (s)": 0,
     "total process_clip_metadata runtime (s)": 0,
     "UDF object db.query runtime (s)": 0,
     "UDF object run func runtime (s)": 0,
     "UDF face db.query runtime (s)": 0,
     "UDF face run func runtime (s)": 0,
+    "Bkgd UDF runtime (s)": 0,
 }
 
 
@@ -249,13 +252,24 @@ def get_overall_details(info_details, out_log_file):
         app_end_time = info_details["end_watchandsend"]
 
     watch_process_elapsed_time = app_end_time - app_start_time
+    watch_process_bkgd_elapsed_time = max(
+        watch_process_elapsed_time, info_details["Max Timestamp"] - app_start_time
+    )
+    time_str = secs2HMS_str(watch_process_bkgd_elapsed_time)
+    print(
+        f"\t[Overall] App + bkgd took {time_str} to process all videos/streams",
+        flush=True,
+        file=out_log_file,
+    )
+    app_info["app processing time + bkgd (s)"] = watch_process_bkgd_elapsed_time
+
     time_str = secs2HMS_str(watch_process_elapsed_time)
     print(
         f"\t[Overall] App took {time_str} to process all videos/streams",
         flush=True,
         file=out_log_file,
     )
-    app_info["App processing time (s)"] = watch_process_elapsed_time
+    app_info["app processing time (s)"] = watch_process_elapsed_time
 
     stream_process_elapsed_time = app_end_time - info_details["Min Timestamp"]
     time_str = secs2HMS_str(stream_process_elapsed_time)
@@ -264,7 +278,7 @@ def get_overall_details(info_details, out_log_file):
         flush=True,
         file=out_log_file,
     )
-    app_info["Stream processing time (s)"] = stream_process_elapsed_time
+    app_info["stream processing time (s)"] = stream_process_elapsed_time
 
     if "VDMS crashes" in info_details:
         VDMS_crashes = info_details["VDMS crashes"]
@@ -414,7 +428,6 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                         flush=True,
                         file=out_log_file,
                     )
-
             camera_info[key]["stream processing time (s)"] = stream_processing_time
             camera_info[key]["delta stream end to processing end (s)"] = (
                 delta_streamend_2_processing_end
@@ -486,6 +499,17 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                     info_details["end_get_clips"] - info_details["start_get_clips"]
                 )
 
+            if "end_release_clip" in info_details:
+                camera_info[camera_name]["total get_clip release_clip runtime (s)"] += (
+                    info_details["end_release_clip"]
+                    - info_details["start_release_clip"]
+                )
+
+            if "end_reencode" in info_details:
+                camera_info[camera_name]["total get_clip reencode runtime (s)"] += (
+                    info_details["end_reencode"] - info_details["start_reencode"]
+                )
+
             if "end_get_frames" in info_details:
                 camera_info[camera_name]["total get_frames runtime (s)"] += (
                     info_details["end_get_frames"] - info_details["start_get_frames"]
@@ -521,6 +545,11 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                     info_details["end_udf_metadata_face"]
                     - info_details["start_udf_metadata_face"]
                 )
+            if "end_bkgd_add_metadata" in info_details:
+                camera_info[camera_name]["Bkgd UDF runtime (s)"] += (
+                    info_details["end_bkgd_add_metadata"]
+                    - info_details["start_bkgd_add_metadata"]
+                )
 
     details = []
     stat_cols = []
@@ -532,6 +561,10 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
             "Method": method,
             "stream name": name,
             "Log VDMS crashes": int(app_info["Log VDMS crashes"]),
+            "app processing time (s)": float(app_info["app processing time (s)"]),
+            "app processing time + bkgd (s)": float(
+                app_info["app processing time + bkgd (s)"]
+            ),
         }
 
         for k, v in app_info.items():
@@ -539,6 +572,7 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                 cam_dict[k] = v
                 if k not in stat_cols:
                     stat_cols.append(k)
+        stat_cols = sorted(stat_cols)
 
         if "num clips" not in cam_dict:
             cam_dict.update(PROCESSING_DEFAULT_DICT)
@@ -593,6 +627,8 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
             "frameH",
             "object detections",
             "face detections",
+            "app processing time (s)",
+            "app processing time + bkgd (s)",
             "Num Failures",
             "Num Bkgd Failures",
             "Log VDMS crashes",
@@ -603,12 +639,15 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
             "Time to create clip (s)",
             "total inference runtime (s)",
             "total get_clip runtime (s)",
+            "total get_clip release_clip runtime (s)",
+            "total get_clip reencode runtime (s)",
             "total get_frames runtime (s)",
             "total process_clip_metadata runtime (s)",
             "UDF object db.query runtime (s)",
             "UDF object run func runtime (s)",
             "UDF face db.query runtime (s)",
             "UDF face run func runtime (s)",
+            "Bkgd UDF runtime (s)",
         ]
 
         new_col_order.extend(stat_cols)
@@ -783,8 +822,12 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                         # meta_ingest_type = ingest_type
 
                     elif "[TIMING]" in line:
+                        line_of_int = line.split("|")[-1].strip()
+                        if not line_of_int.startswith("[TIMING]"):
+                            line_of_int = "[TIMING]" + line_of_int.split("[TIMING]")[1]
+
                         prefix, method_name, name_or_mp4_file, timestamp = (
-                            line.split("|")[-1].strip().split(",")
+                            line_of_int.split(",")
                         )
                         info[name_or_mp4_file][method_name] = float(timestamp)
                         min_timestamp = min(min_timestamp, float(timestamp))
@@ -904,14 +947,17 @@ def main(args):
                 sort_cols += ["video", "Num Streams"]
                 df.sort_values(by=sort_cols, inplace=True)
 
-    if "Method" in df.columns.to_list():
-        methods = list(set(df["Method"].values))
-        substrings = get_common_method_substrings(methods)
-        if len(substrings) > 0:
-            df["Method"] = df["Method"].str.replace(substrings[0], "")
+    # if "Method" in df.columns.to_list():
+    #     methods = list(set(df["Method"].values))
+    #     substrings = get_common_method_substrings(methods)
+    #     if len(substrings) > 0:
+    #         df["Method"] = df["Method"].str.replace(substrings[0], "")
 
     # Fill in missing values with N/A
     # df.fillna("N/A", inplace=True)
+
+    # Remove lines with 0 frames processed
+    df.drop(df[df["frames processed"] == 0].index, inplace=True)
 
     # Write to file
     df.to_csv(args.csv_file, index=False)

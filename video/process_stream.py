@@ -438,7 +438,7 @@ def get_udf_query(
             "properties": properties,
             "operations": [
                 {
-                    "type": "remoteOp",
+                    "type": "syncremoteOp",  # "remoteOp",
                     "url": f"http://{UDF_HOST}:{UDF_PORT}/video",
                     "options": {
                         "id": id,
@@ -446,6 +446,7 @@ def get_udf_query(
                         "media_type": "video",
                         "input_sizeWH": new_size,
                         "filename": properties["Name"],
+                        "ingestion": 1,
                     },
                 }
             ],
@@ -860,9 +861,9 @@ class VideoStream:
         while True:
             try:
                 queue_details = self.inference_queue.get()
-                # if queue_details is None:
-                #     self.metadata_queue.put(None)
-                #     break
+                if queue_details is None:
+                    # self.metadata_queue.put(None)
+                    break
 
                 frameNum, clip_frame_idx, clip_id, clip_filename, tmp_file, frame = (
                     queue_details

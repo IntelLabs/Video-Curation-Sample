@@ -197,8 +197,8 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
   // This is not ideal since we are manipulating with user's
   // input, but for now it is an acceptable solution.
   Json::Value props = get_value<Json::Value>(cmd, "properties");
-  props[VDMS_VID_PATH_PROP] = file_name;
-  props[VDMS_BG_UNIQUE_VID_ID] = file_name;
+  props[VDMS_VID_PATH_PROP] = file_name;  //Videopath
+  props[VDMS_BG_UNIQUE_VID_ID] = file_name;  //uid
 
   if (video.is_blob_not_stored()) {
     props[VDMS_VID_PATH_PROP] = video.get_video_id();
@@ -211,7 +211,7 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
   const std::string &codec = get_value<std::string>(cmd, "codec", "h264");
   VCL::Video::Codec vcl_codec = string_to_codec(codec);
 
-  video.store(file_name, vcl_codec);
+  video.store(file_name, vcl_codec);  // filename matches uid
 
   if (video.get_query_error_response() != video.NOERRORSTRING) {
     throw VCLException(UndefinedException, video.get_query_error_response());
@@ -248,13 +248,24 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     video.timers.print_map_runtimes();
   }
 
+
   std::vector<Json::Value> video_metadata = video.get_ingest_metadata();
   // if (video_metadata.size() > 0) {
+  //   std::cout << "USING BACKGROUND THREADS FOR " << props["Name"].asString() << std::endl;
   //   DynamicMetadataHandler dmh(video, props, video_metadata);
   //   std::thread dmh_thread(&DynamicMetadataHandler::initiate, dmh);
   //   dmh_thread.detach();
+  //   std::cout << props["Name"].asString() << " ADDED TO THREAD" << std::endl;
   // }
   if (video_metadata.size() > 0) {
+
+    // does videopath/uid exist
+    if (std::filesystem::exists(file_name)){
+      std::cout << "[DEBUG VideoCommand:252] UID/File '" << file_name << "' exists prior to bkgd" << std::endl;
+    } else {
+      std::cout << "[DEBUG VideoCommand:252] UID/File '" << file_name << "' DOES NOT exist prior to bkgd" << std::endl;
+    }
+
     std::cout << "USING BACKGROUND THREADS FOR " << props["Name"].asString() << std::endl;
     // Create a copy of the handler object to be processed in the background.
     DynamicMetadataHandler dmh(video, props, video_metadata);
@@ -263,7 +274,8 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     // VDMSThreadPool& pool = VDMSThreadPool::instance();
     // pool.enqueue([dmh]() {&DynamicMetadataHandler::initiate;});
     // pool.enqueue([dmh]() mutable {dmh.initiate();});  // many failures
-    VDMSThreadPool::instance().enqueue(std::bind(&DynamicMetadataHandler::initiate, dmh));
+    VDMSThreadPool::instance().enqueue(std::bind(&DynamicMetadataHandler::initiate, dmh));  // latest
+    // VDMSThreadPool::instance().enqueue([dmh = std::move(dmh)]() mutable { dmh.initiate(); });
 
     // auto dmh = std::make_shared<DynamicMetadataHandler>(video, props, video_metadata);
     // // auto task = [dmh]() { dmh->initiate(); };
