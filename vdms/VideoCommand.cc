@@ -268,13 +268,13 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
 
     std::cout << "USING BACKGROUND THREADS FOR " << props["Name"].asString() << std::endl;
     // Create a copy of the handler object to be processed in the background.
-    DynamicMetadataHandler dmh(video, props, video_metadata);
+    // DynamicMetadataHandler dmh(video, props, video_metadata);
 
     // Enqueue the task to the single VDMS thread pool instance.
     // VDMSThreadPool& pool = VDMSThreadPool::instance();
     // pool.enqueue([dmh]() {&DynamicMetadataHandler::initiate;});
     // pool.enqueue([dmh]() mutable {dmh.initiate();});  // many failures
-    VDMSThreadPool::instance().enqueue(std::bind(&DynamicMetadataHandler::initiate, dmh));  // latest
+    // VDMSThreadPool::instance().enqueue(std::bind(&DynamicMetadataHandler::initiate, dmh));  // latest
     // VDMSThreadPool::instance().enqueue([dmh = std::move(dmh)]() mutable { dmh.initiate(); });
 
     // auto dmh = std::make_shared<DynamicMetadataHandler>(video, props, video_metadata);
@@ -285,6 +285,113 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
 
     // pool.enqueue([dmh]() {&DynamicMetadataHandler::initiate;});
     // pool.enqueue([&dmh]() {dmh.initiate();});
+
+    // Moved the chunk creation into VideoCommand
+    std::string url = "http://udf-bkgd-service:5012/video";
+    Json::Value options;
+    options["port"] = 55555;
+    options["id"] = "add_metadata";
+    options["uid"] = props[VDMS_BG_UNIQUE_VID_ID];
+
+    const std::string &file_name =  props[VDMS_BG_UNIQUE_VID_ID].asString();
+    
+    int curr_frame = 0;
+    int counter = 0;
+    int chunk_count = 3;
+    int num_bbs = video_metadata[0].size();
+    int bb_idx = 0;
+    int bb_counter = 0;
+    int desired_chunk_size = 50;
+    int bb_count = static_cast<int>(static_cast<double>(num_bbs) / desired_chunk_size);
+
+    Json::Value metadata_chunk;
+    std::vector<Json::Value> options_vector;
+    for (Json::Value vframe : video_metadata[0]) {
+      curr_frame++;
+      Json::Value curr_frame_metadata;
+      Json::Value frame_props;
+      frame_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
+      frame_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
+      frame_props["server_filepath"] = props["Name"].asString();
+
+      curr_frame_metadata["frame_props"] = frame_props;
+
+      Json::Value edge_props;
+      edge_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
+      edge_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
+      edge_props["server_filepath"] = props["Name"].asString();
+
+      curr_frame_metadata["edge_props"] = edge_props;
+
+      if (vframe.isMember("bbox")) {
+          Json::Value bbox_props;
+          bbox_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
+          bbox_props["server_filepath"] = props["Name"].asString();
+          bbox_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
+          bbox_props[VDMS_DM_VID_OBJECT_PROP] =
+              vframe["bbox"]["object"].asString();
+          bbox_props[VDMS_ROI_COORD_X_PROP] = vframe["bbox"]["x"].asFloat();
+          bbox_props[VDMS_ROI_COORD_Y_PROP] = vframe["bbox"]["y"].asFloat();
+          bbox_props[VDMS_ROI_WIDTH_PROP] = vframe["bbox"]["width"].asFloat();
+          bbox_props[VDMS_ROI_HEIGHT_PROP] = vframe["bbox"]["height"].asFloat();
+
+          for (auto member : vframe["bbox"]["object_det"].getMemberNames()) {
+              if (member == "age")
+              bbox_props[member] = vframe["bbox"]["object_det"][member].asInt();
+              if (member == "confidence")
+              bbox_props[member] = vframe["bbox"]["object_det"][member].asFloat();
+              if (member == "gender" || member == "emotion")
+              bbox_props[member] = vframe["bbox"]["object_det"][member].asString();
+              if (member == "frameW" || member == "frameH")
+              bbox_props[member] = vframe["bbox"]["object_det"][member].asInt();
+          }
+
+          curr_frame_metadata["bbox_props"] = bbox_props;
+
+          Json::Value bb_edge_props;
+          bb_edge_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
+          bb_edge_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
+          bb_edge_props["server_filepath"] = props["Name"].asString();
+
+          curr_frame_metadata["bb_edge_props"] = bb_edge_props;
+
+          metadata_chunk[vframe["bbId"].asString()] = curr_frame_metadata;
+          bb_counter++;
+          bb_idx++;
+
+      }
+      counter++;
+      if (bb_counter == desired_chunk_size || bb_idx == num_bbs){
+          std::cout << "[DEBUG add_metadata_bg_vid] bb_counter: " << bb_counter << " bb_idx: " << bb_idx << " int(num_bbs/bb_count): " << desired_chunk_size << std::endl;
+          std::cout << "[DEBUG add_metadata_bg_vid] Chunk created for " << props["Name"].asString() << " and sending to add_metadata" << std::endl;
+          options["metadata"] = metadata_chunk;
+          options["Name"] = props["Name"].asString();
+          if (std::filesystem::exists(file_name)){
+              std::cout << "[DEBUG DMH:151] UID/File '" << file_name<< "' exists prior to syncop" << std::endl;
+          } else {
+              std::cout << "[DEBUG DMH:151] UID/File '" << file_name << "' DOES NOT exist prior to syncop" << std::endl;
+          }
+          // VCL::Video video(_video);
+          // video.syncremoteOperation(url, options);  // Run each chunk in thread
+          // video.execute_operations();
+          options_vector.push_back(options);
+
+          std::cout << "[DEBUG add_metadata_bg_vid] Chunk for " << props["Name"].asString() << " added to syncremoteOperation" << std::endl;
+          metadata_chunk.clear();
+          counter = 0;
+          bb_counter = 0;
+      }
+    }
+
+    for (auto opts : options_vector){
+      VDMSThreadPool::instance().enqueue([url, opts, &video]() {
+          VCL::Video video_chunk(video);
+          video_chunk.syncremoteOperation(url, opts);  // Run each chunk in thread
+          video_chunk.execute_operations();
+        });
+    }
+
+
     std::cout << props["Name"].asString() << " ADDED TO THREAD" << std::endl;
   }
 
