@@ -478,8 +478,8 @@ def get_udf_query(
             flush=True,
         )
     try:
-        # res, res_arr = db.query([query], [video_blob])
-        res = retry_query(db, [query], num_retries=10, sleep_timer=5)
+        res, _ = db.query([query])
+        # res = retry_query(db, [query], num_retries=10, sleep_timer=5)
 
         if DEBUG_FLAG:
             print(

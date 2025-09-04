@@ -653,7 +653,10 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
         new_col_order.extend(stat_cols)
 
         new_df = new_df[new_col_order]
-    return new_df
+
+        # Round all numeric data to 4 decimal places
+        # new_df = new_df.round(decimals=4)
+    return new_df.round(decimals=4)
 
 
 def remove_value_from_list(the_list, value):

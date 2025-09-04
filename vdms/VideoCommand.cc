@@ -38,7 +38,7 @@
 #include "VideoCommand.h"
 #include "VideoLoop.h"
 #include "defines.h"
-#include "DynamicMetadataHandler.h"
+// #include "DynamicMetadataHandler.h"
 #include "VDMSThreadPool.h"
 
 using namespace VDMS;
@@ -261,30 +261,13 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
 
     // does videopath/uid exist
     if (std::filesystem::exists(file_name)){
-      std::cout << "[DEBUG VideoCommand:252] UID/File '" << file_name << "' exists prior to bkgd" << std::endl;
+      std::cout << "[DEBUG VideoCommand] UID/File '" << file_name << "' exists prior to bkgd" << std::endl;
     } else {
-      std::cout << "[DEBUG VideoCommand:252] UID/File '" << file_name << "' DOES NOT exist prior to bkgd" << std::endl;
+      std::cout << "[DEBUG VideoCommand] UID/File '" << file_name << "' DOES NOT exist prior to bkgd" << std::endl;
     }
 
-    std::cout << "USING BACKGROUND THREADS FOR " << props["Name"].asString() << std::endl;
-    // Create a copy of the handler object to be processed in the background.
-    // DynamicMetadataHandler dmh(video, props, video_metadata);
-
-    // Enqueue the task to the single VDMS thread pool instance.
-    // VDMSThreadPool& pool = VDMSThreadPool::instance();
-    // pool.enqueue([dmh]() {&DynamicMetadataHandler::initiate;});
-    // pool.enqueue([dmh]() mutable {dmh.initiate();});  // many failures
-    // VDMSThreadPool::instance().enqueue(std::bind(&DynamicMetadataHandler::initiate, dmh));  // latest
-    // VDMSThreadPool::instance().enqueue([dmh = std::move(dmh)]() mutable { dmh.initiate(); });
-
-    // auto dmh = std::make_shared<DynamicMetadataHandler>(video, props, video_metadata);
-    // // auto task = [dmh]() { dmh->initiate(); };
-    // pool.enqueue([dmh]() { dmh->initiate(); });
-
-    // pool.enqueue(std::bind(&DynamicMetadataHandler::initiate, dmh));
-
-    // pool.enqueue([dmh]() {&DynamicMetadataHandler::initiate;});
-    // pool.enqueue([&dmh]() {dmh.initiate();});
+    // std::cout << "USING BACKGROUND THREADS FOR " << props["Name"].asString() << std::endl;
+    std::cout << "[DEBUG VideoCommand] Creating metadata chunks" << std::endl;
 
     // Moved the chunk creation into VideoCommand
     std::string url = "http://udf-bkgd-service:5012/video";
@@ -294,14 +277,14 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     options["uid"] = props[VDMS_BG_UNIQUE_VID_ID];
 
     const std::string &file_name =  props[VDMS_BG_UNIQUE_VID_ID].asString();
-    
+
     int curr_frame = 0;
     int counter = 0;
     int chunk_count = 3;
     int num_bbs = video_metadata[0].size();
     int bb_idx = 0;
     int bb_counter = 0;
-    int desired_chunk_size = 50;
+    int desired_chunk_size = 10; //50;
     int bb_count = static_cast<int>(static_cast<double>(num_bbs) / desired_chunk_size);
 
     Json::Value metadata_chunk;
@@ -366,14 +349,11 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
           std::cout << "[DEBUG add_metadata_bg_vid] Chunk created for " << props["Name"].asString() << " and sending to add_metadata" << std::endl;
           options["metadata"] = metadata_chunk;
           options["Name"] = props["Name"].asString();
-          if (std::filesystem::exists(file_name)){
-              std::cout << "[DEBUG DMH:151] UID/File '" << file_name<< "' exists prior to syncop" << std::endl;
-          } else {
-              std::cout << "[DEBUG DMH:151] UID/File '" << file_name << "' DOES NOT exist prior to syncop" << std::endl;
-          }
-          // VCL::Video video(_video);
-          // video.syncremoteOperation(url, options);  // Run each chunk in thread
-          // video.execute_operations();
+          // if (std::filesystem::exists(file_name)){
+          //     std::cout << "[DEBUG DMH:151] UID/File '" << file_name<< "' exists prior to syncop" << std::endl;
+          // } else {
+          //     std::cout << "[DEBUG DMH:151] UID/File '" << file_name << "' DOES NOT exist prior to syncop" << std::endl;
+          // }
           options_vector.push_back(options);
 
           std::cout << "[DEBUG add_metadata_bg_vid] Chunk for " << props["Name"].asString() << " added to syncremoteOperation" << std::endl;
@@ -382,10 +362,11 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
           bb_counter = 0;
       }
     }
-
+    VDMSThreadPool& pool = VDMSThreadPool::instance();
     for (auto opts : options_vector){
-      VDMSThreadPool::instance().enqueue([url, opts, &video]() {
-          VCL::Video video_chunk(video);
+      VCL::Video video_chunk(video);
+      // VDMSThreadPool::instance().enqueue([url, opts, &video]() {
+      pool.enqueue([url, opts, video_chunk]() mutable {
           video_chunk.syncremoteOperation(url, opts);  // Run each chunk in thread
           video_chunk.execute_operations();
         });
