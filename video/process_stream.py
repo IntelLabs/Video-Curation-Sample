@@ -8,22 +8,13 @@ import time  # time library
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from threading import Lock  # library for multi-threading
 
 import cv2  # OpenCV library
-import psutil
 from openvino.runtime import Core
 from ultralytics import YOLO
 from ultralytics.utils.checks import check_imgsz
 
 import vdms
-
-
-def _sort_dict_by_frame(in_dict):
-    def _by_int(key):
-        return tuple(int(k) for k in key.split("_"))
-
-    return dict(sorted(in_dict.items(), key=lambda x: _by_int(x[0])))
 
 
 def str2bool(in_val):
@@ -82,6 +73,8 @@ else:
 #     num_usuable_cpus = len(os.sched_getaffinity(0))
 # else:
 num_usuable_cpus = os.cpu_count()
+db = vdms.vdms()
+db.connect(DBHOST, DBPORT)
 
 if DEVICE == "GPU":
     model_path += ".engine"
@@ -91,9 +84,7 @@ else:
     batch_size = int(os.environ.get("CPU_BATCH_SIZE", 1))  # 8
 
 
-def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0):
-    # ridx = 0
-    # while True:
+def retry_query(query, num_retries: int = LOCKTIMEOUT_RETRIES, sleep_timer: int = 0):
     for ridx in range(num_retries + 1):
         response, _ = db.query(query, [[]])
         if "FailedCommand" in response[0] and any(
@@ -103,14 +94,11 @@ def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0
             if DEBUG == "1":
                 query_type = list(query[0].keys())[0]
                 print(
-                    # f"DEBUG [process_stream Attempt #{ridx}] Received '{err}' for {query}",
                     f"DEBUG [process_stream Attempt #{ridx}] Received '{err}' for {query_type} query",
                     flush=True,
                 )
             if sleep_timer > 0:
                 time.sleep(sleep_timer)
-            # ridx += 1
-            # pass  # Rerun
         else:
             if DEBUG == "1":
                 print(
@@ -274,10 +262,7 @@ def extract_metadata_from_results(
     fW, fH = img_size
     metadata = dict()
     try:
-        for bidx, result in enumerate(results):
-            annotated = result.plot()
-            annotated = overlay_info(annotated, fps)
-
+        for _, result in enumerate(results):
             # GET METADATA FOR CLIP
             boxes = result.boxes.cpu()
             oidx = 0
@@ -308,20 +293,6 @@ def extract_metadata_from_results(
                         flush=True,
                     )
 
-                    tdict = {
-                        "x": int(object_res[0]),
-                        "y": int(object_res[1]),
-                        "height": int(object_res[2]),
-                        "width": int(object_res[3]),
-                        "object": str(object_res[4]),
-                        "object_det": {
-                            "confidence": float(object_res[5]),
-                            "frameH": int(fH),
-                            "frameW": int(fW),
-                        },
-                    }
-
-                    # framenum_str = f"{frameNum}_{oidx}"
                     framenum_str = f"{frameNum:04d}_{oidx:04d}"
                     if DEBUG_FLAG:
                         meta_str = ",".join(
@@ -332,7 +303,18 @@ def extract_metadata_from_results(
                     metadata[framenum_str] = {
                         "frameId": frameNum,
                         "bbId": framenum_str,
-                        "bbox": tdict,
+                        "bbox": {
+                            "x": int(object_res[0]),
+                            "y": int(object_res[1]),
+                            "height": int(object_res[2]),
+                            "width": int(object_res[3]),
+                            "object": str(object_res[4]),
+                            "object_det": {
+                                "confidence": float(object_res[5]),
+                                "frameH": int(fH),
+                                "frameW": int(fW),
+                            },
+                        },
                     }
                     oidx += 1
 
@@ -340,7 +322,7 @@ def extract_metadata_from_results(
         e = traceback.format_exc()
         print(f"Error in {stream_name} extract_metadata_from_results: {e}", flush=True)
 
-    return annotated, metadata
+    return metadata
 
 
 # Inference Function
@@ -348,11 +330,9 @@ def infer_worker(
     stream_name,
     frameNum,
     frame,
-    # model_path,
     img_size,
     INGESTION,
     fps=TARGET_FPS,
-    return_annotated=False,
 ):  # img_size:(W,H)
     global model
 
@@ -360,7 +340,6 @@ def infer_worker(
     if (width, height) != img_size:
         frame = cv2.resize(frame, img_size)
 
-    annotated = None
     metadata = {}
     metadata_face = {}
     if "object" in INGESTION:
@@ -376,17 +355,14 @@ def infer_worker(
             stream=True,
         )
 
-        annotated, metadata = extract_metadata_from_results(
+        metadata = extract_metadata_from_results(
             stream_name, frameNum, results, img_size, fps=fps
         )
 
     if "face" in INGESTION:
         metadata_face = face_detection(stream_name, frameNum, frame, img_size)
 
-    if return_annotated:
-        return annotated, metadata, metadata_face
-    else:
-        return frame, metadata, metadata_face
+    return metadata, metadata_face
 
 
 """ HELPFUL FUNCTIONS """
@@ -420,8 +396,6 @@ def manual_fps_calculation(src, num_frames=10):
 
 # Generate and run UDF query
 def get_udf_query(
-    # db,
-    # start_t,
     filename_path,
     properties,
     ingest_mode,
@@ -463,23 +437,18 @@ def get_udf_query(
         # print(f"{filename_path} Query: {query}", flush=True)
         return
 
-    # video_blob = []
-    # with open(filename_path, "rb") as fd:
-    #     video_blob.append(fd.read())
-    # return query, video_blob
-
     filename = str(Path(filename_path).name)
-    db = vdms.vdms()
-    if not db.is_connected():
-        db.connect(DBHOST, DBPORT)
+    # db = vdms.vdms()
+    # if not db.is_connected():
+    #     db.connect(DBHOST, DBPORT)
     if DEBUG_FLAG:
         print(
             f"[TIMING],start_udf_ingest_{ingest_mode},{filename}," + str(time.time()),
             flush=True,
         )
     try:
-        res, _ = db.query([query])
-        # res = retry_query(db, [query], num_retries=10, sleep_timer=5)
+        # res, _ = db.query([query])
+        res = retry_query([query], sleep_timer=3)
 
         if DEBUG_FLAG:
             print(
@@ -488,17 +457,14 @@ def get_udf_query(
             )
             print(f"[DEBUG] {filename} PROPERTIES: {properties}", flush=True)
             print(f"[DEBUG] {filename} INGEST_VIDEO RESPONSE: {res}", flush=True)
-            # print(f"[DEBUG] Used client: {dn_name}", flush=True)
-            # print(f"[DEBUG] Elapsed ingest_video time: {elapsed_time} sec", flush=True)
     except Exception:
         e = traceback.format_exc()
         print(f"[DEBUG] VDMS Query Exception: {e}", flush=True)
-        # print(f"[DEBUG] failed query: {query}", flush=True)
 
     # elapsed_time = time.time() - start_t
 
-    db.disconnect()
-    del db
+    # db.disconnect()
+    # del db
 
 
 # Release Video Writer object and re-encode video to seek via ffmpeg later
@@ -539,17 +505,43 @@ def release_clip_and_reencode(clip_key, _out_vid, clip_filename, tmp_file, targe
     return _out_vid
 
 
-# ---------- Overlay FPS and System Usage ----------
-def overlay_info(frame, fps):
-    cpu = psutil.cpu_percent()
-    mem = psutil.virtual_memory().percent
-    text = f"FPS: {fps:.1f} | CPU: {cpu}% | MEM: {mem}%"
-    h, w = frame.shape[:2]
-    cv2.rectangle(frame, (0, h - 30), (w, h), (0, 0, 0), -1)
-    cv2.putText(
-        frame, text, (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1
-    )
-    return frame
+# method to send metadata to VDMS once clip is saved
+def metadata2vdms(
+    clip_key,
+    clip_filename,
+    clip_metadata,
+    width,
+    height,
+):
+    if DEBUG == "1":
+        print(
+            f"[TIMING],start_clip_metadata,{clip_key},{time.time()}",
+            flush=True,
+        )
+
+    # Send metadata to UDF
+    properties = {
+        "Name": clip_key,  # .split("/")[-1],
+        "category": "video_path_rop",
+    }
+
+    for ingest_mode in INGESTION.split(","):
+        get_udf_query(
+            # db,
+            # start_t,
+            clip_filename,
+            properties,
+            ingest_mode,
+            (width, height),
+            id="udf_metadata",
+            metadata=clip_metadata[ingest_mode],
+            test_mode=TEST_MODE,
+        )
+    if DEBUG == "1":
+        print(
+            f"[TIMING],end_clip_metadata,{clip_key},{time.time()}",
+            flush=True,
+        )
 
 
 """ CLASSES """
@@ -599,21 +591,6 @@ class VideoStream:
                 self.get_frames,
             )
         )
-        self.t.append(
-            self.executor.submit(
-                self.get_clips,
-            )
-        )
-        self.t.append(
-            self.executor.submit(
-                self.run_inference,
-            )
-        )
-        # self.t.append(
-        #     self.executor.submit(
-        #         self.process_clip_metadata,
-        #     )
-        # )
 
     # method to stop reading frames
     def stop(self):
@@ -683,11 +660,7 @@ class VideoStream:
 
     # Sets up important info for stream
     def setup_stream(self, fps):
-        self._lock = Lock()
-        self.frame_queue = mp.Queue()
-        self.clip_queue = mp.Queue()
         self.inference_queue = mp.Queue()
-        # self.metadata_queue = mp.Queue()
         self.retrieved_frames = 0
         self.num_frames_processed = 0
 
@@ -709,27 +682,19 @@ class VideoStream:
     def get_frames(self):
         clip_frame_idx = 0
         clip_id = 0
-        _out_vid = None
         if DEBUG == "1":
             print(
                 f"[TIMING],start_get_frames,{self.stream_name},{time.time()}",
                 flush=True,
             )
         while True:
-            if self.stopped:
-                break
-
             grabbed, frame = self.video_obj.read()  # Read next frame
-            # cv2.waitKey(int(1000 / self.input_fps))
 
-            if not grabbed:  # or frame is None:
-                # print(f"[Exiting {self.stream_name}] No more frames to read", flush=True)
+            if not grabbed or self.stopped:  # or frame is None:
                 self.stopped = True
-                self.frame_queue.put(None)
                 self.inference_queue.put(None)
                 break
 
-            # else:
             frameNum = int(self.video_obj.get(cv2.CAP_PROP_POS_FRAMES))
             skip_frame_num = (frameNum - 1) % self.frame_skip
 
@@ -756,7 +721,7 @@ class VideoStream:
                     tmp_file,
                     frame,  # Frame
                 )
-                self.frame_queue.put(queue_details)
+                # self.frame_queue.put(queue_details)
                 self.inference_queue.put(queue_details)
                 self.retrieved_frames += 1
 
@@ -764,311 +729,72 @@ class VideoStream:
                 if clip_frame_idx % self.clip_total_frames == 0:
                     clip_id += 1
 
-            # delay_ms = int(1000 / self.input_fps)
-            # cv2.waitKey(delay_ms)
-            # time.sleep(delay_ms / 1000 )
-
         if DEBUG == "1":
             print(
                 f"[TIMING],end_get_frames,{self.stream_name},{time.time()}", flush=True
             )
 
-    # method to create clips
-    def get_clips(self):
-        _out_vid = None
-        clip_frame_idx = 0
-        clip_key = ""
-        clip_filename = ""
-        tmp_file = ""
-        clip_id = 0
-        frameNum = 0
-        while True:
-            try:
-                queue_details = self.frame_queue.get()  # read()  # noqa: F841
-                if queue_details is None:
-                    if _out_vid is not None:
-                        frame_count = clip_frame_idx + 1
-                        if DEBUG == "1":
-                            print(
-                                f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames (end of stream)",
-                                flush=True,
-                            )
-                        _out_vid = release_clip_and_reencode(
-                            clip_key,
-                            _out_vid,
-                            clip_filename,
-                            tmp_file,
-                            self.target_fps,
-                        )
-                        if DEBUG == "1":
-                            print(
-                                f"[TIMING],end_get_clips,{clip_key},{time.time()}",
-                                flush=True,
-                            )
-                        self.clip_end_frame[clip_key] = frameNum
-                    break
+    # method to save clip
+    def save_clip(
+        self, clip_filename, clip_id, tmp_file, _out_vid, frame_count, frameNum
+    ):
+        clip_key = Path(clip_filename).name
+        if DEBUG == "1":
+            print(
+                f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames (end of stream)",
+                flush=True,
+            )
+        _out_vid = release_clip_and_reencode(
+            clip_key,
+            _out_vid,
+            clip_filename,
+            tmp_file,
+            self.target_fps,
+        )
+        if DEBUG == "1":
+            print(
+                f"[TIMING],end_get_clips,{clip_key},{time.time()}",
+                flush=True,
+            )
+        self.clip_end_frame[clip_key] = frameNum
+        return _out_vid
 
-                frameNum, clip_frame_idx, clip_id, clip_filename, tmp_file, frame = (
-                    queue_details
-                )
-                clip_key = Path(clip_filename).name
-
-                if clip_frame_idx == 0:
-                    if DEBUG == "1":
-                        print(
-                            f"[TIMING],start_get_clips,{clip_key},{time.time()}",
-                            flush=True,
-                        )
-                    _out_vid = cv2.VideoWriter(
-                        tmp_file,
-                        fourcc=self.fourcc,
-                        fps=self.target_fps,
-                        frameSize=(self.width, self.height),
-                    )
-                    if DEBUG == "1":
-                        print(
-                            f"[TIMING],Start new clip,{clip_key},{time.time()}",
-                            flush=True,
-                        )
-                _out_vid.write(frame)
-
-                if clip_frame_idx == self.clip_total_frames - 1:
-                    frame_count = clip_frame_idx + 1
-                    if DEBUG == "1":
-                        print(
-                            f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames",
-                            flush=True,
-                        )
-                    _out_vid = release_clip_and_reencode(
-                        clip_key,
-                        _out_vid,
-                        clip_filename,
-                        tmp_file,
-                        self.target_fps,
-                    )
-                    if DEBUG == "1":
-                        print(
-                            f"[TIMING],end_get_clips,{clip_key},{time.time()}",
-                            flush=True,
-                        )
-
-                    self.clip_end_frame[clip_key] = frameNum
-            except queue.Empty:
-                pass
-
-    # method to run inference on frame
-    def run_inference(self):
-        while True:
-            try:
-                queue_details = self.inference_queue.get()
-                if queue_details is None:
-                    # self.metadata_queue.put(None)
-                    break
-
-                frameNum, clip_frame_idx, clip_id, clip_filename, tmp_file, frame = (
-                    queue_details
-                )
-                clip_key = Path(clip_filename).name
-                if DEBUG == "1":
-                    print(
-                        f"[TIMING],start_infer_worker,{clip_key},{time.time()}",
-                        flush=True,
-                    )
-                _, metadata, metadata_face = infer_worker(
-                    self.stream_name,
-                    clip_frame_idx,
-                    frame,
-                    # model_path,
-                    (self.width, self.height),
-                    INGESTION,
-                    fps=self.target_fps,
-                )
-                if DEBUG == "1":
-                    print(
-                        f"[TIMING],end_infer_worker,{clip_key},{time.time()}",
-                        flush=True,
-                    )
-                self.all_metadata.setdefault(clip_key, {})
-                self.all_metadata[clip_key].setdefault("object", {})
-                self.all_metadata[clip_key]["object"].update(metadata)
-                self.all_metadata[clip_key].setdefault("face", {})
-                self.all_metadata[clip_key]["face"].update(metadata_face)
-                self.num_frames_processed += 1
-
-                # Make sure clip is processed; frame added to dict after writing clip
-                lastFrame = 0
-                while True:
-                    if clip_key in self.clip_end_frame:
-                        lastFrame = self.clip_end_frame[clip_key]
-                        break
-
-                # while True:
-                if lastFrame == frameNum:
-                    # process clip metadata
-                    queue_details = (
-                        clip_key,
-                        clip_filename,
-                        self.all_metadata[clip_key],
-                        self.width,
-                        self.height,
-                    )
-                    # self.metadata_queue.put(queue_details)
-                    clip_key, clip_filename, clip_metadata, width, height = (
-                        queue_details
-                    )
-                    if DEBUG == "1":
-                        print(
-                            f"[TIMING],start_clip_metadata,{clip_key},{time.time()}",
-                            flush=True,
-                        )
-
-                    # Send metadata to UDF
-                    properties = {
-                        "Name": clip_key,  # .split("/")[-1],
-                        "category": "video_path_rop",
-                    }
-                    # ingest_mode= "object"
-                    for ingest_mode in INGESTION.split(","):
-                        get_udf_query(
-                            # db,
-                            # start_t,
-                            clip_filename,
-                            properties,
-                            ingest_mode,
-                            (width, height),
-                            id="udf_metadata",
-                            metadata=clip_metadata[ingest_mode],
-                            test_mode=TEST_MODE,
-                        )
-
-                    # all_metadata = (
-                    #     clip_metadata["object"] if "object" in clip_metadata else {}
-                    # )
-                    # if "face" in clip_metadata:
-                    #     for face_frameidx_bbidx, value in clip_metadata["face"].items():
-                    #         face_frameidx, face_bbidx = face_frameidx_bbidx.split("_")
-                    #         max_obj_idx = 0
-                    #         for obj_frameidx_bbidx in all_metadata:
-                    #             if face_frameidx in obj_frameidx_bbidx:
-                    #                 _, obj_bbidx_ = obj_frameidx_bbidx.split("_")
-                    #                 max_obj_idx = max(max_obj_idx, int(obj_bbidx_))
-
-                    #         if max_obj_idx > 0:
-                    #             new_face_bbidx = max_obj_idx + 1
-                    #             new_key = f"{face_frameidx}_{new_face_bbidx:04d}"
-                    #             all_metadata[new_key] = value
-                    #             all_metadata[new_key]["bbId"] = new_key
-                    #         else:
-                    #             all_metadata[face_frameidx_bbidx] = value
-
-                    # all_metadata = _sort_dict_by_frame(all_metadata)
-                    # get_udf_query(
-                    #     clip_filename,
-                    #     properties,
-                    #     INGESTION.replace(",", " "),
-                    #     (width, height),
-                    #     id="udf_metadata",
-                    #     metadata=all_metadata,
-                    #     test_mode=TEST_MODE,
-                    # )
-
-                    if DEBUG == "1":
-                        print(
-                            f"[TIMING],end_clip_metadata,{clip_key},{time.time()}",
-                            flush=True,
-                        )
-                # else:
-                #     break
-            except queue.Empty:
-                pass
-
-    # Process metadata for clip
-    def process_clip_metadata(self):
-        """
-        clip must be ready
-        all clip frames inference ready
-        """
-        # db = vdms.vdms()
-
-        while True:
-            try:
-                queue_details = self.metadata_queue.get()  # noqa: F841
-
-                if queue_details is None:
-                    break
-
-                clip_key, clip_filename, clip_metadata, width, height = queue_details
-                if DEBUG == "1":
-                    print(
-                        f"[TIMING],start_clip_metadata,{clip_key},{time.time()}",
-                        flush=True,
-                    )
-
-                # Send metadata to UDF
-                properties = {
-                    "Name": clip_key,  # .split("/")[-1],
-                    "category": "video_path_rop",
-                }
-                # ingest_mode= "object"
-                # for ingest_mode in INGESTION.split(","):
-                #     get_udf_query(
-                #         # db,
-                #         # start_t,
-                #         clip_filename,
-                #         properties,
-                #         ingest_mode,
-                #         (width, height),
-                #         id="udf_metadata",
-                #         metadata=clip_metadata[ingest_mode],
-                #         test_mode=TEST_MODE,
-                #     )
-
-                all_metadata = (
-                    clip_metadata["object"] if "object" in clip_metadata else {}
-                )
-                if "face" in clip_metadata:
-                    for face_frameidx_bbidx, value in clip_metadata["face"].items():
-                        face_frameidx, face_bbidx = face_frameidx_bbidx.split("_")
-                        max_obj_idx = 0
-                        for obj_frameidx_bbidx in all_metadata:
-                            if face_frameidx in obj_frameidx_bbidx:
-                                _, obj_bbidx_ = obj_frameidx_bbidx.split("_")
-                                max_obj_idx = max(max_obj_idx, int(obj_bbidx_))
-
-                        if max_obj_idx > 0:
-                            new_face_bbidx = max_obj_idx + 1
-                            new_key = f"{face_frameidx}_{new_face_bbidx:04d}"
-                            all_metadata[new_key] = value
-                            all_metadata[new_key]["bbId"] = new_key
-                        else:
-                            all_metadata[face_frameidx_bbidx] = value
-
-                all_metadata = _sort_dict_by_frame(all_metadata)
-                get_udf_query(
-                    clip_filename,
-                    properties,
-                    INGESTION.replace(",", " "),
-                    (width, height),
-                    id="udf_metadata",
-                    metadata=all_metadata,
-                    test_mode=TEST_MODE,
-                )
-
-                if DEBUG == "1":
-                    print(
-                        f"[TIMING],end_clip_metadata,{clip_key},{time.time()}",
-                        flush=True,
-                    )
-            except queue.Empty:
-                pass
-
-        # db.disconnect()
+    # method to run inference on frame and store metadata
+    def frame_inference(self, clip_key, clip_frame_idx, frame):
+        if DEBUG == "1":
+            print(
+                f"[TIMING],start_infer_worker,{clip_key}-{clip_frame_idx},{time.time()}",
+                flush=True,
+            )
+        metadata, metadata_face = infer_worker(
+            self.stream_name,
+            clip_frame_idx,
+            frame,
+            # model_path,
+            (self.width, self.height),
+            INGESTION,
+            fps=self.target_fps,
+        )
+        if DEBUG == "1":
+            print(
+                f"[TIMING],end_infer_worker,{clip_key},{time.time()}",
+                flush=True,
+            )
+        self.all_metadata.setdefault(clip_key, {})
+        self.all_metadata[clip_key].setdefault("object", {})
+        self.all_metadata[clip_key]["object"].update(metadata)
+        self.all_metadata[clip_key].setdefault("face", {})
+        self.all_metadata[clip_key]["face"].update(metadata_face)
+        self.num_frames_processed += 1
 
 
 """ MAIN FUNCTION """
 
 
-def processor(camera_src, camera_name=None):
+if __name__ == "__main__":
+    camera_src = sys.argv[1]
+    camera_name = sys.argv[2] if len(sys.argv) == 3 else None
+
     start = time.time()
 
     # initializing and starting multi-threaded webcam input stream
@@ -1077,13 +803,122 @@ def processor(camera_src, camera_name=None):
     # Start retrieving frames and add to queue
     webcam_stream.start()
 
+    # Main thread reads from frame queue and process frame
+    _out_vid = None
+    clip_frame_idx = 0
+    clip_key = ""
+    clip_filename = ""
+    tmp_file = ""
+    clip_id = 0
+    frameNum = 0
+    while True:
+        try:
+            queue_details = webcam_stream.inference_queue.get()
+
+            if queue_details is None:
+                # Save video and send metadata
+                if _out_vid is not None:
+                    frame_count = clip_frame_idx + 1
+                    if frame_count > webcam_stream.target_fps:
+                        _out_vid = webcam_stream.save_clip(
+                            clip_filename,
+                            clip_id,
+                            tmp_file,
+                            _out_vid,
+                            frame_count,
+                            frameNum,
+                        )
+                        metadata2vdms(
+                            clip_key,
+                            clip_filename,
+                            webcam_stream.all_metadata[clip_key],
+                            webcam_stream.width,
+                            webcam_stream.height,
+                        )
+                    else:
+                        _out_vid = None
+
+                break
+
+            frameNum, clip_frame_idx, clip_id, clip_filename, tmp_file, frame = (
+                queue_details
+            )
+            clip_key = Path(clip_filename).name
+
+            # Initialize video clip
+            if clip_frame_idx == 0:
+                if DEBUG == "1":
+                    print(
+                        f"[TIMING],start_get_clips,{clip_key},{time.time()}",
+                        flush=True,
+                    )
+                _out_vid = cv2.VideoWriter(
+                    tmp_file,
+                    fourcc=webcam_stream.fourcc,
+                    fps=webcam_stream.target_fps,
+                    frameSize=(webcam_stream.width, webcam_stream.height),
+                )
+                if DEBUG == "1":
+                    print(
+                        f"[TIMING],Start new clip,{clip_key},{time.time()}",
+                        flush=True,
+                    )
+
+            # Write frame to video clip
+            _out_vid.write(frame)
+
+            # Inference on frame
+            if DEBUG == "1":
+                print(
+                    f"[TIMING],start_infer_worker,{clip_key}-{clip_frame_idx},{time.time()}",
+                    flush=True,
+                )
+            metadata, metadata_face = infer_worker(
+                webcam_stream.stream_name,
+                clip_frame_idx,
+                frame,
+                # model_path,
+                (webcam_stream.width, webcam_stream.height),
+                INGESTION,
+                fps=webcam_stream.target_fps,
+            )
+            if DEBUG == "1":
+                print(
+                    f"[TIMING],end_infer_worker,{clip_key},{time.time()}",
+                    flush=True,
+                )
+            webcam_stream.all_metadata.setdefault(clip_key, {})
+            webcam_stream.all_metadata[clip_key].setdefault("object", {})
+            webcam_stream.all_metadata[clip_key]["object"].update(metadata)
+            webcam_stream.all_metadata[clip_key].setdefault("face", {})
+            webcam_stream.all_metadata[clip_key]["face"].update(metadata_face)
+            webcam_stream.num_frames_processed += 1
+
+            # Save video and send metadata
+            if clip_frame_idx == webcam_stream.clip_total_frames - 1:
+                frame_count = clip_frame_idx + 1
+                _out_vid = webcam_stream.save_clip(
+                    clip_filename, clip_id, tmp_file, _out_vid, frame_count, frameNum
+                )
+                metadata2vdms(
+                    clip_key,
+                    clip_filename,
+                    webcam_stream.all_metadata[clip_key],
+                    webcam_stream.width,
+                    webcam_stream.height,
+                )
+
+        except queue.Empty:
+            pass
+
     webcam_stream.stop()  # stop the webcam stream
+    cv2.destroyAllWindows()
 
     end = time.time()
 
     # printing time elapsed and fps
-    elapsed = end - start
     if DEBUG == "1":
+        elapsed = end - start
         print(
             "[DEBUG] Stream name:{}, FPS: {} , Elapsed Time: {}, Num. Retrieved Frames: {}, Num. Processed Frames: {}".format(
                 webcam_stream.stream_name,
@@ -1099,17 +934,3 @@ def processor(camera_src, camera_name=None):
             f"[TIMING],Completed processing,{webcam_stream.stream_name},{end}",
             flush=True,
         )
-
-    # closing all windows
-    cv2.destroyAllWindows()
-
-
-if __name__ == "__main__":
-    if len(sys.argv) == 3:
-        processor(sys.argv[1], camera_name=sys.argv[2])
-
-    elif len(sys.argv) == 2:
-        processor(sys.argv[1])
-
-    else:
-        raise ValueError("Invalid input. Please provide video path or camera URL")

@@ -284,7 +284,11 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     int num_bbs = video_metadata[0].size();
     int bb_idx = 0;
     int bb_counter = 0;
-    int desired_chunk_size = 10; //50;
+
+    // Set desired chunk size
+    // Keep in mind, ~5 transactions per BB (FindVideo, AddEntity, AddBB, 2xAddConnection)
+    // 50 bbs => ~250 transaction length
+    int desired_chunk_size = 50;
     int bb_count = static_cast<int>(static_cast<double>(num_bbs) / desired_chunk_size);
 
     Json::Value metadata_chunk;
@@ -349,11 +353,6 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
           std::cout << "[DEBUG add_metadata_bg_vid] Chunk created for " << props["Name"].asString() << " and sending to add_metadata" << std::endl;
           options["metadata"] = metadata_chunk;
           options["Name"] = props["Name"].asString();
-          // if (std::filesystem::exists(file_name)){
-          //     std::cout << "[DEBUG DMH:151] UID/File '" << file_name<< "' exists prior to syncop" << std::endl;
-          // } else {
-          //     std::cout << "[DEBUG DMH:151] UID/File '" << file_name << "' DOES NOT exist prior to syncop" << std::endl;
-          // }
           options_vector.push_back(options);
 
           std::cout << "[DEBUG add_metadata_bg_vid] Chunk for " << props["Name"].asString() << " added to syncremoteOperation" << std::endl;
@@ -362,11 +361,11 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
           bb_counter = 0;
       }
     }
-    VDMSThreadPool& pool = VDMSThreadPool::instance();
+    // VDMSThreadPool& pool = VDMSThreadPool::instance();
     for (auto opts : options_vector){
       VCL::Video video_chunk(video);
       // VDMSThreadPool::instance().enqueue([url, opts, &video]() {
-      pool.enqueue([url, opts, video_chunk]() mutable {
+      VDMSThreadPool::instance().enqueue([url, opts, video_chunk]() mutable {
           video_chunk.syncremoteOperation(url, opts);  // Run each chunk in thread
           video_chunk.execute_operations();
         });

@@ -15,7 +15,7 @@ KEYWORDS = [
     "[TIMING]",
     "[METADATA_INFO]",
     # "e2e_query_processing",
-    "[DEBUG]",
+    "[DEBUG",
     # "OBJECT DETECTION]",
     # "METADATA]",
     "Clip,contains,frames",
@@ -31,6 +31,8 @@ PROCESSING_DEFAULT_DICT = {
     "face detections": 0,
     "Num Failures": 0,
     "Num Bkgd Failures": 0,
+    "Num FindVideo Bkgd Failures": 0,
+    "Num Unique FindVideo Bkgd Failures": 0,
     "Time to create clip (s)": 0,  # info_details["Save clip"] - info_details["Start new clip"]
     "total inference runtime (s)": 0,
     "total get_clip runtime (s)": 0,
@@ -483,16 +485,31 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                     "Num Bkgd Failures"
                 ]
 
+            if "Num FindVideo Bkgd Failures" in info_details:
+                camera_info[camera_name]["Num FindVideo Bkgd Failures"] += info_details[
+                    "Num FindVideo Bkgd Failures"
+                ]
+            if "Num Unique FindVideo Bkgd Failures" in info_details:
+                camera_info[camera_name]["Num Unique FindVideo Bkgd Failures"] += (
+                    info_details["Num Unique FindVideo Bkgd Failures"]
+                )
+
             if "Save clip" in info_details:
                 camera_info[camera_name]["Time to create clip (s)"] += (
                     info_details["Save clip"] - info_details["Start new clip"]
                 )
 
             if "end_infer_worker" in info_details:
-                camera_info[camera_name]["total inference runtime (s)"] += (
-                    info_details["end_infer_worker"]
-                    - info_details["start_infer_worker"]
-                )
+                # camera_info[camera_name]["total inference runtime (s)"] += (
+                #     info_details["end_infer_worker"]
+                #     - info_details["start_infer_worker"]
+                # )
+
+                for clip_frame_idx in info_details["end_infer_worker"].keys():
+                    camera_info[camera_name]["total inference runtime (s)"] += (
+                        info_details["end_infer_worker"][clip_frame_idx]
+                        - info_details["start_infer_worker"][clip_frame_idx]
+                    )
 
             if "end_get_clips" in info_details:
                 camera_info[camera_name]["total get_clip runtime (s)"] += (
@@ -594,7 +611,9 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
             else 0
         )
         cam_dict["Total Failures"] = (
-            cam_dict["Num Failures"] + cam_dict["Num Bkgd Failures"]
+            cam_dict["Num Failures"]
+            + cam_dict["Num Bkgd Failures"]
+            + cam_dict["Num Unique FindVideo Bkgd Failures"]
         )
         details.append(cam_dict)
 
@@ -631,6 +650,8 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
             "app processing time + bkgd (s)",
             "Num Failures",
             "Num Bkgd Failures",
+            "Num FindVideo Bkgd Failures",  # Skips BB insertion if failure
+            "Num Unique FindVideo Bkgd Failures",
             "Log VDMS crashes",
             "stream send elapsed time (s)",
             "stream processing time (s)",
@@ -800,12 +821,29 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                                 info[file]["Num Failures"] += 1
 
                         if "BACKGROUND ADD_METADATA RESPONSE:" in line:
-                            response = eval(
-                                line.split("BACKGROUND ADD_METADATA RESPONSE: ")[1]
+                            bracket_regex_pattern = r"\[([^\]]*)\]"
+                            match = re.search(
+                                bracket_regex_pattern,
+                                line.split("BACKGROUND ADD_METADATA RESPONSE: ")[1],
                             )
+                            content = ""
+                            if match:
+                                content = match.group(1)
+                            # response = eval(
+                            #     line.split("BACKGROUND ADD_METADATA RESPONSE: ")[1].split("]")[0]+"]"
+                            # )
                             info[file].setdefault("Num Bkgd Failures", 0)
-                            if "FailedCommand" in response[0]:
+                            if "FailedCommand" in content:
                                 info[file]["Num Bkgd Failures"] += 1
+
+                    elif (
+                        "[DEBUG add_metadata] FindVideo failed " in line
+                        and not frame_log_available
+                    ):
+                        # Video not found
+                        info[file].setdefault("Num FindVideo Bkgd Failures", 0)
+                        info[file]["Num FindVideo Bkgd Failures"] += 1
+                        info[file]["Num Unique FindVideo Bkgd Failures"] = 1
 
                     elif "[METADATA_INFO]" in line:
                         (
@@ -832,7 +870,34 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                         prefix, method_name, name_or_mp4_file, timestamp = (
                             line_of_int.split(",")
                         )
-                        info[name_or_mp4_file][method_name] = float(timestamp)
+
+                        if "infer_worker" in method_name:
+                            if "-" in name_or_mp4_file:
+                                clip_key, clip_frame_idx = name_or_mp4_file.split("-")
+                            else:
+                                clip_key = name_or_mp4_file
+                                clip_frame_idx = str(
+                                    0
+                                    if method_name not in info[clip_key]
+                                    else len(info[clip_key][method_name].keys())
+                                )
+
+                            info[clip_key].setdefault(method_name, {})
+                            info[clip_key][method_name][clip_frame_idx] = float(
+                                timestamp
+                            )
+
+                            # if "-" in name_or_mp4_file:
+                            #     clip_key, clip_frame_idx = name_or_mp4_file.split("-")
+                            #     info[clip_key].setdefault(method_name, {})
+                            #     info[clip_key][method_name][clip_frame_idx] = float(timestamp)
+                            # else:
+                            #     info[name_or_mp4_file].setdefault(method_name, {})
+                            #     clip_frame_idx = len(info[name_or_mp4_file][method_name].keys())
+                            #     info[name_or_mp4_file][method_name][clip_frame_idx] = float(timestamp)
+                        else:
+                            info[name_or_mp4_file][method_name] = float(timestamp)
+
                         min_timestamp = min(min_timestamp, float(timestamp))
                         max_timestamp = max(max_timestamp, float(timestamp))
 
@@ -927,6 +992,7 @@ def main(args):
 
     for log_path in glob_cmd:
         if not log_path.name.endswith(".stats.log"):
+            df_start = time.time()
             method = None
             if args.recursive:
                 method = log_path.parent.name
@@ -950,6 +1016,9 @@ def main(args):
                 sort_cols += ["video", "Num Streams"]
                 df.sort_values(by=sort_cols, inplace=True)
 
+                time_str = secs2HMS_str(time.time() - df_start)
+                print(f"Took {time_str} for {str(log_path)}", flush=True)
+
     # if "Method" in df.columns.to_list():
     #     methods = list(set(df["Method"].values))
     #     substrings = get_common_method_substrings(methods)
@@ -967,7 +1036,10 @@ def main(args):
 
 
 if __name__ == "__main__":
+    main_start = time.time()
     in_params = get_input_args()
     main(in_params)
 
     in_params.out_log_file.close()
+    time_str = secs2HMS_str(time.time() - main_start)
+    print(f"Took {time_str} for all logs", flush=True)

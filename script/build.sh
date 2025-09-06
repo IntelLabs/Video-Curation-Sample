@@ -28,9 +28,9 @@ build_docker() {
 
     if [[ "$DOCKER_TAR" != "1" ]] || [[ "${image_name}" == *"_certificate"* ]]; then
         if [[ "$DOCKER_TAR" == "1" ]] && [[ "${image_name}" == *"_certificate"* ]]; then
-            echo "Loading zookeeper and kafka docker image"
-            docker load -i ${DOCKER_TAR_DIR}/zookeeper.tar
-            docker load -i ${DOCKER_TAR_DIR}/kafka.tar
+            # echo "Loading zookeeper and kafka docker image"
+            # docker load -i ${DOCKER_TAR_DIR}/zookeeper.tar
+            # docker load -i ${DOCKER_TAR_DIR}/kafka.tar
 
             echo "Loading certificate image"
             docker load -i ${DOCKER_TAR_DIR}/lcc_certificate_stream.tar

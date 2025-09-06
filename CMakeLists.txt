@@ -60,9 +60,7 @@ if(DOCKER_TAR MATCHES "1")
     set(TAR_FILES
         "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_frontend_stream.tar"
         "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_video_stream.${DEVICE}.tar"
-        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/zookeeper.tar"
         "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_vdms_stream.tar"
-        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/kafka.tar"
         "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_certificate_stream.tar"
     )
 

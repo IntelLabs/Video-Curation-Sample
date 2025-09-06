@@ -16,9 +16,7 @@ define(`PROFILE_GPU', `depends_on:
         environment:
             RETENTION_MINS: "60"
             CLEANUP_INTERVAL: "10m"
-            KKHOST: "kafka-service:9092"
             SHOST: "http://stream-service:8080"
-            ZKHOST: "zookeeper-service:2181"
             DBHOST: "vdms-service"
             UDF_PORT: 5011
             `RESIZE_FLAG': "defn(`RESIZE_FLAG')"
@@ -50,9 +48,7 @@ define(`PROFILE_GPU', `depends_on:
         environment:
             RETENTION_MINS: "60"
             CLEANUP_INTERVAL: "10m"
-            KKHOST: "kafka-service:9092"
             SHOST: "http://stream-service:8080"
-            ZKHOST: "zookeeper-service:2181"
             DBHOST: "vdms-service"
             UDF_PORT: 5012
             `RESIZE_FLAG': "defn(`RESIZE_FLAG')"

@@ -107,9 +107,9 @@ Component: JSON-CPP
 Repository: https://github.com/open-source-parsers/jsoncpp
 License: https://github.com/open-source-parsers/jsoncpp/blob/master/LICENSE
 
-Component: kafkacat
+<!-- Component: kafkacat
 Repository: https://github.com/edenhill/kafkacat
-License: https://github.com/edenhill/kafkacat/blob/master/LICENSE
+License: https://github.com/edenhill/kafkacat/blob/master/LICENSE -->
 
 Component: libogg
 Repository: https://github.com/xiph/ogg
@@ -171,9 +171,9 @@ Component: what-input
 Repository: https://github.com/ten1seven/what-input
 License: https://github.com/ten1seven/what-input/blob/master/LICENSE
 
-Component: kafka docker
+<!-- Component: kafka docker
 Repository: https://github.com/wurstmeister/kafka-docker
-License: https://github.com/wurstmeister/kafka-docker/blob/master/LICENSE
+License: https://github.com/wurstmeister/kafka-docker/blob/master/LICENSE -->
 
 Component: x264
 Repository: https://github.com/mirror/x264
@@ -183,7 +183,7 @@ Component: x265
 Repository: https://github.com/videolan/x265
 License: https://github.com/videolan/x265/blob/master/COPYING
 
-Component: zookeeper
+<!-- Component: zookeeper
 Repository: https://hub.docker.com/_/zookeeper
-License: https://github.com/apache/zookeeper/blob/master/LICENSE.txt
+License: https://github.com/apache/zookeeper/blob/master/LICENSE.txt -->
 
