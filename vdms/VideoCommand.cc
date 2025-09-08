@@ -349,8 +349,8 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
       }
       counter++;
       if (bb_counter == desired_chunk_size || bb_idx == num_bbs){
-          std::cout << "[DEBUG add_metadata_bg_vid] bb_counter: " << bb_counter << " bb_idx: " << bb_idx << " int(num_bbs/bb_count): " << desired_chunk_size << std::endl;
-          std::cout << "[DEBUG add_metadata_bg_vid] Chunk created for " << props["Name"].asString() << " and sending to add_metadata" << std::endl;
+          std::cout << "[DEBUG add_metadata_bg_vid] bb_counter: " << bb_counter << " bb_idx: " << bb_idx << " int(num_bbs/bb_count): " << desired_chunk_size <<
+                       "[DEBUG add_metadata_bg_vid] Chunk created for " << props["Name"].asString() << " and sending to add_metadata" << std::endl;
           options["metadata"] = metadata_chunk;
           options["Name"] = props["Name"].asString();
           options_vector.push_back(options);
@@ -361,11 +361,11 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
           bb_counter = 0;
       }
     }
-    // VDMSThreadPool& pool = VDMSThreadPool::instance();
+    VDMSThreadPool& pool = VDMSThreadPool::instance();
     for (auto opts : options_vector){
       VCL::Video video_chunk(video);
       // VDMSThreadPool::instance().enqueue([url, opts, &video]() {
-      VDMSThreadPool::instance().enqueue([url, opts, video_chunk]() mutable {
+      pool.enqueue([url, opts, video_chunk]() mutable {
           video_chunk.syncremoteOperation(url, opts);  // Run each chunk in thread
           video_chunk.execute_operations();
         });
