@@ -8,6 +8,6 @@ onnxslim
 opencv-python-headless>=4.11.0.86
 openvino-dev>=2024.6.0
 sk-video>=1.1.10
-tensorrt
+tensorrt==10.12.0.36
 ultralytics>=8.3.83
 vdms

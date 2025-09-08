@@ -79,9 +79,12 @@ db.connect(DBHOST, DBPORT)
 if DEVICE == "GPU":
     model_path += ".engine"
     batch_size = int(os.environ.get("GPU_BATCH_SIZE", 1))
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 else:
     model_path += "_openvino_model/"
     batch_size = int(os.environ.get("CPU_BATCH_SIZE", 1))  # 8
+
+device_input = DEVICE.lower() if DEVICE == "CPU" else os.environ["CUDA_VISIBLE_DEVICES"]
 
 
 def retry_query(query, num_retries: int = LOCKTIMEOUT_RETRIES, sleep_timer: int = 0):
@@ -350,7 +353,7 @@ def infer_worker(
             conf=DETECTION_THRESHOLD,
             iou=IOU_THRESHOLD,
             half=HALF_FLAG,
-            device=DEVICE,
+            device=device_input,
             verbose=False,
             stream=True,
         )

@@ -1,14 +1,3 @@
-define(`PROFILE_DEFAULT', `depends_on:
-            - vdms-service')
-define(`PROFILE_GPU', `depends_on:
-            - vdms-service
-        runtime: nvidia
-        deploy:
-            resources:
-                reservations:
-                    devices:
-                        - driver: nvidia
-                          capabilities: [gpu]')
     udf-service:
         image: defn(`REGISTRY_PREFIX')lcc_udf:stream
         expose:
@@ -38,7 +27,8 @@ define(`PROFILE_GPU', `depends_on:
         networks:
             - appnet
         restart: always
-        ifdef(`GPU', PROFILE_GPU, PROFILE_DEFAULT)
+        depends_on:
+            - vdms-service
         deploy:
             replicas: defn(`NCURATIONS')
     udf-bkgd-service:
@@ -70,6 +60,7 @@ define(`PROFILE_GPU', `depends_on:
         networks:
             - appnet
         restart: always
-        ifdef(`GPU', PROFILE_GPU, PROFILE_DEFAULT)
+        depends_on:
+            - vdms-service
         deploy:
             replicas: 2

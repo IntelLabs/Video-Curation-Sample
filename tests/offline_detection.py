@@ -54,6 +54,11 @@ TEST_MODE = str2bool(os.getenv("TEST_FLAG", False))
 UDF_HOST = "video-service"
 UDF_PORT = 5011
 
+if DEVICE == "GPU":
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+device_input = DEVICE.lower() if DEVICE == "CPU" else os.environ["CUDA_VISIBLE_DEVICES"]
+
 RESOLUTION_NAME_BY_WH = {
     "1280x736": "1K",
     "3840x2176": "4K",
@@ -168,7 +173,7 @@ def processor(args):  # (camera_src, camera_name=None):
             conf=detection_threshold,
             iou=iou_threshold,
             half=half_flag,
-            device=DEVICE,
+            device=device_input,
             verbose=False,
             stream=True,
         )
