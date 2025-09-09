@@ -49,13 +49,16 @@ class SearchHandler(web.RequestHandler):
                 "constraints": {
                     "category": ["==", "video_path_rop"],
                 },
+                "results": {"list": ["Name"], "blob": False},
+                # "results": {"list": ['video_name', "video_filename"]},
+                # "results": {"list": ["fps", "duration", "width", "height"]}
             }
         }
         q_vid2 = {
-            "FindVideo": {
+            "FindEntity": {
                 "_ref": ref + 1,
-                "frameconstraints": {},
-                "results": {"list": ["server_filepath"]},
+                "class": "Frame",
+                # "results": {"list": ["server_filepath", "frameID", "Name"]},
                 "link": {"ref": ref},
             }
         }

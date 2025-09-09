@@ -260,11 +260,11 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
   if (video_metadata.size() > 0) {
 
     // does videopath/uid exist
-    if (std::filesystem::exists(file_name)){
-      std::cout << "[DEBUG VideoCommand] UID/File '" << file_name << "' exists prior to bkgd" << std::endl;
-    } else {
-      std::cout << "[DEBUG VideoCommand] UID/File '" << file_name << "' DOES NOT exist prior to bkgd" << std::endl;
-    }
+    // if (std::filesystem::exists(file_name)){
+    //   std::cout << "[DEBUG VideoCommand] UID/File '" << file_name << "' exists prior to bkgd" << std::endl;
+    // } else {
+    //   std::cout << "[DEBUG VideoCommand] UID/File '" << file_name << "' DOES NOT exist prior to bkgd" << std::endl;
+    // }
 
     inserted_video_metadata["uid"] = props[VDMS_BG_UNIQUE_VID_ID];
     inserted_video_metadata["metadata"] = video_metadata[0];
@@ -404,7 +404,6 @@ Json::Value AddVideo::construct_responses(Json::Value &response,
     options["uid"] = props[VDMS_BG_UNIQUE_VID_ID];
 
     const std::string &file_name =  props[VDMS_BG_UNIQUE_VID_ID].asString();
-    
 
     int curr_frame = 0;
     int counter = 0;
@@ -483,7 +482,7 @@ Json::Value AddVideo::construct_responses(Json::Value &response,
           options["Name"] = props["Name"].asString();
           options_vector.push_back(options);
 
-          std::cout << "[DEBUG add_metadata_bg_vid] Chunk for " << props["Name"].asString() << " added to syncremoteOperation" << std::endl;
+          // std::cout << "[DEBUG add_metadata_bg_vid] Chunk for " << props["Name"].asString() << " added to syncremoteOperation" << std::endl;
           metadata_chunk.clear();
           counter = 0;
           bb_counter = 0;
