@@ -266,8 +266,135 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
       std::cout << "[DEBUG VideoCommand] UID/File '" << file_name << "' DOES NOT exist prior to bkgd" << std::endl;
     }
 
+    inserted_video_metadata["uid"] = props[VDMS_BG_UNIQUE_VID_ID];
+    inserted_video_metadata["metadata"] = video_metadata[0];
+    inserted_video_metadata["props"] = props;
+
     // std::cout << "USING BACKGROUND THREADS FOR " << props["Name"].asString() << std::endl;
-    std::cout << "[DEBUG VideoCommand] Creating metadata chunks" << std::endl;
+    // std::cout << "[DEBUG VideoCommand] Creating metadata chunks" << std::endl;
+
+    // // Moved the chunk creation into VideoCommand
+    // std::string url = "http://udf-bkgd-service:5012/video";
+    // Json::Value options;
+    // options["port"] = 55555;
+    // options["id"] = "add_metadata";
+    // options["uid"] = props[VDMS_BG_UNIQUE_VID_ID];
+
+    // const std::string &file_name =  props[VDMS_BG_UNIQUE_VID_ID].asString();
+
+    // int curr_frame = 0;
+    // int counter = 0;
+    // int chunk_count = 3;
+    // int num_bbs = video_metadata[0].size();
+    // int bb_idx = 0;
+    // int bb_counter = 0;
+
+    // // Set desired chunk size
+    // // Keep in mind, ~5 transactions per BB (FindVideo, AddEntity, AddBB, 2xAddConnection)
+    // // 50 bbs => ~250 transaction length
+    // int desired_chunk_size = 50;
+    // int bb_count = static_cast<int>(static_cast<double>(num_bbs) / desired_chunk_size);
+
+    // Json::Value metadata_chunk;
+    // std::vector<Json::Value> options_vector;
+    // for (Json::Value vframe : video_metadata[0]) {
+    //   curr_frame++;
+    //   Json::Value curr_frame_metadata;
+    //   Json::Value frame_props;
+    //   frame_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
+    //   frame_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
+    //   frame_props["server_filepath"] = props["Name"].asString();
+
+    //   curr_frame_metadata["frame_props"] = frame_props;
+
+    //   Json::Value edge_props;
+    //   edge_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
+    //   edge_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
+    //   edge_props["server_filepath"] = props["Name"].asString();
+
+    //   curr_frame_metadata["edge_props"] = edge_props;
+
+    //   if (vframe.isMember("bbox")) {
+    //       Json::Value bbox_props;
+    //       bbox_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
+    //       bbox_props["server_filepath"] = props["Name"].asString();
+    //       bbox_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
+    //       bbox_props[VDMS_DM_VID_OBJECT_PROP] =
+    //           vframe["bbox"]["object"].asString();
+    //       bbox_props[VDMS_ROI_COORD_X_PROP] = vframe["bbox"]["x"].asFloat();
+    //       bbox_props[VDMS_ROI_COORD_Y_PROP] = vframe["bbox"]["y"].asFloat();
+    //       bbox_props[VDMS_ROI_WIDTH_PROP] = vframe["bbox"]["width"].asFloat();
+    //       bbox_props[VDMS_ROI_HEIGHT_PROP] = vframe["bbox"]["height"].asFloat();
+
+    //       for (auto member : vframe["bbox"]["object_det"].getMemberNames()) {
+    //           if (member == "age")
+    //           bbox_props[member] = vframe["bbox"]["object_det"][member].asInt();
+    //           if (member == "confidence")
+    //           bbox_props[member] = vframe["bbox"]["object_det"][member].asFloat();
+    //           if (member == "gender" || member == "emotion")
+    //           bbox_props[member] = vframe["bbox"]["object_det"][member].asString();
+    //           if (member == "frameW" || member == "frameH")
+    //           bbox_props[member] = vframe["bbox"]["object_det"][member].asInt();
+    //       }
+
+    //       curr_frame_metadata["bbox_props"] = bbox_props;
+
+    //       Json::Value bb_edge_props;
+    //       bb_edge_props[VDMS_DM_VID_IDX_PROP] = vframe["frameId"].asInt();
+    //       bb_edge_props[VDMS_DM_VID_NAME_PROP] = props[VDMS_VID_PATH_PROP];
+    //       bb_edge_props["server_filepath"] = props["Name"].asString();
+
+    //       curr_frame_metadata["bb_edge_props"] = bb_edge_props;
+
+    //       metadata_chunk[vframe["bbId"].asString()] = curr_frame_metadata;
+    //       bb_counter++;
+    //       bb_idx++;
+
+    //   }
+    //   counter++;
+    //   if (bb_counter == desired_chunk_size || bb_idx == num_bbs){
+    //       std::cout << "[DEBUG add_metadata_bg_vid] bb_counter: " << bb_counter << " bb_idx: " << bb_idx << " int(num_bbs/bb_count): " << desired_chunk_size <<
+    //                    "[DEBUG add_metadata_bg_vid] Chunk created for " << props["Name"].asString() << " and sending to add_metadata" << std::endl;
+    //       options["metadata"] = metadata_chunk;
+    //       options["Name"] = props["Name"].asString();
+    //       options_vector.push_back(options);
+
+    //       std::cout << "[DEBUG add_metadata_bg_vid] Chunk for " << props["Name"].asString() << " added to syncremoteOperation" << std::endl;
+    //       metadata_chunk.clear();
+    //       counter = 0;
+    //       bb_counter = 0;
+    //   }
+    // }
+    // VDMSThreadPool& pool = VDMSThreadPool::instance();
+    // for (auto opts : options_vector){
+    //   VCL::Video video_chunk(video);
+    //   // VDMSThreadPool::instance().enqueue([url, opts, &video]() {
+    //   pool.enqueue([url, opts, video_chunk]() mutable {
+    //       video_chunk.syncremoteOperation(url, opts);  // Run each chunk in thread
+    //       video_chunk.execute_operations();
+    //     });
+    // }
+
+
+    // std::cout << props["Name"].asString() << " ADDED TO THREAD" << std::endl;
+  }
+
+  return 0;
+}
+
+Json::Value AddVideo::construct_responses(Json::Value &response,
+                                          const Json::Value &json,
+                                          protobufs::queryMessage &query_res,
+                                          const std::string &blob) {
+  Json::Value ret;
+  ret[_cmd_name] = RSCommand::check_responses(response);
+
+  if (inserted_video_metadata.isMember("uid")){
+    std::cout << "[DEBUG VideoCommand] Creating metadata chunks for " << inserted_video_metadata["uid"] << std::endl;
+
+    VCL::Video video(inserted_video_metadata["uid"].asString());
+    Json::Value props = inserted_video_metadata["props"];
+    Json::Value video_metadata = inserted_video_metadata["metadata"];
 
     // Moved the chunk creation into VideoCommand
     std::string url = "http://udf-bkgd-service:5012/video";
@@ -277,11 +404,12 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
     options["uid"] = props[VDMS_BG_UNIQUE_VID_ID];
 
     const std::string &file_name =  props[VDMS_BG_UNIQUE_VID_ID].asString();
+    
 
     int curr_frame = 0;
     int counter = 0;
     int chunk_count = 3;
-    int num_bbs = video_metadata[0].size();
+    int num_bbs = video_metadata.size();
     int bb_idx = 0;
     int bb_counter = 0;
 
@@ -293,7 +421,7 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
 
     Json::Value metadata_chunk;
     std::vector<Json::Value> options_vector;
-    for (Json::Value vframe : video_metadata[0]) {
+    for (Json::Value vframe : video_metadata) {
       curr_frame++;
       Json::Value curr_frame_metadata;
       Json::Value frame_props;
@@ -361,6 +489,7 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
           bb_counter = 0;
       }
     }
+
     VDMSThreadPool& pool = VDMSThreadPool::instance();
     for (auto opts : options_vector){
       VCL::Video video_chunk(video);
@@ -374,16 +503,6 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
 
     std::cout << props["Name"].asString() << " ADDED TO THREAD" << std::endl;
   }
-
-  return 0;
-}
-
-Json::Value AddVideo::construct_responses(Json::Value &response,
-                                          const Json::Value &json,
-                                          protobufs::queryMessage &query_res,
-                                          const std::string &blob) {
-  Json::Value ret;
-  ret[_cmd_name] = RSCommand::check_responses(response);
 
   return ret;
 }

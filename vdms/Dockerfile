@@ -1,6 +1,6 @@
 FROM intellabs/vdms:v2.11.0
 
-# COPY VideoCommand.h /vdms/src/
+COPY VideoCommand.h /vdms/src/
 COPY VideoCommand.cc /vdms/src/
 COPY Video.cc /vdms/src/vcl/
 COPY Video.h /vdms/include/vcl/
