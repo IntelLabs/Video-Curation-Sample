@@ -45,6 +45,21 @@ PROCESSING_DEFAULT_DICT = {
     "UDF face db.query runtime (s)": 0,
     "UDF face run func runtime (s)": 0,
     "Bkgd UDF runtime (s)": 0,
+    "video": "",
+    "video duration (s)": 0,
+    "video fps": 0,
+    "video frames": 0,
+    "video expected clips": 0,
+    "target frames": 0,
+    "frames received": 0,
+    "target fps": 0,
+    "target expected clips": 0,
+    "received expected clips": 0,
+    "frames processed": 0,
+    "stream send elapsed time (s)": 0,
+    "stream processing time (s)": 0,
+    "delta stream start to processing start (s)": 0,
+    "delta stream end to processing end (s)": 0,
 }
 
 
@@ -249,7 +264,11 @@ def get_overall_details(info_details, out_log_file):
         app_start_time = info_details["start_watchandsend"]
 
     if "end_watchandsend" not in info_details:
-        app_end_time = info_details["Max Timestamp"]
+        app_end_time = (
+            info_details["Completed processing"]
+            if "Completed processing" in info_details
+            else info_details["Max Timestamp"]
+        )
     else:
         app_end_time = info_details["end_watchandsend"]
 
@@ -452,9 +471,12 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
             )
 
         elif ".mp4" in key:
-            camera_name = key.split("_")[0]
-            if "num clips" not in camera_info[camera_name]:
-                camera_info[camera_name].update(PROCESSING_DEFAULT_DICT)
+            camera_name = "_".join(key.split("_")[:-1])  # key.split("_")[0]
+            if camera_name not in camera_info:
+                camera_info.setdefault(camera_name, PROCESSING_DEFAULT_DICT)
+            for k, v in PROCESSING_DEFAULT_DICT.items():
+                if k not in camera_info[camera_name]:
+                    camera_info[camera_name][k] = v
 
             camera_info[camera_name]["num clips"] += 1
 
@@ -591,8 +613,9 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                     stat_cols.append(k)
         stat_cols = sorted(stat_cols)
 
-        if "num clips" not in cam_dict:
-            cam_dict.update(PROCESSING_DEFAULT_DICT)
+        for k, v in PROCESSING_DEFAULT_DICT.items():
+            if k not in cam_dict:
+                cam_dict[k] = v
 
         # if "Log VDMS crashes" in app_info:
         #     cam_dict["Log VDMS crashes"] += int(app_info["Log VDMS crashes"])
@@ -932,7 +955,7 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                     info.setdefault(stream_name, {})
                     info[stream_name][method_name] = float(timestamp)
                     min_timestamp = min(min_timestamp, float(timestamp))
-                    max_timestamp = max(max_timestamp, float(timestamp))
+                    # max_timestamp = max(max_timestamp, float(timestamp))
                     del_camera_names = remove_value_from_list(
                         del_camera_names, stream_name
                     )
@@ -1029,7 +1052,7 @@ def main(args):
     # df.fillna("N/A", inplace=True)
 
     # Remove lines with 0 frames processed
-    df.drop(df[df["frames processed"] == 0].index, inplace=True)
+    # df.drop(df[df["frames processed"] == 0].index, inplace=True)
 
     # Write to file
     df.to_csv(args.csv_file, index=False)

@@ -722,7 +722,7 @@ class VideoStream:
                     clip_id,  # Clip number
                     clip_filename,
                     tmp_file,
-                    frame,  # Frame
+                    frame.copy(),  # Frame
                 )
                 # self.frame_queue.put(queue_details)
                 self.inference_queue.put(queue_details)
