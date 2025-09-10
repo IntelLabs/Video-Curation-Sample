@@ -1,5 +1,6 @@
 import os
 from time import sleep, time
+from random import randint
 
 import vdms
 
@@ -90,7 +91,7 @@ def run(ipfilename, format, options, tmp_dir_path):
     # Make sure video exists first
     # If not (after few retries), skip adding BBs and move on
     # If so, continue processing BBs
-    response = retry_query(db, query, sleep_timer=3)
+    response = retry_query(db, query, sleep_timer=randint(1, 5))
 
     if (
         "FailedCommand" in response[0]
@@ -168,7 +169,7 @@ def run(ipfilename, format, options, tmp_dir_path):
 
         # response, res_arr = db.query(query, [[]])
         # print(response)
-        response = retry_query(db, query, sleep_timer=3)
+        response = retry_query(db, query, sleep_timer=randint(1, 5))
 
         if DEBUG == "1":
             print(

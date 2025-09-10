@@ -8,6 +8,7 @@ import time  # time library
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from random import randint
 
 import cv2  # OpenCV library
 from openvino.runtime import Core
@@ -39,6 +40,7 @@ DEVICE = os.getenv("DEVICE", "CPU")
 INGESTION = os.getenv("INGESTION", "object,face")
 # NUM_UDFS = int(os.getenv("NCURATIONS", 1))
 RESIZE_FLAG = str2bool(os.getenv("RESIZE_FLAG", False))
+OMIT_DETECTIONS_FLAG = str2bool(os.getenv("OMIT_DETECTIONS_FLAG", False))
 SHARED_OUTPUT = os.getenv("SHARED_OUTPUT", "/var/www/mp4")
 TEST_MODE = str2bool(os.getenv("TEST_FLAG", False))
 TMP_LOCATION = os.getenv("TMP_LOCATION", "/var/www/streams/")
@@ -290,11 +292,12 @@ def extract_metadata_from_results(
                     # OBJ_COUNTER.setdefault(class_name, 0)
                     # OBJ_COUNTER[class_name] += 1
                     # current_cnt = OBJ_COUNTER[class_name]
-                    print(
-                        # f"[OBJECT DETECTION] {class_name} detected in frame {frameNum} (Total detected: {current_cnt})",
-                        f"[{stream_name} OBJECT DETECTION] {class_name} detected",
-                        flush=True,
-                    )
+                    if not OMIT_DETECTIONS_FLAG:
+                        print(
+                            # f"[OBJECT DETECTION] {class_name} detected in frame {frameNum} (Total detected: {current_cnt})",
+                            f"[{stream_name} OBJECT DETECTION] Frame {frameNum}: {class_name} detected",
+                            flush=True,
+                        )
 
                     framenum_str = f"{frameNum:04d}_{oidx:04d}"
                     if DEBUG_FLAG:
@@ -451,7 +454,7 @@ def get_udf_query(
         )
     try:
         # res, _ = db.query([query])
-        res = retry_query([query], sleep_timer=3)
+        res = retry_query([query], sleep_timer=randint(1, 5))
 
         if DEBUG_FLAG:
             print(

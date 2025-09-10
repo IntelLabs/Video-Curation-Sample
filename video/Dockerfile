@@ -11,9 +11,8 @@ RUN apt-get update && \
 RUN python3 -m venv ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-COPY remote_function /home/remote_function
 COPY resources /home/resources
-COPY requirements.txt /home/requirements.txt
+COPY requirements.* /home/
 
 ARG DEVICE="CPU"
 ENV DEVICE="${DEVICE}"
@@ -25,7 +24,7 @@ RUN pip3 install pip --upgrade && \
         pip3 install torch torchvision; \
     fi;
 RUN pip3 install -r /home/requirements.txt && \
-    pip3 install -r /home/remote_function/requirements.${DEVICE}.txt
+    pip3 install -r /home/requirements.${DEVICE}.txt
 
 RUN omz_downloader --list /home/resources/models/models.lst -o /home/resources/models --precisions FP16
 
