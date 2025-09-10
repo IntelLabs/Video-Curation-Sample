@@ -92,6 +92,14 @@ if(NOT (RESIZE_FLAG STREQUAL "True" OR RESIZE_FLAG STREQUAL "False"))
   set(RESIZE_FLAG "False")
 endif()
 
+if (NOT DEFINED OMIT_DETECTIONS_FLAG)
+    set(OMIT_DETECTIONS_FLAG "False")
+endif()
+
+if(NOT (OMIT_DETECTIONS_FLAG STREQUAL "True" OR OMIT_DETECTIONS_FLAG STREQUAL "False"))
+  set(OMIT_DETECTIONS_FLAG "False")
+endif()
+
 if (NOT DEFINED NCPU)
     set(NCPU 0)
 endif()
@@ -118,6 +126,6 @@ endforeach()
 execute_process(COMMAND printf "\n\nThis script will build third party components licensed under various open source licenses into your container images. The terms under which those components may be used and distributed can be found with the license document that is provided with those components. Please familiarize yourself with those terms to ensure your distribution of those components complies with the terms of those licenses.\n\n")
 
 execute_process(COMMAND printf "PLATFORM=${PLATFORM}, NSTREAMS=${NSTREAMS}, NCURATIONS=${NCURATIONS}, INGESTION=${INGESTION}\n")
-execute_process(COMMAND printf "IN_SOURCE=${IN_SOURCE}, NCPU=${NCPU}, DEVICE=${DEVICE}, DEBUG=${DEBUG}, RESIZE_FLAG=${RESIZE_FLAG}\n")
+execute_process(COMMAND printf "IN_SOURCE=${IN_SOURCE}, NCPU=${NCPU}, DEVICE=${DEVICE}, DEBUG=${DEBUG}, RESIZE_FLAG=${RESIZE_FLAG}, OMIT_DETECTIONS_FLAG=${OMIT_DETECTIONS_FLAG}\n")
 execute_process(COMMAND printf "DOCKER_TAR=${DOCKER_TAR}, DOCKER_TAR_DIR=${DOCKER_TAR_DIR}, REGISTRY=${REGISTRY}, MODEL_NAME=${MODEL_NAME}, CUSTOM_MODEL_FLAG=${CUSTOM_MODEL_FLAG}\n\n")
 

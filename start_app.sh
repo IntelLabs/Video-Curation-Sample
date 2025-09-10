@@ -14,6 +14,7 @@ DEBUG="0"
 DEVICE="CPU"
 DOCKER_TAR="0"
 RESIZE_FLAG="False"
+OMIT_DETECTIONS_FLAG="False"
 MODEL_NAME=""
 
 DIR=$(dirname $(readlink -f "$0"))
@@ -28,6 +29,7 @@ LONG_LIST=(
     "ncurations:"
     "nstreams:"
     "ncpu:"
+    "omit-det"
     "source:"
     "debug"
     "device:"
@@ -37,7 +39,7 @@ LONG_LIST=(
 OPTS=$(getopt \
     --longoptions "$(printf "%s," "${LONG_LIST[@]}")" \
     --name "$(basename "$0")" \
-    --options "hdlzi:t:r:m:n:v:c:s:e:" \
+    --options "hdlozi:t:r:m:n:v:c:s:e:" \
     -- "$@"
 )
 
@@ -66,6 +68,7 @@ script_usage()
         -l or --tars        optional    Flag to load docker images instead of building from Dockerfiles
         -m or --model       optional    Custom YOLO model name (<model name>.pt). If not provided model YOLO11n is used.
         -n or --ncurations  optional    Number of ingestion containers [Default: 1]
+        -o or --omit-det    optional    By default, object detections are printed. To omit printing detections to screen, enable flag.
         -r or --registry    optional    Registry [Default: None]
         -s or --source      optional    Input source type (videos, stream) [Default: stream]
         -t or --type        optional    Deployment method (compose) [Default: compose]
@@ -90,6 +93,7 @@ while true; do
         -t | --type) shift; EXP_TYPE="$1"; shift ;;
         -v | --nstreams) shift; NSTREAMS=$1; shift ;;
         -z | --resize) shift; RESIZE_FLAG="True" ;;
+        -o | --omit-det) shift; OMIT_DETECTIONS_FLAG="True" ;;
         --) shift; break ;;
         *) script_usage; exit 0 ;;
     esac
@@ -110,6 +114,7 @@ if [ $REGISTRY == "None" ]; then
         -DNCURATIONS=$NCURATIONS \
         -DNSTREAMS=$NSTREAMS \
         -DRESIZE_FLAG=$RESIZE_FLAG \
+        -DOMIT_DETECTIONS_FLAG=$OMIT_DETECTIONS_FLAG \
         -DMODEL_NAME=$MODEL_NAME \
         ..
 else
@@ -123,6 +128,7 @@ else
         -DNCURATIONS=$NCURATIONS \
         -DNSTREAMS=$NSTREAMS \
         -DRESIZE_FLAG=$RESIZE_FLAG \
+        -DOMIT_DETECTIONS_FLAG=$OMIT_DETECTIONS_FLAG \
         -DMODEL_NAME=$MODEL_NAME \
         -DREGISTRY=$REGISTRY \
         ..

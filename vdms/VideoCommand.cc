@@ -390,7 +390,7 @@ Json::Value AddVideo::construct_responses(Json::Value &response,
   ret[_cmd_name] = RSCommand::check_responses(response);
 
   if (inserted_video_metadata.isMember("uid")){
-    std::cout << "[DEBUG VideoCommand] Creating metadata chunks for " << inserted_video_metadata["uid"] << std::endl;
+    // std::cout << "[DEBUG VideoCommand] Creating metadata chunks for " << inserted_video_metadata["uid"] << std::endl;
 
     VCL::Video video(inserted_video_metadata["uid"].asString());
     Json::Value props = inserted_video_metadata["props"];
@@ -476,8 +476,8 @@ Json::Value AddVideo::construct_responses(Json::Value &response,
       }
       counter++;
       if (bb_counter == desired_chunk_size || bb_idx == num_bbs){
-          std::cout << "[DEBUG add_metadata_bg_vid] bb_counter: " << bb_counter << " bb_idx: " << bb_idx << " int(num_bbs/bb_count): " << desired_chunk_size <<
-                       "[DEBUG add_metadata_bg_vid] Chunk created for " << props["Name"].asString() << " and sending to add_metadata" << std::endl;
+          // std::cout << "[DEBUG add_metadata_bg_vid] bb_counter: " << bb_counter << " bb_idx: " << bb_idx << " int(num_bbs/bb_count): " << desired_chunk_size <<
+          //              "[DEBUG add_metadata_bg_vid] Chunk created for " << props["Name"].asString() << " and sending to add_metadata" << std::endl;
           options["metadata"] = metadata_chunk;
           options["Name"] = props["Name"].asString();
           options_vector.push_back(options);
@@ -500,7 +500,7 @@ Json::Value AddVideo::construct_responses(Json::Value &response,
     }
 
 
-    std::cout << props["Name"].asString() << " ADDED TO THREAD" << std::endl;
+    // std::cout << props["Name"].asString() << " ADDED TO THREAD" << std::endl;
   }
 
   return ret;

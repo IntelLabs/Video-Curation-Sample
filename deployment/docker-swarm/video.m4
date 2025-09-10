@@ -22,6 +22,7 @@ define(`PROFILE_GPU', `depends_on:
             `MODEL_NAME': "defn(`MODEL_NAME')"
             `CUSTOM_MODEL_FLAG': "defn(`CUSTOM_MODEL_FLAG')"
             `RESIZE_FLAG': "defn(`RESIZE_FLAG')"
+            `OMIT_DETECTIONS_FLAG': "defn(`OMIT_DETECTIONS_FLAG')"
             CPU_BATCH_SIZE: 1
             GPU_BATCH_SIZE: 1
             `DEBUG': "defn(`DEBUG')"
