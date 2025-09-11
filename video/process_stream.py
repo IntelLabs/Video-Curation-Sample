@@ -31,6 +31,13 @@ def str2bool(in_val):
         return False
 
 
+def _sort_dict_by_frame(in_dict):
+    def _by_int(key):
+        return tuple(int(k) for k in key.split("_"))
+
+    return dict(sorted(in_dict.items(), key=lambda x: _by_int(x[0])))
+
+
 """ GENERAL VARIABLES """
 CODE_DIR = os.getenv("CODE_DIR", "/home")
 CUSTOM_MODEL_FLAG = str2bool(os.getenv("CUSTOM_MODEL_FLAG", False))
@@ -74,9 +81,10 @@ else:
 # elif hasattr(os, "sched_getaffinity"):
 #     num_usuable_cpus = len(os.sched_getaffinity(0))
 # else:
-num_usuable_cpus = os.cpu_count()
-db = vdms.vdms()
-db.connect(DBHOST, DBPORT)
+num_usuable_cpus = 2  # os.cpu_count()
+if not TEST_MODE:
+    db = vdms.vdms()
+    db.connect(DBHOST, DBPORT)
 
 if DEVICE == "GPU":
     model_path += ".engine"
@@ -531,18 +539,48 @@ def metadata2vdms(
         "category": "video_path_rop",
     }
 
-    for ingest_mode in INGESTION.split(","):
-        get_udf_query(
-            # db,
-            # start_t,
-            clip_filename,
-            properties,
-            ingest_mode,
-            (width, height),
-            id="udf_metadata",
-            metadata=clip_metadata[ingest_mode],
-            test_mode=TEST_MODE,
-        )
+    # for ingest_mode in INGESTION.split(","):
+    #     get_udf_query(
+    #         # db,
+    #         # start_t,
+    #         clip_filename,
+    #         properties,
+    #         ingest_mode,
+    #         (width, height),
+    #         id="udf_metadata",
+    #         metadata=clip_metadata[ingest_mode],
+    #         test_mode=TEST_MODE,
+    #     )
+
+    all_metadata = clip_metadata["object"] if "object" in clip_metadata else {}
+    if "face" in clip_metadata:
+        for face_frameidx_bbidx, value in clip_metadata["face"].items():
+            face_frameidx, face_bbidx = face_frameidx_bbidx.split("_")
+            max_obj_idx = 0
+            for obj_frameidx_bbidx in all_metadata:
+                if face_frameidx in obj_frameidx_bbidx:
+                    _, obj_bbidx_ = obj_frameidx_bbidx.split("_")
+                    max_obj_idx = max(max_obj_idx, int(obj_bbidx_))
+
+            if max_obj_idx > 0:
+                new_face_bbidx = max_obj_idx + 1
+                new_key = f"{face_frameidx}_{new_face_bbidx:04d}"
+                all_metadata[new_key] = value
+                all_metadata[new_key]["bbId"] = new_key
+            else:
+                all_metadata[face_frameidx_bbidx] = value
+
+    all_metadata = _sort_dict_by_frame(all_metadata)
+    get_udf_query(
+        clip_filename,
+        properties,
+        INGESTION.replace(",", " "),
+        (width, height),
+        id="udf_metadata",
+        metadata=all_metadata,
+        test_mode=TEST_MODE,
+    )
+
     if DEBUG == "1":
         print(
             f"[TIMING],end_clip_metadata,{clip_key},{time.time()}",
@@ -675,7 +713,6 @@ class VideoStream:
         self.get_frameWH()
 
         self._out_vid = None
-        self.all_metadata = {}
         self.clip_end_frame = {}
         self.clip_filename = ""
         self.clip_frame_count = 0
@@ -765,34 +802,6 @@ class VideoStream:
         self.clip_end_frame[clip_key] = frameNum
         return _out_vid
 
-    # method to run inference on frame and store metadata
-    def frame_inference(self, clip_key, clip_frame_idx, frame):
-        if DEBUG == "1":
-            print(
-                f"[TIMING],start_infer_worker,{clip_key}-{clip_frame_idx},{time.time()}",
-                flush=True,
-            )
-        metadata, metadata_face = infer_worker(
-            self.stream_name,
-            clip_frame_idx,
-            frame,
-            # model_path,
-            (self.width, self.height),
-            INGESTION,
-            fps=self.target_fps,
-        )
-        if DEBUG == "1":
-            print(
-                f"[TIMING],end_infer_worker,{clip_key},{time.time()}",
-                flush=True,
-            )
-        self.all_metadata.setdefault(clip_key, {})
-        self.all_metadata[clip_key].setdefault("object", {})
-        self.all_metadata[clip_key]["object"].update(metadata)
-        self.all_metadata[clip_key].setdefault("face", {})
-        self.all_metadata[clip_key]["face"].update(metadata_face)
-        self.num_frames_processed += 1
-
 
 """ MAIN FUNCTION """
 
@@ -817,6 +826,7 @@ if __name__ == "__main__":
     tmp_file = ""
     clip_id = 0
     frameNum = 0
+    all_metadata = {}
     while True:
         try:
             queue_details = webcam_stream.inference_queue.get()
@@ -837,7 +847,7 @@ if __name__ == "__main__":
                         metadata2vdms(
                             clip_key,
                             clip_filename,
-                            webcam_stream.all_metadata[clip_key],
+                            all_metadata,
                             webcam_stream.width,
                             webcam_stream.height,
                         )
@@ -864,6 +874,7 @@ if __name__ == "__main__":
                     fps=webcam_stream.target_fps,
                     frameSize=(webcam_stream.width, webcam_stream.height),
                 )
+                all_metadata = {}
                 if DEBUG == "1":
                     print(
                         f"[TIMING],Start new clip,{clip_key},{time.time()}",
@@ -893,11 +904,10 @@ if __name__ == "__main__":
                     f"[TIMING],end_infer_worker,{clip_key},{time.time()}",
                     flush=True,
                 )
-            webcam_stream.all_metadata.setdefault(clip_key, {})
-            webcam_stream.all_metadata[clip_key].setdefault("object", {})
-            webcam_stream.all_metadata[clip_key]["object"].update(metadata)
-            webcam_stream.all_metadata[clip_key].setdefault("face", {})
-            webcam_stream.all_metadata[clip_key]["face"].update(metadata_face)
+            all_metadata.setdefault("object", {})
+            all_metadata["object"].update(metadata)
+            all_metadata.setdefault("face", {})
+            all_metadata["face"].update(metadata_face)
             webcam_stream.num_frames_processed += 1
 
             # Save video and send metadata
@@ -909,7 +919,7 @@ if __name__ == "__main__":
                 metadata2vdms(
                     clip_key,
                     clip_filename,
-                    webcam_stream.all_metadata[clip_key],
+                    all_metadata,
                     webcam_stream.width,
                     webcam_stream.height,
                 )
