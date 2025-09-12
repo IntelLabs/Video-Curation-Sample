@@ -1,6 +1,6 @@
 import os
-from time import sleep, time
 from random import randint
+from time import sleep, time
 
 import vdms
 

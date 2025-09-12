@@ -43,17 +43,17 @@ class SearchHandler(web.RequestHandler):
         return None
 
     def _construct_single_query(self, query1, ref):
-        # q_vid = {
-        #     "FindVideo": {
-        #         "_ref": ref,
-        #         "constraints": {
-        #             "category": ["==", "video_path_rop"],
-        #         },
-        #         "results": {"list": ["Name"], "blob": False},
-        #         # "results": {"list": ['video_name', "video_filename"]},
-        #         # "results": {"list": ["fps", "duration", "width", "height"]}
-        #     }
-        # }
+        q_vid = {
+            "FindVideo": {
+                "_ref": ref,
+                "constraints": {
+                    "category": ["==", "video_path_rop"],
+                },
+                "results": {"list": ["Name"], "blob": False},
+                # "results": {"list": ['video_name', "video_filename"]},
+                # "results": {"list": ["fps", "duration", "width", "height"]}
+            }
+        }
         # q_vid2 = {
         #     "FindEntity": {
         #         "_ref": ref + 1,
@@ -92,6 +92,18 @@ class SearchHandler(web.RequestHandler):
                     }
                 )
 
+            elif name == "*":
+                q_vid["FindVideo"].update(
+                    {
+                        "results": {
+                            "list": [
+                                "Name",
+                            ],
+                        }
+                    }
+                )
+                return [q_vid]
+
         metaconstraints = {}
         if query1["name"] == "object":
             metaconstraints["objectID"] = ["==", self._value(query1, "Object List")]
@@ -121,8 +133,43 @@ class SearchHandler(web.RequestHandler):
 
     def _decode_response(self, response):
         clips = {}
+        segs = []
         for i in range(0, len(response), 1):
-            if (
+            # bb_condition = (
+            #     "FindBoundingBox" in response[i]
+            #     and response[i]["FindBoundingBox"]["status"] == 0
+            #     and "entities" in response[i]["FindBoundingBox"]
+            # )
+            # video_condition = False
+            # if "FindVideo" in response[i]:
+            #     video_condition = (
+            #         "FindVideo" in response[i]
+            #         and response[i]["FindVideo"]["status"] == 0
+            #     )
+
+            if "FindVideo" in response[i] and response[i]["FindVideo"]["status"] == 0:
+                entities = response[i]["FindVideo"]["entities"]
+                print(entities)
+
+                for ent in entities:
+                    name = ent["Name"]
+                    r = get(vdhost + "/api/info", params={"video": name}).json()
+                    duration = r["duration"]  # ent["duration"]
+                    seg1c = {
+                        "name": name,
+                        "stream": quote("/api/segment/0/" + str(duration) + "/" + name),
+                        "thumbnail": quote("/api/thumbnail/0/" + name + ".png"),
+                        "fps": r["fps"],
+                        "time": 0,
+                        "duration": duration,
+                        "offset": 0,
+                        "width": r["width"],
+                        "height": r["height"],
+                        "frames": [x for x in range(0, r["frame_count"])],
+                    }
+                    segs.append(seg1c)
+
+            elif (
                 "FindBoundingBox" in response[i]
                 and response[i]["FindBoundingBox"]["status"] == 0
                 and "entities" in response[i]["FindBoundingBox"]
@@ -193,35 +240,42 @@ class SearchHandler(web.RequestHandler):
                             obj["detection"]["confidence"] = ent_bbox["confidence"]
                         stream1["frames"][ts]["objects"].append(obj)
 
-        print("clips:", flush=True)
-        print(clips, flush=True)
+                print("clips:", flush=True)
+                print(clips, flush=True)
 
-        # create segments
-        segs = []
-        for name in clips:
-            stream1 = clips[name]
-            for seg1 in stream1["segs"]:
-                seg1c = {  # var "data" used in playback.js
-                    "name": name,
-                    "stream": quote(
-                        "/api/segment/" + str(seg1[0]) + "/" + str(seg1[1]) + "/" + name
-                    ),
-                    "thumbnail": quote(
-                        "/api/thumbnail/" + str(seg1[0]) + "/" + name + ".png"
-                    ),
-                    "fps": stream1["fps"],
-                    "time": seg1[0],
-                    "duration": seg1[1] - seg1[0],
-                    "offset": 0,
-                    "width": stream1["width"],
-                    "height": stream1["height"],
-                    "frames": [],
-                }
-                for ts in stream1["frames"]:
-                    if ts >= seg1[0] and ts <= seg1[1]:
-                        stream1["frames"][ts].update({"time": (ts - seg1[0]) * 1000})
-                        seg1c["frames"].append(stream1["frames"][ts])
-                segs.append(seg1c)
+                # create segments
+                segs = []
+                for name in clips:
+                    stream1 = clips[name]
+                    for seg1 in stream1["segs"]:
+                        seg1c = {  # var "data" used in playback.js
+                            "name": name,
+                            "stream": quote(
+                                "/api/segment/"
+                                + str(seg1[0])
+                                + "/"
+                                + str(seg1[1])
+                                + "/"
+                                + name
+                            ),
+                            "thumbnail": quote(
+                                "/api/thumbnail/" + str(seg1[0]) + "/" + name + ".png"
+                            ),
+                            "fps": stream1["fps"],
+                            "time": seg1[0],
+                            "duration": seg1[1] - seg1[0],
+                            "offset": 0,
+                            "width": stream1["width"],
+                            "height": stream1["height"],
+                            "frames": [],
+                        }
+                        for ts in stream1["frames"]:
+                            if ts >= seg1[0] and ts <= seg1[1]:
+                                stream1["frames"][ts].update(
+                                    {"time": (ts - seg1[0]) * 1000}
+                                )
+                                seg1c["frames"].append(stream1["frames"][ts])
+                        segs.append(seg1c)
 
         print("segs:", flush=True)
         print(segs, flush=True)

@@ -7,6 +7,7 @@ import sys
 import time  # time library
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from random import randint
 
@@ -49,6 +50,7 @@ INGESTION = os.getenv("INGESTION", "object,face")
 RESIZE_FLAG = str2bool(os.getenv("RESIZE_FLAG", False))
 OMIT_DETECTIONS_FLAG = str2bool(os.getenv("OMIT_DETECTIONS_FLAG", False))
 SHARED_OUTPUT = os.getenv("SHARED_OUTPUT", "/var/www/mp4")
+Path(SHARED_OUTPUT).mkdir(parents=True, exist_ok=True)
 TEST_MODE = str2bool(os.getenv("TEST_FLAG", False))
 TMP_LOCATION = os.getenv("TMP_LOCATION", "/var/www/streams/")
 UDF_HOST = os.getenv("UDF_HOST", "video-service")
@@ -96,6 +98,9 @@ else:
 
 device_input = DEVICE.lower() if DEVICE == "CPU" else os.environ["CUDA_VISIBLE_DEVICES"]
 
+all_metadata = {}
+create_clip_queue = mp.Queue()
+
 
 def retry_query(query, num_retries: int = LOCKTIMEOUT_RETRIES, sleep_timer: int = 0):
     for ridx in range(num_retries + 1):
@@ -122,49 +127,140 @@ def retry_query(query, num_retries: int = LOCKTIMEOUT_RETRIES, sleep_timer: int 
     return response
 
 
-""" MODEL DEFINITIONS """
-model = YOLO(model_path, verbose=False, task="detect")
+def load_models():
+    # OBJECT DETECTION
+    model = YOLO(model_path, verbose=False, task="detect")
+
+    # FACE, AGE, GENDER, AND EMOTIONS
+    ie = Core()
+    face_detection_model_xml = f"{CODE_DIR}/resources/models/intel/face-detection-adas-0001/{MODEL_PRECISION}/face-detection-adas-0001.xml"
+    face_detection_model = ie.read_model(
+        model=face_detection_model_xml,
+        weights=face_detection_model_xml.replace(".xml", ".bin"),
+    )
+    # face_det_w, face_det_h = 672, 384
+    _, face_det_c, face_det_h, face_det_w = face_detection_model.inputs[0].shape
+    face_det_compiled_model = ie.compile_model(face_detection_model, DEVICE_OV)
+
+    age_gender_classification_model_xml = f"{CODE_DIR}/resources/models/intel/age-gender-recognition-retail-0013/{MODEL_PRECISION}/age-gender-recognition-retail-0013.xml"
+    age_gender_classification_model = ie.read_model(
+        model=age_gender_classification_model_xml,
+        weights=age_gender_classification_model_xml.replace(".xml", ".bin"),
+    )
+    # ag_w, ag_h = 62, 62
+    _, ag_c, ag_h, ag_w = age_gender_classification_model.inputs[0].shape
+    ag_compiled_model = ie.compile_model(age_gender_classification_model, DEVICE_OV)
+
+    emotions_classification_model_xml = f"{CODE_DIR}/resources/models/intel/emotions-recognition-retail-0003/{MODEL_PRECISION}/emotions-recognition-retail-0003.xml"
+    emotions_classification_model = ie.read_model(
+        model=emotions_classification_model_xml,
+        weights=emotions_classification_model_xml.replace(".xml", ".bin"),
+    )
+    # em_w, em_h = 64, 64
+    _, em_c, em_h, em_w = emotions_classification_model.inputs[0].shape
+    em_compiled_model = ie.compile_model(emotions_classification_model, DEVICE_OV)
+
+    return (
+        model,
+        [face_det_compiled_model, ag_compiled_model, em_compiled_model],
+        [face_det_c, face_det_h, face_det_w],
+        [ag_c, ag_h, ag_w],
+        [em_c, em_h, em_w],
+    )
 
 
-ie = Core()
-face_detection_model_xml = f"{CODE_DIR}/resources/models/intel/face-detection-adas-0001/{MODEL_PRECISION}/face-detection-adas-0001.xml"
-face_detection_model = ie.read_model(
-    model=face_detection_model_xml,
-    weights=face_detection_model_xml.replace(".xml", ".bin"),
-)
-# face_det_w, face_det_h = 672, 384
-_, face_det_c, face_det_h, face_det_w = face_detection_model.inputs[0].shape
-face_det_compiled_model = ie.compile_model(face_detection_model, DEVICE_OV)
-
-age_gender_classification_model_xml = f"{CODE_DIR}/resources/models/intel/age-gender-recognition-retail-0013/{MODEL_PRECISION}/age-gender-recognition-retail-0013.xml"
-age_gender_classification_model = ie.read_model(
-    model=age_gender_classification_model_xml,
-    weights=age_gender_classification_model_xml.replace(".xml", ".bin"),
-)
-# ag_w, ag_h = 62, 62
-_, ag_c, ag_h, ag_w = age_gender_classification_model.inputs[0].shape
-ag_compiled_model = ie.compile_model(age_gender_classification_model, DEVICE_OV)
-
-emotions_classification_model_xml = f"{CODE_DIR}/resources/models/intel/emotions-recognition-retail-0003/{MODEL_PRECISION}/emotions-recognition-retail-0003.xml"
-emotions_classification_model = ie.read_model(
-    model=emotions_classification_model_xml,
-    weights=emotions_classification_model_xml.replace(".xml", ".bin"),
-)
-# em_w, em_h = 64, 64
-_, em_c, em_h, em_w = emotions_classification_model.inputs[0].shape
-em_compiled_model = ie.compile_model(emotions_classification_model, DEVICE_OV)
+model, face_models, face_det_CHW, ag_CHW, em_CHW = load_models()
 
 
 """ DETECTION FUNCTIONS """
 
 
+# Extract metadata from object model results
+def extract_metadata_from_results(
+    stream_name, frameNum, results, img_size, fps=TARGET_FPS
+):
+    fW, fH = img_size
+    metadata = dict()
+    try:
+        for _, result in enumerate(results):
+            # GET METADATA FOR CLIP
+            boxes = result.boxes.cpu()
+            oidx = 0
+            for box in boxes:
+                confidence = float(box.conf.item())
+                if confidence > DETECTION_THRESHOLD:
+                    class_id = int(box.cls.item())
+                    class_name = str(result.names[class_id])
+
+                    if not OMIT_DETECTIONS_FLAG:
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                        print(
+                            # f"[OBJECT DETECTION] {class_name} detected in frame {frameNum} (Total detected: {current_cnt})",
+                            f"[{timestamp}] {stream_name} DETECTION on Frame {frameNum}: {class_name} detected",
+                            flush=True,
+                        )
+                    x1, y1, x2, y2 = box.xyxy.tolist()[0]
+                    height = min(y2, fH) - max(0, y1)
+                    width = min(x2, fW) - max(0, x1)
+                    object_res = [
+                        x1,
+                        y1,
+                        height,
+                        width,
+                        result.names[class_id],
+                        confidence,
+                        fH,
+                        fW,
+                    ]
+                    # OBJ_COUNTER.setdefault(class_name, 0)
+                    # OBJ_COUNTER[class_name] += 1
+                    # current_cnt = OBJ_COUNTER[class_name]
+
+                    framenum_str = f"{frameNum:04d}_{oidx:04d}"
+                    if DEBUG_FLAG:
+                        meta_str = ",".join(
+                            [str(o) for o in object_res + [framenum_str]]
+                        )
+                        print(f"[{stream_name} METADATA],{meta_str}", flush=True)
+
+                    metadata[framenum_str] = {
+                        "frameId": frameNum,
+                        "bbId": framenum_str,
+                        "bbox": {
+                            "x": int(object_res[0]),
+                            "y": int(object_res[1]),
+                            "height": int(object_res[2]),
+                            "width": int(object_res[3]),
+                            "object": str(object_res[4]),
+                            "object_det": {
+                                "confidence": float(object_res[5]),
+                                "frameH": int(fH),
+                                "frameW": int(fW),
+                            },
+                        },
+                    }
+                    oidx += 1
+
+    except Exception:
+        e = traceback.format_exc()
+        print(f"Error in {stream_name} extract_metadata_from_results: {e}", flush=True)
+
+    return metadata
+
+
 # Detect faces from frame
-def face_detection(stream_name, frameNum, frame, img_size):
+def face_detection(
+    stream_name, frameNum, frame, img_size, face_models, face_det_CHW, ag_CHW, em_CHW
+):
+    face_det_compiled_model, ag_compiled_model, em_compiled_model = face_models
+    face_det_c, face_det_h, face_det_w = face_det_CHW
+    ag_c, ag_h, ag_w = ag_CHW
+    em_c, em_h, em_w = em_CHW
     W, H = img_size
     bs = 1
     # Model expects BGRA
     # face detect -> age-gender -> emotions
-    global face_det_compiled_model, ag_compiled_model, em_compiled_model
+    # global face_det_compiled_model, ag_compiled_model, em_compiled_model
     genders = ["female", "male"]
     emotions = ["neutral", "happy", "sad", "surprise", "anger"]
 
@@ -268,77 +364,6 @@ def face_detection(stream_name, frameNum, frame, img_size):
     return metadata
 
 
-# Extract metadata from object model results
-def extract_metadata_from_results(
-    stream_name, frameNum, results, img_size, fps=TARGET_FPS
-):
-    fW, fH = img_size
-    metadata = dict()
-    try:
-        for _, result in enumerate(results):
-            # GET METADATA FOR CLIP
-            boxes = result.boxes.cpu()
-            oidx = 0
-            for box in boxes:
-                confidence = float(box.conf.item())
-                if confidence > DETECTION_THRESHOLD:
-                    class_id = int(box.cls.item())
-                    x1, y1, x2, y2 = box.xyxy.tolist()[0]
-                    height = min(y2, fH) - max(0, y1)
-                    width = min(x2, fW) - max(0, x1)
-                    object_res = [
-                        x1,
-                        y1,
-                        height,
-                        width,
-                        result.names[class_id],
-                        confidence,
-                        fH,
-                        fW,
-                    ]
-                    class_name = str(object_res[4])
-                    # OBJ_COUNTER.setdefault(class_name, 0)
-                    # OBJ_COUNTER[class_name] += 1
-                    # current_cnt = OBJ_COUNTER[class_name]
-                    if not OMIT_DETECTIONS_FLAG:
-                        print(
-                            # f"[OBJECT DETECTION] {class_name} detected in frame {frameNum} (Total detected: {current_cnt})",
-                            f"[{stream_name} OBJECT DETECTION] Frame {frameNum}: {class_name} detected",
-                            flush=True,
-                        )
-
-                    framenum_str = f"{frameNum:04d}_{oidx:04d}"
-                    if DEBUG_FLAG:
-                        meta_str = ",".join(
-                            [str(o) for o in object_res + [framenum_str]]
-                        )
-                        print(f"[{stream_name} METADATA],{meta_str}", flush=True)
-
-                    metadata[framenum_str] = {
-                        "frameId": frameNum,
-                        "bbId": framenum_str,
-                        "bbox": {
-                            "x": int(object_res[0]),
-                            "y": int(object_res[1]),
-                            "height": int(object_res[2]),
-                            "width": int(object_res[3]),
-                            "object": str(object_res[4]),
-                            "object_det": {
-                                "confidence": float(object_res[5]),
-                                "frameH": int(fH),
-                                "frameW": int(fW),
-                            },
-                        },
-                    }
-                    oidx += 1
-
-    except Exception:
-        e = traceback.format_exc()
-        print(f"Error in {stream_name} extract_metadata_from_results: {e}", flush=True)
-
-    return metadata
-
-
 # Inference Function
 def infer_worker(
     stream_name,
@@ -348,7 +373,10 @@ def infer_worker(
     INGESTION,
     fps=TARGET_FPS,
 ):  # img_size:(W,H)
-    global model
+    # global model
+    # Load models
+    # model, face_models, face_det_CHW, ag_CHW, em_CHW = load_models()
+    global model, face_models, face_det_CHW, ag_CHW, em_CHW
 
     height, width = frame.shape[:2]
     if (width, height) != img_size:
@@ -368,13 +396,21 @@ def infer_worker(
             verbose=False,
             stream=True,
         )
-
         metadata = extract_metadata_from_results(
             stream_name, frameNum, results, img_size, fps=fps
         )
 
     if "face" in INGESTION:
-        metadata_face = face_detection(stream_name, frameNum, frame, img_size)
+        metadata_face = face_detection(
+            stream_name,
+            frameNum,
+            frame,
+            img_size,
+            face_models,
+            face_det_CHW,
+            ag_CHW,
+            em_CHW,
+        )
 
     return metadata, metadata_face
 
@@ -552,12 +588,12 @@ def metadata2vdms(
     #         test_mode=TEST_MODE,
     #     )
 
-    all_metadata = clip_metadata["object"] if "object" in clip_metadata else {}
+    combined_metadata = clip_metadata["object"] if "object" in clip_metadata else {}
     if "face" in clip_metadata:
         for face_frameidx_bbidx, value in clip_metadata["face"].items():
             face_frameidx, face_bbidx = face_frameidx_bbidx.split("_")
             max_obj_idx = 0
-            for obj_frameidx_bbidx in all_metadata:
+            for obj_frameidx_bbidx in combined_metadata:
                 if face_frameidx in obj_frameidx_bbidx:
                     _, obj_bbidx_ = obj_frameidx_bbidx.split("_")
                     max_obj_idx = max(max_obj_idx, int(obj_bbidx_))
@@ -565,19 +601,19 @@ def metadata2vdms(
             if max_obj_idx > 0:
                 new_face_bbidx = max_obj_idx + 1
                 new_key = f"{face_frameidx}_{new_face_bbidx:04d}"
-                all_metadata[new_key] = value
-                all_metadata[new_key]["bbId"] = new_key
+                combined_metadata[new_key] = value
+                combined_metadata[new_key]["bbId"] = new_key
             else:
-                all_metadata[face_frameidx_bbidx] = value
+                combined_metadata[face_frameidx_bbidx] = value
 
-    all_metadata = _sort_dict_by_frame(all_metadata)
+    combined_metadata = _sort_dict_by_frame(combined_metadata)
     get_udf_query(
         clip_filename,
         properties,
         INGESTION.replace(",", " "),
         (width, height),
         id="udf_metadata",
-        metadata=all_metadata,
+        metadata=combined_metadata,
         test_mode=TEST_MODE,
     )
 
@@ -589,6 +625,192 @@ def metadata2vdms(
 
 
 """ CLASSES """
+
+
+# def connect_to_stream(stream_id, stream_name, time_limit_mins=5):
+#     # opening video capture stream
+#     video_obj = cv2.VideoCapture(stream_id, cv2.CAP_FFMPEG)
+
+#     stream_available = False
+#     time_limit_secs = time_limit_mins * 60
+#     connect_time = time.time()
+#     while not stream_available:
+#         if video_obj.isOpened():
+#             stream_available = True
+#         elif stream_id.startswith("rtsp"):
+#             if time.time() - connect_time < time_limit_secs:
+#                 video_obj = cv2.VideoCapture(stream_id, cv2.CAP_FFMPEG)
+#             else:
+#                 print(
+#                     f"Exceeds {time_limit_mins} mins limit to connect to {stream_name}. Exiting ..."
+#                 )
+#                 exit(1)
+#     return video_obj
+
+
+# Gets video fps and framecount
+# def get_fps_and_framecnt(stream_id, stream_name, video_obj, fps):
+#     input_fps = int(video_obj.get(cv2.CAP_PROP_FPS))  # hardware fps
+#     if input_fps == 0:  # Case when FPs isn't available
+#         input_fps = manual_fps_calculation(stream_id, num_frames=10)
+
+#     target_fps = fps if input_fps > fps else input_fps
+#     frame_skip = int(input_fps / target_fps)
+#     if frame_skip < 1:
+#         frame_skip = 1
+
+#     print(f"FPS of {stream_name} input stream: {input_fps}", flush=True)
+#     print(f"FPS of {stream_name} output mp4: {target_fps}", flush=True)
+
+#     # Frame count for videos
+#     frame_count = None
+#     if "://" not in str(stream_id):
+#         frame_count = int(video_obj.get(cv2.CAP_PROP_FRAME_COUNT))
+#     return input_fps, target_fps, frame_skip, frame_count
+
+
+# Gets frame W and H details
+# def get_frameWH(video_obj):
+#     input_width = int(video_obj.get(cv2.CAP_PROP_FRAME_WIDTH))
+#     input_height = int(video_obj.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+#     if RESIZE_FLAG or ((input_height * input_width) < (MODEL_H * MODEL_W)):
+#         new_sizeHW = check_imgsz([MODEL_H, MODEL_W])  # expects hxw
+#     else:
+#         new_sizeHW = check_imgsz([input_height, input_width])  # expects hxw
+
+#     new_sizeWH = (new_sizeHW[1], new_sizeHW[0])
+
+#     # width = new_sizeWH[0]
+#     # height = new_sizeWH[1]
+#     return new_sizeWH
+
+
+# method to save clip
+def save_clip(
+    clip_filename, clip_id, tmp_file, _out_vid, frame_count, frameNum, target_fps
+):
+    clip_key = Path(clip_filename).name
+    if DEBUG == "1":
+        print(
+            f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames (end of stream)",
+            flush=True,
+        )
+    _out_vid = release_clip_and_reencode(
+        clip_key,
+        _out_vid,
+        clip_filename,
+        tmp_file,
+        target_fps,
+    )
+    if DEBUG == "1":
+        print(
+            f"[TIMING],end_get_clips,{clip_key},{time.time()}",
+            flush=True,
+        )
+    # clip_end_frame[clip_key] = frameNum
+    return _out_vid
+
+
+# method to create clips (read frame write to file; add name to list)
+def get_clips():
+    global all_metadata
+    clip_frame_idx = 0
+    target_fps = TARGET_FPS
+    clip_filename = ""
+    clip_key = ""
+    tmp_file = ""
+    clip_id = 0
+    frameNum = 0
+    width = 0
+    height = 0
+    _out_vid = None
+    while True:
+        try:
+            queue_details = create_clip_queue.get()
+            if queue_details is None:
+                if _out_vid is not None:
+                    frame_count = clip_frame_idx + 1
+                    if frame_count > target_fps:
+                        _out_vid = save_clip(
+                            clip_filename,
+                            clip_id,
+                            tmp_file,
+                            _out_vid,
+                            frame_count,
+                            frameNum,
+                            target_fps,
+                        )
+                        metadata2vdms(
+                            clip_key,
+                            clip_filename,
+                            all_metadata[clip_key],
+                            width,
+                            height,
+                        )
+                        del all_metadata[clip_key]
+                    else:
+                        _out_vid = None
+                break
+
+            (
+                frameNum,
+                clip_frame_idx,
+                clip_id,
+                clip_filename,
+                tmp_file,
+                frame,
+                target_fps,
+                fourcc,
+                width,
+                height,
+                clip_total_frames,
+            ) = queue_details
+            clip_key = Path(clip_filename).name
+            # print("frameNum, clip_frameNume, clip_id", queue_details[:3])
+            if clip_frame_idx == 0:
+                if DEBUG == "1":
+                    print(
+                        f"[TIMING],start_get_clips,{clip_key},{time.time()}",
+                        flush=True,
+                    )
+                _out_vid = cv2.VideoWriter(
+                    tmp_file,
+                    fourcc=fourcc,
+                    fps=target_fps,
+                    frameSize=(width, height),
+                )
+                if DEBUG == "1":
+                    print(
+                        f"[TIMING],Start new clip,{clip_key},{time.time()}",
+                        flush=True,
+                    )
+
+            _out_vid.write(frame)
+
+            if clip_frame_idx == clip_total_frames - 1:
+                frame_count = clip_frame_idx + 1
+                _out_vid = save_clip(
+                    clip_filename,
+                    clip_id,
+                    tmp_file,
+                    _out_vid,
+                    frame_count,
+                    frameNum,
+                    target_fps,
+                )
+
+                metadata2vdms(
+                    clip_key,
+                    clip_filename,
+                    all_metadata[clip_key],
+                    width,
+                    height,
+                )
+                del all_metadata[clip_key]
+
+        except queue.Empty:
+            pass
 
 
 # defining a helper class for implementing multi-threading
@@ -633,6 +855,11 @@ class VideoStream:
         self.t.append(
             self.executor.submit(
                 self.get_frames,
+            )
+        )
+        self.t.append(
+            self.executor.submit(
+                get_clips,
             )
         )
 
@@ -778,159 +1005,124 @@ class VideoStream:
             )
 
     # method to save clip
-    def save_clip(
-        self, clip_filename, clip_id, tmp_file, _out_vid, frame_count, frameNum
-    ):
+    # def save_clip(
+    #     self, clip_filename, clip_id, tmp_file, _out_vid, frame_count, frameNum
+    # ):
+    #     clip_key = Path(clip_filename).name
+    #     if DEBUG == "1":
+    #         print(
+    #             f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames (end of stream)",
+    #             flush=True,
+    #         )
+    #     _out_vid = release_clip_and_reencode(
+    #         clip_key,
+    #         _out_vid,
+    #         clip_filename,
+    #         tmp_file,
+    #         self.target_fps,
+    #     )
+    #     if DEBUG == "1":
+    #         print(
+    #             f"[TIMING],end_get_clips,{clip_key},{time.time()}",
+    #             flush=True,
+    #         )
+    #     self.clip_end_frame[clip_key] = frameNum
+    #     return _out_vid
+
+
+def process_stream(camera_src, camera_name=None):
+    global all_metadata
+    webcam_stream = VideoStream(str(camera_src), camera_name=camera_name)
+    if DEBUG == "1":
+        print(
+            f"[TIMING],Start processing,{webcam_stream.stream_name},{time.time()}",
+            flush=True,
+        )
+
+    start = time.time()
+    # Start retrieving frames and add to queue
+    webcam_stream.start()
+    while True:
+        queue_details = webcam_stream.inference_queue.get()
+
+        if queue_details is None:
+            create_clip_queue.put(queue_details)
+            print("End of stream")
+            break
+
+        frameNum, clip_frame_idx, clip_id, clip_filename, tmp_file, frame = (
+            queue_details
+        )
         clip_key = Path(clip_filename).name
         if DEBUG == "1":
             print(
-                f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames (end of stream)",
+                f"[TIMING],start_infer_worker,{clip_key}-{clip_frame_idx % webcam_stream.clip_total_frames},{time.time()}",
                 flush=True,
             )
-        _out_vid = release_clip_and_reencode(
-            clip_key,
-            _out_vid,
-            clip_filename,
-            tmp_file,
-            self.target_fps,
+        metadata, metadata_face = infer_worker(
+            webcam_stream.stream_name,
+            clip_frame_idx % webcam_stream.clip_total_frames,
+            frame,
+            (webcam_stream.width, webcam_stream.height),  # img_size,
+            INGESTION,
+            fps=webcam_stream.target_fps,
         )
+
         if DEBUG == "1":
             print(
-                f"[TIMING],end_get_clips,{clip_key},{time.time()}",
+                f"[TIMING],end_infer_worker,{clip_key}-{clip_frame_idx % webcam_stream.clip_total_frames},{time.time()}",
                 flush=True,
             )
-        self.clip_end_frame[clip_key] = frameNum
-        return _out_vid
+        all_metadata.setdefault(clip_key, {})
+        all_metadata[clip_key].setdefault("object", {})
+        all_metadata[clip_key]["object"].update(metadata)
+        all_metadata[clip_key].setdefault("face", {})
+        all_metadata[clip_key]["face"].update(metadata_face)
+        webcam_stream.num_frames_processed += 1
+        queue_details = (
+            frameNum,  # Overall frame number
+            clip_frame_idx % webcam_stream.clip_total_frames,  # Frame index in clip
+            clip_id,  # Clip number
+            clip_filename,
+            tmp_file,
+            frame.copy(),  # Frame,
+            webcam_stream.target_fps,
+            webcam_stream.fourcc,
+            webcam_stream.width,
+            webcam_stream.height,
+            webcam_stream.clip_total_frames,
+        )
+        # print("frameNum, clip_frameNume, clip_id", queue_details[:3])
+        create_clip_queue.put(queue_details)
 
+        clip_frame_idx += 1
+        if clip_frame_idx % webcam_stream.clip_total_frames == 0:
+            clip_id += 1
 
-""" MAIN FUNCTION """
+    # metadata, metadata_face = infer_worker(
+    #     stream_name,
+    #     frameNum,
+    #     frame,
+    #     img_size,
+    #     INGESTION,
+    #     fps=fps,
+    # )
+    # num_frames_processed += 1
 
+    # Clip
 
-if __name__ == "__main__":
-    camera_src = sys.argv[1]
-    camera_name = sys.argv[2] if len(sys.argv) == 3 else None
-
-    start = time.time()
-
-    # initializing and starting multi-threaded webcam input stream
-    webcam_stream = VideoStream(str(camera_src), camera_name=camera_name)
-
-    # Start retrieving frames and add to queue
-    webcam_stream.start()
-
-    # Main thread reads from frame queue and process frame
-    _out_vid = None
-    clip_frame_idx = 0
-    clip_key = ""
-    clip_filename = ""
-    tmp_file = ""
-    clip_id = 0
-    frameNum = 0
-    all_metadata = {}
-    while True:
-        try:
-            queue_details = webcam_stream.inference_queue.get()
-
-            if queue_details is None:
-                # Save video and send metadata
-                if _out_vid is not None:
-                    frame_count = clip_frame_idx + 1
-                    if frame_count > webcam_stream.target_fps:
-                        _out_vid = webcam_stream.save_clip(
-                            clip_filename,
-                            clip_id,
-                            tmp_file,
-                            _out_vid,
-                            frame_count,
-                            frameNum,
-                        )
-                        metadata2vdms(
-                            clip_key,
-                            clip_filename,
-                            all_metadata,
-                            webcam_stream.width,
-                            webcam_stream.height,
-                        )
-                    else:
-                        _out_vid = None
-
-                break
-
-            frameNum, clip_frame_idx, clip_id, clip_filename, tmp_file, frame = (
-                queue_details
-            )
-            clip_key = Path(clip_filename).name
-
-            # Initialize video clip
-            if clip_frame_idx == 0:
-                if DEBUG == "1":
-                    print(
-                        f"[TIMING],start_get_clips,{clip_key},{time.time()}",
-                        flush=True,
-                    )
-                _out_vid = cv2.VideoWriter(
-                    tmp_file,
-                    fourcc=webcam_stream.fourcc,
-                    fps=webcam_stream.target_fps,
-                    frameSize=(webcam_stream.width, webcam_stream.height),
-                )
-                all_metadata = {}
-                if DEBUG == "1":
-                    print(
-                        f"[TIMING],Start new clip,{clip_key},{time.time()}",
-                        flush=True,
-                    )
-
-            # Write frame to video clip
-            _out_vid.write(frame)
-
-            # Inference on frame
-            if DEBUG == "1":
-                print(
-                    f"[TIMING],start_infer_worker,{clip_key}-{clip_frame_idx},{time.time()}",
-                    flush=True,
-                )
-            metadata, metadata_face = infer_worker(
-                webcam_stream.stream_name,
-                clip_frame_idx,
-                frame,
-                # model_path,
-                (webcam_stream.width, webcam_stream.height),
-                INGESTION,
-                fps=webcam_stream.target_fps,
-            )
-            if DEBUG == "1":
-                print(
-                    f"[TIMING],end_infer_worker,{clip_key},{time.time()}",
-                    flush=True,
-                )
-            all_metadata.setdefault("object", {})
-            all_metadata["object"].update(metadata)
-            all_metadata.setdefault("face", {})
-            all_metadata["face"].update(metadata_face)
-            webcam_stream.num_frames_processed += 1
-
-            # Save video and send metadata
-            if clip_frame_idx == webcam_stream.clip_total_frames - 1:
-                frame_count = clip_frame_idx + 1
-                _out_vid = webcam_stream.save_clip(
-                    clip_filename, clip_id, tmp_file, _out_vid, frame_count, frameNum
-                )
-                metadata2vdms(
-                    clip_key,
-                    clip_filename,
-                    all_metadata,
-                    webcam_stream.width,
-                    webcam_stream.height,
-                )
-
-        except queue.Empty:
-            pass
-
-    webcam_stream.stop()  # stop the webcam stream
-    cv2.destroyAllWindows()
+    # [t.join() for t in ts]
+    # for t in as_completed(ts):
+    #     try:
+    #         _ = t.result()
+    #     except Exception as t_e:
+    # print(f"[DEBUG] Exception occurred in thread: {t_e}")
+    webcam_stream.stop()
 
     end = time.time()
+    # Release resources
+    # video_obj.release()
+    # cv2.destroyAllWindows()
 
     # printing time elapsed and fps
     if DEBUG == "1":
@@ -950,3 +1142,12 @@ if __name__ == "__main__":
             f"[TIMING],Completed processing,{webcam_stream.stream_name},{end}",
             flush=True,
         )
+
+
+""" MAIN FUNCTION """
+
+if __name__ == "__main__":
+    camera_src = sys.argv[1]
+    camera_name = sys.argv[2] if len(sys.argv) == 3 else None
+
+    process_stream(str(camera_src), camera_name)
