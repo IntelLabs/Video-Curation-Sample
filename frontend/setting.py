@@ -149,7 +149,23 @@ class SettingHandler(web.RequestHandler):
                                 "zebra",
                             ],
                             "value": "person",
-                        }
+                        },
+                        {
+                            "name": "Frame",
+                            "type": "text",
+                            "value": "skip",
+                        },
+                        {
+                            "name": "Frame Condition",
+                            "type": "list",
+                            "values": [
+                                "skip",
+                                "==",
+                                "<=",
+                                ">=",
+                            ],
+                            "value": "skip",
+                        },
                     ],
                 },
                 {
