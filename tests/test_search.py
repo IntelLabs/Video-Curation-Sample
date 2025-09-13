@@ -1,24 +1,27 @@
 #!/usr/bin/python3
-
+import argparse
 import json
 import os
+import subprocess
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from random import randint
+from sys import path as sys_path
 from urllib.parse import quote, unquote
 
-from merge_iv import merge_iv
-from requests import get
-from tornado import gen, web
-from tornado.concurrent import run_on_executor
+from utils import all_labels, merge_iv
+
+PROJECT_PATH = Path(__file__).parent.parent.parent.absolute()
+sys_path.insert(0, str(PROJECT_PATH))
 
 import vdms
 
-dbhost = os.environ["DBHOST"]
-vdhost = os.environ["VDHOST"]
+video_name = "*"  # If querying specific video change to name stored in VDMS
+dbhost = "localhost"  # os.environ["DBHOST"]
+# vdhost = os.environ["VDHOST"]
 DEBUG = os.environ["DEBUG"]
-
 LOCKTIMEOUT_RETRIES = 5
 ERR_KEYWORDS = [
     "timeout",
@@ -26,6 +29,281 @@ ERR_KEYWORDS = [
     "outoftransactions",
     "no entities found",
 ]
+
+
+query_dict = {
+    "person": [
+        [
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "person",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            }
+        ]
+    ],
+    "car": [
+        [
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "car",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            }
+        ]
+    ],
+    "horse": [
+        [
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "horse",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            }
+        ]
+    ],
+    "all_videos": [
+        [
+            {
+                "name": "video",
+                "icon": "images/video.png",
+                "description": "Find Video",
+                "params": [{"name": "Video Name", "type": "text", "value": "*"}],
+            }
+        ]
+    ],
+    "video-car": [
+        [
+            {
+                "name": "video",
+                "icon": "images/video.png",
+                "description": "Find Video",
+                "params": [
+                    {
+                        "name": "Video Name",
+                        "type": "text",
+                        "value": video_name,
+                    }
+                ],
+            },
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "car",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            },
+        ]
+    ],
+    "person-car": [
+        [
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "person",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            },
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "car",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            },
+        ]
+    ],
+    "video-car|video-person": [
+        [
+            {
+                "name": "video",
+                "icon": "images/video.png",
+                "description": "Find Video",
+                "params": [
+                    {
+                        "name": "Video Name",
+                        "type": "text",
+                        "value": video_name,
+                    }
+                ],
+            },
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "car",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            },
+        ],
+        [
+            {
+                "name": "video",
+                "icon": "images/video.png",
+                "description": "Find Video",
+                "params": [
+                    {
+                        "name": "Video Name",
+                        "type": "text",
+                        "value": video_name,
+                    }
+                ],
+            },
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "person",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            },
+        ],
+    ],
+}
+
+
+def get_input_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "-q",
+        dest="query_key",
+        type=str,
+        choices=list(query_dict.keys()),
+        help="Key to test query",
+    )
+
+    args = parser.parse_args()
+    return args
 
 
 def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0):
@@ -60,9 +338,8 @@ def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0
     return response
 
 
-class SearchHandler(web.RequestHandler):
-    def __init__(self, app, request, **kwargs):
-        super(SearchHandler, self).__init__(app, request, **kwargs)
+class SearchHandler:
+    def __init__(self, **kwargs):
         self.executor = ThreadPoolExecutor(8)
         self._vdms = vdms.vdms()
         while True:
@@ -175,18 +452,73 @@ class SearchHandler(web.RequestHandler):
 
         return [q_frame]
 
+    def _get_info(self, video):
+        width = height = duration = fps = nb_frames = 0
+
+        cmd = [
+            "docker",
+            "exec",
+            "lcc_video-service_1",
+            "/usr/local/bin/ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_streams",
+            "-i",
+            "/var/www/mp4/" + video,
+        ]
+        with subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+            universal_newlines=True,
+        ) as p:
+            for line in p.stdout:
+                line = line.strip()
+                if line.startswith("width="):
+                    width = int(line.split("=")[-1])
+                if line.startswith("height="):
+                    height = int(line.split("=")[-1])
+                if line.startswith("duration="):
+                    duration = max(duration, float(line.split("=")[-1]))
+                if line.startswith("r_frame_rate=") and line != "r_frame_rate=0/0":
+                    eq = line.split("=")[-1].split("/")
+                    fps = float(eq[0]) / float(eq[1])
+                elif (
+                    line.startswith("avg_frame_rate=") and line != "avg_frame_rate=0/0"
+                ):
+                    eq = line.split("=")[-1].split("/")
+                    fps = float(eq[0]) / float(eq[1])
+                if line.startswith("nb_read_frames="):
+                    nb_frames = int(line.split("=")[-1])
+            p.stdout.close()
+            p.wait()
+        if fps == 0 and (nb_frames != 0 and duration != 0):
+            fps = nb_frames / duration
+        return {
+            "width": width,
+            "height": height,
+            "duration": duration,
+            "fps": fps,
+            "frame_count": nb_frames,
+        }
+
     def _decode_response(self, response):
         clips = {}
         segs = []
         for i in range(0, len(response), 1):
             if "FindVideo" in response[i] and response[i]["FindVideo"]["status"] == 0:
                 entities = response[i]["FindVideo"]["entities"]
-                # print(entities)
+                print(entities)
 
                 for ent in entities:
                     name = ent["Name"]
-                    r = get(vdhost + "/api/info", params={"video": name}).json()
-                    duration = r["duration"]  # ent["duration"]
+                    # r = get(vdhost + "/api/info", params={"video": name}).json()
+                    r = self._get_info(name)
+                    duration = r["duration"]
                     seg1c = {
                         "name": name,
                         "stream": quote("/api/segment/0/" + str(duration) + "/" + name),
@@ -207,12 +539,13 @@ class SearchHandler(web.RequestHandler):
                 and "entities" in response[i]["FindBoundingBox"]
             ):
                 entities = response[i]["FindBoundingBox"]["entities"]
-                print(f"\t{len(entities)} bbs returned", flush=True)
+                print(f"\t{len(entities)} bbs returned")
 
                 for ent_bbox in entities:
                     stream = ent_bbox["server_filepath"]
                     if stream not in clips:
-                        r = get(vdhost + "/api/info", params={"video": stream}).json()
+                        # r = get(vdhost + "/api/info", params={"video": stream}).json()
+                        r = self._get_info(stream)
                         clips[stream] = {
                             "fps": r["fps"],
                             "duration": r["duration"],
@@ -335,8 +668,7 @@ class SearchHandler(web.RequestHandler):
 
         return vdms_response
 
-    @run_on_executor
-    def _search(self, queries, size):
+    def _search(self, queries, size=None):
         if DEBUG == "1":
             print("[TIMING],start_frontend_search,," + str(time.time()), flush=True)
         try:
@@ -354,7 +686,6 @@ class SearchHandler(web.RequestHandler):
             print("[TIMING],end_frontend_search,," + str(time.time()), flush=True)
         return segs
 
-    @gen.coroutine
     def get(self):
         queries = json.loads(unquote(str(self.get_argument("queries"))))
         size = int(self.get_argument("size"))
@@ -371,3 +702,13 @@ class SearchHandler(web.RequestHandler):
         self.write({"response": r})
         self.set_status(200, "OK")
         self.finish()
+
+
+if __name__ == "__main__":
+    in_params = get_input_args()
+
+    sh = SearchHandler()
+    queries = query_dict[in_params.query_key]
+    sh._search(queries)
+
+    print("DONE!")
