@@ -151,7 +151,7 @@ class SettingHandler(web.RequestHandler):
                             "value": "person",
                         },
                         {
-                            "name": "Frame",
+                            "name": "Frame ID",
                             "type": "text",
                             "value": "skip",
                         },
@@ -159,12 +159,11 @@ class SettingHandler(web.RequestHandler):
                             "name": "Frame Condition",
                             "type": "list",
                             "values": [
-                                "skip",
                                 "==",
                                 "<=",
                                 ">=",
                             ],
-                            "value": "skip",
+                            "value": "==",
                         },
                     ],
                 },

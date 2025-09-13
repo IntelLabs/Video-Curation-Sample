@@ -107,9 +107,9 @@ class SearchHandler(web.RequestHandler):
         metaconstraints = {}
         if query1["name"] == "object":
             metaconstraints["objectID"] = ["==", self._value(query1, "Object List")]
-            frame = self._value(query1, "Frame")
+            frame = self._value(query1, "Frame ID")
             frame_cond = self._value(query1, "Frame Condition")
-            if frame != "skip" and frame_cond != "skip":
+            if frame != "skip":
                 metaconstraints["frameID"] = [frame_cond, int(frame.strip())]
             q_frame["FindBoundingBox"].update({"constraints": metaconstraints})
 
