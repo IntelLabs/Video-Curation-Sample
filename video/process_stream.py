@@ -610,7 +610,7 @@ def metadata2vdms(
     get_udf_query(
         clip_filename,
         properties,
-        INGESTION.replace(",", " "),
+        INGESTION.replace(",", "+"),
         (width, height),
         id="udf_metadata",
         metadata=combined_metadata,

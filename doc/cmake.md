@@ -10,6 +10,7 @@ Use the following definitions to customize the building process:
 - **MODEL_NAME**: Specify the custom YOLO model name which is expected to be in `video/resources/models/ultralytics/custom_models/<model name>.pt`. If not provided, the Ultralytics YOLO11n (`yolo11n`) is used.
 - **NCURATIONS**: Specify the number of curation processes running in the background.
 - **NSTREAMS**: Specify the number of video streams
+- **OMIT_DETECTIONS_FLAG**: Flag to omit printing detections to screen. By default, object detections are printed.
 - **PLATFORM**: Specify the target platform: `Xeon`
 - **RESIZE_FLAG**: Specify `True` to resize videos to model input size or `False` (default) to use video resolution.
 <!-- - **REGISTRY**: Name of private registry to push image. If registry secret is available, update `imagePullSecrets` field in [frontend.yaml.m4](../deployment/kubernetes/frontend.yaml.m4), [video_stream.yaml.m4](../deployment/kubernetes/video_stream.yaml.m4), and/or [video.yaml.m4](../deployment/kubernetes/video.yaml.m4) for Kubernetes. `docker login` may be necessary. -->
@@ -26,7 +27,7 @@ Use the following definitions to customize the building process:
 <!-- - **NCPU**: Use `NCPU` in your cmake command to specify number of CPU cores for Ingestion. The ingest pool will run on randomly selected CPUs. Similar to `taskset` on Linux. -->
 <br>
 
-## Examples:
+<!-- ## Examples:
 ### Use videos
 This sample uses a list of ten video from Pexel.  Please accept the license when prompted.  Use the following command to build the sample:
 ```bash
@@ -69,7 +70,7 @@ ffmpeg -re -f dshow -rtbufsize 100M -i video="HP HD Camera" -c copy -f mpegts -f
 Below is another sample command to stream a local video:
 ```bash
 ffmpeg -re -i <mp4 video> -c copy -f mpegts -flush_packets 0 "udp://<hostname>:<stream_port>?pkt_size=18800"
-```
+``` -->
 
 
 ## Make Commands:

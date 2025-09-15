@@ -83,8 +83,26 @@ class SearchHandler(web.RequestHandler):
         return None
 
     def _construct_query(self, line_queries, ref):
+        q_vid = {
+            "FindVideo": {
+                "_ref": ref,
+                "constraints": {
+                    "category": ["==", "video_path_rop"],
+                },
+                "results": {"list": ["Name"], "blob": False},
+            }
+        }
+        q_vid2 = {
+            "FindEntity": {
+                "_ref": ref + 1,
+                "class": "Frame",
+                "results": {"list": ["server_filepath", "frameID"]},
+                "link": {"ref": ref},
+            }
+        }
         q_frame = {
             "FindBoundingBox": {
+                "link": {"ref": ref + 1},
                 "results": {
                     "list": [
                         "objectID",
@@ -113,6 +131,15 @@ class SearchHandler(web.RequestHandler):
                             },
                         }
                     )
+                    q_vid2["FindEntity"].update(
+                        {
+                            "constraints": {
+                                "server_filepath": ["==", name],
+                            },
+                        }
+                    )
+                else:
+                    return [q_vid, q_vid2]
 
             if icon_query["name"] == "object":
                 obj_name = self._value(icon_query, "Object List")
@@ -139,8 +166,14 @@ class SearchHandler(web.RequestHandler):
                         frame_cond,
                         int(frame.strip()),
                     ]
+                    q_vid2["FindEntity"].setdefault("constraints", {})
+                    q_vid2["FindEntity"]["constraints"]["frameID"] = [
+                        frame_cond,
+                        int(frame.strip()),
+                    ]
 
             if icon_query["name"] == "person":
+                q_frame["FindBoundingBox"].setdefault("constraints", {})
                 q_frame["FindBoundingBox"]["constraints"]["age"] = [
                     ">=",
                     int(self._value(icon_query, "Age Min")),
@@ -173,40 +206,50 @@ class SearchHandler(web.RequestHandler):
                         "face",
                     ]
 
-        return [q_frame]
+        del q_vid2["FindEntity"]["link"]
+        return [q_vid2, q_frame]
 
     def _decode_response(self, response):
         clips = {}
         segs = []
-        for i in range(0, len(response), 1):
-            if "FindVideo" in response[i] and response[i]["FindVideo"]["status"] == 0:
-                entities = response[i]["FindVideo"]["entities"]
+        for i in range(0, len(response), 2):
+            if (
+                "FindVideo" in response[i]
+                and response[i]["FindVideo"]["status"] == 0
+                and response[i + 1]["FindEntity"]["status"] == 0
+            ):
+                entities = response[i + 1]["FindEntity"]["entities"]
                 # print(entities)
 
+                uniq_name = []
                 for ent in entities:
-                    name = ent["Name"]
-                    r = get(vdhost + "/api/info", params={"video": name}).json()
-                    duration = r["duration"]  # ent["duration"]
-                    seg1c = {
-                        "name": name,
-                        "stream": quote("/api/segment/0/" + str(duration) + "/" + name),
-                        "thumbnail": quote("/api/thumbnail/0/" + name + ".png"),
-                        "fps": r["fps"],
-                        "time": 0,
-                        "duration": duration,
-                        "offset": 0,
-                        "width": r["width"],
-                        "height": r["height"],
-                        "frames": [x for x in range(0, r["frame_count"])],
-                    }
-                    segs.append(seg1c)
+                    name = ent["server_filepath"]
+                    if name not in uniq_name:
+                        r = get(vdhost + "/api/info", params={"video": name}).json()
+                        duration = r["duration"]  # ent["duration"]
+                        seg1c = {
+                            "name": name,
+                            "stream": quote(
+                                "/api/segment/0/" + str(duration) + "/" + name
+                            ),
+                            "thumbnail": quote("/api/thumbnail/0/" + name + ".png"),
+                            "fps": r["fps"],
+                            "time": 0,
+                            "duration": duration,
+                            "offset": 0,
+                            "width": r["width"],
+                            "height": r["height"],
+                            "frames": [x for x in range(0, r["frame_count"])],
+                        }
+                        segs.append(seg1c)
+                        uniq_name.append(name)
 
             elif (
-                "FindBoundingBox" in response[i]
-                and response[i]["FindBoundingBox"]["status"] == 0
-                and "entities" in response[i]["FindBoundingBox"]
+                "FindBoundingBox" in response[i + 1]
+                and response[i + 1]["FindBoundingBox"]["status"] == 0
+                and "entities" in response[i + 1]["FindBoundingBox"]
             ):
-                entities = response[i]["FindBoundingBox"]["entities"]
+                entities = response[i + 1]["FindBoundingBox"]["entities"]
                 print(f"\t{len(entities)} bbs returned", flush=True)
 
                 for ent_bbox in entities:

@@ -42,18 +42,6 @@ function draw_analytics(video, data) {
                                 var xmax=v1.detection.bounding_box.x_max*sw;
                                 var ymin=v1.detection.bounding_box.y_min*sh;
                                 var ymax=v1.detection.bounding_box.y_max*sh;
-                                // var max_x_size=data.width;
-                                var max_x_size=sw;
-                                // var max_x_size=svg.width();
-                                if (sxoff+xmax > max_x_size){
-                                    xmax=max_x_size;
-                                }
-                                // var max_y_size=data.height;
-                                var max_y_size=sh;
-                                // var max_y_size=svg.height();
-                                if (syoff+ymax > max_y_size){
-                                    ymax=max_y_size;
-                                }
                                 console.log("xmin: "+xmin+" xmax: "+xmax);
                                 console.log("ymin: "+ymin+" ymax: "+ymax);
                                 if (xmin!=xmax && ymin!=ymax) {

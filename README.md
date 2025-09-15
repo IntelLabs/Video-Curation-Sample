@@ -44,19 +44,73 @@ The sample is powered by the following Open Visual Cloud software stacks:
 <br>
 
 
-## Build Streaming Sample:
+## Prepare Videos and/or Camera Configurations
+This application processes videos and camera streams by watching the `inputs` directory.
+MP4 videos should be placed in this directory and the application will automatically begin processing it.  If interested in using sample videos, run the provided script to download Pexel videos and accept the terms and conditions of the data set license.
+```bash
+cd inputs
+./download.sh
+```
+
+To configure the application for camera streams, add the camera name and URL to `inputs/camera_config.yaml`.
+The YAML file provides a sample entry.
+<br>
+
+
+## Start/Stop Service using Scripts:
+We have provided scripts to help with the deployment.
+
+The [start_app.sh](/start_app.sh) script provides everything you need to deploy the application.
+
+Run application using GPU:
+```bash
+./start_app.sh -e GPU
+```
+This same script can be used to run application with CPU, resizing video to 640x640, etc.
+The accepted parameters for the start script are below:<br>
+
+| Parameter          | Type     | Description                                                                                    | Default       |
+| :----------------- | :------: | :--------------------------------------------------------------------------------------------- | :-----------: |
+| -h                 | optional | Print this help message                                                                        |               |
+| -d or --debug      | optional | Flag for debugging                                                                             | "0"           |
+| -e or --device     | optional | Device to use for inference                                                                    | CPU           |
+| -i or --ingestion  | optional | Ingestion type (object, face)                                                                  | "object,face" |
+| -l or --tars       | optional | Flag to load docker images instead of building from Dockerfiles                                | "0"           |
+| -m or --model      | optional | Custom YOLO model name (<model name>.pt). If not provided model YOLO11n is used.               |               |
+| -n or --ncurations | optional | Number of ingestion containers                                                                 | 1             |
+| -o or --omit-det   | optional | By default, object detections are printed. To omit printing detections to screen, enable flag. | False         |
+| -r or --registry   | optional | Registry                                                                                       | None          |
+| -s or --source     | optional | Input source type (videos, stream)                                                             | stream        |
+| -t or --type       | optional | Deployment method (compose, k8)                                                                | compose       |
+| -v or --nstreams   | optional | Number of video streams                                                                        | 1             |
+| -z or --resize     | optional | Flag to resize video to model input size (640x640)                                             | False         |
+<br>
+
+See also [Customize Build Process](doc/cmake.md) for additional information on options.
+
+The [stop_app.sh](/stop_app.sh) script is provided to stop the application from a different terminal. To stop and prune the docker images, run:
+```bash
+./stop_app.sh -p
+```
+
+If you only want to stop the docker containers without running `docker builder prune`, remove `-p`.
+<br>
+
+
+## Manually Build Streaming Sample:
+Instead of running the start/stop using the above scripts, you can run the commands individually as shown below.
 
 ```bash
 mkdir build
 cd build
-cmake -DIN_SOURCE=stream ..
+cmake ..
 make
 ```
 
 See also [Customize Build Process](doc/cmake.md) for additional options.
 <br>
 
-## Start/Stop Sample:
+### Start/Stop Sample:
 
 Use the following commands to start/stop services via docker-compose:
 
@@ -86,38 +140,14 @@ make stop_kubernetes
 See also: [Kubernetes Setup](deployment/kubernetes/README.md). -->
 <br>
 
-### Start/Stop Scripts:
-Instead of running the start/stop commands individually (as shown above), we have provided scripts to help with the deployment.
 
-The [start_app.sh](/start_app.sh) script provides everything you need to deploy the application.
-
-Run application using videos and GPU:
+## Display Object Detected
+Once the application is started, we have provided a script to display the detections with associated timestamps.
+To display this information, in a separate terminal, run `display_detections.sh` with the objects of interest.
+For example, to display when "person" and "car" objects are detected, run:
 ```bash
-./start_app.sh -e GPU -s videos
+./display_detections.sh person,car
 ```
-This same script can be used to run application with CPU, streaming capability, etc.
-The accepted parameters for the start script are below:<br>
-
-| Parameter          | Type     | Description                                                     | Default       |
-| :----------------- | :------: | :-------------------------------------------------------------- | :-----------: |
-| -h                 | optional | Print this help message                                         |               |
-| -d or --debug      | optional | Flag for debugging                                              | "0"           |
-| -e or --device     | optional | Device to use for inference                                     | CPU           |
-| -i or --ingestion  | optional | Ingestion type (object, face)                                   | "object,face" |
-| -l or --tars       | optional | Flag to load docker images instead of building from Dockerfiles | "0"           |
-| -n or --ncurations | optional | Number of ingestion containers                                  | 1             |
-| -r or --registry   | optional | Registry                                                        | None          |
-| -s or --source     | optional | Input source type (videos, stream)                              | stream        |
-| -t or --type       | optional | Deployment method (compose, k8)                                 | compose       |
-| -v or --nstreams   | optional | Number of video streams                                         | 1             |
-<br>
-
-The [stop_app.sh](/stop_app.sh) script is provided to stop the application from a different terminal. To stop and prune the docker images, run:
-```bash
-./stop_app.sh -p
-```
-
-If you only want to stop the docker containers without running `docker builder prune`, remove `-p`.
 <br>
 
 

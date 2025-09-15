@@ -23,43 +23,51 @@ KEYWORDS = [
 ]
 
 PROCESSING_DEFAULT_DICT = {
-    "num clips": 0,
-    "total clip frames": 0,  # info_details["Num Frames"]
-    "frameW": 0,
-    "frameH": 0,
-    "object detections": 0,
+    "Bkgd UDF runtime (s)": 0,
+    "delta stream end to processing end (s)": 0,
+    "delta stream start to processing start (s)": 0,
     "face detections": 0,
-    "Num Failures": 0,
+    "frameH": 0,
+    "frames processed": 0,
+    "frames received": 0,
+    "frameW": 0,
+    "inference fps": 0,
     "Num Bkgd Failures": 0,
+    "num clips": 0,
+    "Num Failures": 0,
     "Num FindVideo Bkgd Failures": 0,
     "Num Unique FindVideo Bkgd Failures": 0,
+    "object detections": 0,
+    "object+face detections": 0,
+    "processor fps": 0,
+    "processor time (s)": 0,
+    "received expected clips": 0,
+    "retrieval fps": 0,
+    "stream processing time (s)": 0,
+    "stream send elapsed time (s)": 0,
+    "target expected clips": 0,
+    "target fps": 0,
+    "target frames": 0,
     "Time to create clip (s)": 0,  # info_details["Save clip"] - info_details["Start new clip"]
-    "total inference runtime (s)": 0,
-    "total get_clip runtime (s)": 0,
-    "total get_clip release_clip runtime (s)": 0,
+    "total clip frames": 0,  # info_details["Num Frames"]
     "total get_clip reencode runtime (s)": 0,
+    "total get_clip release_clip runtime (s)": 0,
+    "total get_clip runtime (s)": 0,
     "total get_frames runtime (s)": 0,
+    "total inference frames": 0,
+    "total inference runtime (s)": 0,
     "total process_clip_metadata runtime (s)": 0,
-    "UDF object db.query runtime (s)": 0,
-    "UDF object run func runtime (s)": 0,
     "UDF face db.query runtime (s)": 0,
     "UDF face run func runtime (s)": 0,
-    "Bkgd UDF runtime (s)": 0,
-    "video": "",
+    "UDF object db.query runtime (s)": 0,
+    "UDF object run func runtime (s)": 0,
+    "UDF object+face db.query runtime (s)": 0,
+    "UDF object+face run func runtime (s)": 0,
     "video duration (s)": 0,
+    "video expected clips": 0,
     "video fps": 0,
     "video frames": 0,
-    "video expected clips": 0,
-    "target frames": 0,
-    "frames received": 0,
-    "target fps": 0,
-    "target expected clips": 0,
-    "received expected clips": 0,
-    "frames processed": 0,
-    "stream send elapsed time (s)": 0,
-    "stream processing time (s)": 0,
-    "delta stream start to processing start (s)": 0,
-    "delta stream end to processing end (s)": 0,
+    "video": "",
 }
 
 
@@ -470,6 +478,16 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                 delta_streamstart_2_processing_start
             )
 
+            if "end_get_frames" in info_details:
+                frame_start_t = info_details["start_get_frames"]
+
+                camera_info[key]["total get_frames runtime (s)"] = abs(
+                    info_details["end_get_frames"] - frame_start_t
+                )
+                camera_info[key]["retrieval fps"] = (
+                    frames_received / camera_info[key]["total get_frames runtime (s)"]
+                )  # 30 frames / 10 fps = 3 secs => 30 frame / 3 secs = 10 fps
+
         elif ".mp4" in key:
             camera_name = "_".join(key.split("_")[:-1])  # key.split("_")[0]
             if camera_name not in camera_info:
@@ -497,6 +515,11 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
             if "face detections" in info_details:
                 camera_info[camera_name]["face detections"] += info_details[
                     "face detections"
+                ]
+
+            if "object+face detections" in info_details:
+                camera_info[camera_name]["object+face detections"] += info_details[
+                    "object+face detections"
                 ]
 
             if "Num Failures" in info_details:
@@ -527,11 +550,17 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                 #     - info_details["start_infer_worker"]
                 # )
 
+                num_frame = 0
                 for clip_frame_idx in info_details["end_infer_worker"].keys():
                     camera_info[camera_name]["total inference runtime (s)"] += (
                         info_details["end_infer_worker"][clip_frame_idx]
                         - info_details["start_infer_worker"][clip_frame_idx]
                     )
+                    num_frame += 1
+                camera_info[camera_name]["total inference frames"] = num_frame
+                camera_info[camera_name]["inference fps"] = (
+                    num_frame / camera_info[camera_name]["total inference runtime (s)"]
+                )  # 30 frames / 10 fps = 3 secs => 30 frame / 3 secs = 10 fps
 
             if "end_get_clips" in info_details:
                 camera_info[camera_name]["total get_clip runtime (s)"] += (
@@ -584,6 +613,19 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
                     info_details["end_udf_metadata_face"]
                     - info_details["start_udf_metadata_face"]
                 )
+
+            if "end_udf_ingest_object+face" in info_details:
+                camera_info[camera_name]["UDF object+face db.query runtime (s)"] += (
+                    info_details["end_udf_ingest_object+face"]
+                    - info_details["start_udf_ingest_object+face"]
+                )
+            # camera_info[camera_name]["VDMS face e2e runtime (s)"] += info_details["face e2e_query_processing (s)"]
+            if "end_udf_metadata_object+face" in info_details:
+                camera_info[camera_name]["UDF object+face run func runtime (s)"] += (
+                    info_details["end_udf_metadata_object+face"]
+                    - info_details["start_udf_metadata_object+face"]
+                )
+
             if "end_bkgd_add_metadata" in info_details:
                 camera_info[camera_name]["Bkgd UDF runtime (s)"] += (
                     info_details["end_bkgd_add_metadata"]
@@ -663,12 +705,15 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
             "received expected clips",
             "frames received",
             "frames processed",
+            "processor time (s)",
+            "processor fps",
             "num clips",
             "total clip frames",
             "frameW",
             "frameH",
             "object detections",
             "face detections",
+            "object+face detections",
             "app processing time (s)",
             "app processing time + bkgd (s)",
             "Num Failures",
@@ -682,15 +727,20 @@ def summarize_info(log_filename, info, out_log_file=None, method=None):
             "delta stream end to processing end (s)",
             "Time to create clip (s)",
             "total inference runtime (s)",
+            "total inference frames",
+            "inference fps",
             "total get_clip runtime (s)",
             "total get_clip release_clip runtime (s)",
             "total get_clip reencode runtime (s)",
             "total get_frames runtime (s)",
+            "retrieval fps",
             "total process_clip_metadata runtime (s)",
             "UDF object db.query runtime (s)",
             "UDF object run func runtime (s)",
             "UDF face db.query runtime (s)",
             "UDF face run func runtime (s)",
+            "UDF object+face db.query runtime (s)",
+            "UDF object+face run func runtime (s)",
             "Bkgd UDF runtime (s)",
         ]
 
@@ -879,6 +929,11 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                         ) = line.split("|")[-1].strip().split(",")
                         info[mp4_file]["frameW"] = int(frameW)
                         info[mp4_file]["frameH"] = int(frameH)
+
+                        if "object face" in ingest_type:
+                            ingest_type = ingest_type.replace(
+                                "object face", "object+face"
+                            )
                         info[mp4_file][f"{ingest_type} detections"] = int(
                             num_detections
                         )
@@ -890,6 +945,11 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                         if not line_of_int.startswith("[TIMING]"):
                             line_of_int = "[TIMING]" + line_of_int.split("[TIMING]")[1]
 
+                        if "_object face," in line_of_int:
+                            line_of_int = line_of_int.replace(
+                                "_object face,", "_object+face,"
+                            )
+                            # print(f"New line_of_int: {line_of_int}")
                         prefix, method_name, name_or_mp4_file, timestamp = (
                             line_of_int.split(",")
                         )
@@ -933,6 +993,15 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                 #     info[meta_mp4_file][f"{meta_ingest_type} e2e_query_processing (s)"] += e2etime
                 #     meta_mp4_file = None
                 #     meta_ingest_type = None
+
+                elif (
+                    "get_frames" in line
+                ):  # video-service_1     | [TIMING],end_get_frames,rtsp1,1757681460.3921566
+                    prefix, method_name, stream_name, timestamp = (
+                        line.split("|")[-1].strip().split(",")
+                    )
+                    info.setdefault(stream_name, {})
+                    info[stream_name][method_name] = float(timestamp)
 
                 elif "struct.error: unpack requires a buffer of 4 bytes" in line:
                     info["Overall"].setdefault("VDMS crashes", 0)
@@ -979,6 +1048,7 @@ def get_log_info(args, log_path, method=None):  # Extract timing from logs
                     info[stream_name]["processor time (s)"] = processor_time
                     info[stream_name]["frames received"] = num_received
                     info[stream_name]["frames processed"] = num_processed
+                    info[stream_name]["processor fps"] = num_processed / processor_time
                     del_camera_names = remove_value_from_list(
                         del_camera_names, stream_name
                     )
