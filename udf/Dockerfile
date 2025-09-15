@@ -7,7 +7,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y -q  --no-install-recommends python3-setuptools \
     python3-tornado python3-requests python3-ply python3-pip python3-psutil python3-venv \
-    kafkacat curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
+    curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
