@@ -15,8 +15,8 @@ docker_compose)
         exit 0
     fi
 
-    docker compose -f "$yml" -p lcc --compatibility down -v
-    docker volume rm app-content || true
+    docker compose -f "$yml" -p lcc --compatibility down  # -v
+    # docker volume rm app-content || true
     # fi
     ;;
 *)
@@ -30,5 +30,5 @@ esac
 
 docker rmi $(docker images | grep '<none>' | awk '{print $3}') || true
 docker container prune -f; echo
-docker volume prune -f; echo
+# docker volume prune -f; echo
 docker network prune -f; echo

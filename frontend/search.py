@@ -267,7 +267,7 @@ class SearchHandler(web.RequestHandler):
 
                     # time stamp and duration
                     stream1 = clips[stream]
-                    ts = float(ent_bbox["frameID"]) / stream1["fps"]
+                    ts = float(ent_bbox["frameID"]+1) / stream1["fps"]
 
                     # merge segs
                     segmin = 1  # 1, 2

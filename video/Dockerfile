@@ -1,5 +1,5 @@
 
-FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1
+FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1 as build
 
 ENV VIRTUAL_ENV=/opt/venv
 ARG DEBIAN_FRONTEND=noninteractive
@@ -7,7 +7,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y -q  --no-install-recommends python3-setuptools \
     python3-tornado python3-requests python3-ply python3-pip python3-psutil python3-venv \
-    curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
@@ -17,25 +17,38 @@ COPY requirements.* /home/
 ARG DEVICE="CPU"
 ENV DEVICE="${DEVICE}"
 
-RUN pip3 install pip --upgrade && \
+RUN pip3 install pip --no-cache-dir --upgrade && \
     if [ "${DEVICE}" = "CPU" ]; then \
-        pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu; \
+        pip3 install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu; \
     else \
-        pip3 install torch torchvision; \
+        pip3 install --no-cache-dir torch torchvision; \
     fi;
-RUN pip3 install -r /home/requirements.txt && \
-    pip3 install -r /home/requirements.${DEVICE}.txt
+RUN pip3 install --no-cache-dir -r /home/requirements.txt && \
+    pip3 install --no-cache-dir -r /home/requirements.${DEVICE}.txt
 
 RUN omz_downloader --list /home/resources/models/models.lst -o /home/resources/models --precisions FP16
+
+# FINAL IMAGE
+FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1
+ENV VIRTUAL_ENV=/opt/venv
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y -q  --no-install-recommends python3-setuptools \
+    python3-tornado python3-requests \
+    curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# COPY --from=build /usr/local/lib/python3.10 /usr/local/lib/python3.10
+COPY --from=build ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+COPY --from=build /home /home
+
 
 WORKDIR /home
 COPY *.py /home/
 COPY cleanup.sh /home/
 COPY manage.sh /home/
 COPY *.conf /etc/nginx/
-RUN rm /var/www/mp4/* || true
-RUN rm /var/www/stream/* || true
-RUN rm /var/www/mp4/.gitignore || true
 CMD  ["/bin/bash","-c","python3 /home/resources/models/download_yolo.py && /home/manage.sh"]
 
 ####

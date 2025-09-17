@@ -16,7 +16,6 @@ define(`PROFILE_GPU', `depends_on:
         environment:
             RETENTION_MINS: "60"
             CLEANUP_INTERVAL: "10m"
-            SHOST: "http://stream-service:8080"
             DBHOST: "vdms-service"
             UDF_HOST: "udf-service"
             `MODEL_NAME': "defn(`MODEL_NAME')"

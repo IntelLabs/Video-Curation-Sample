@@ -25,10 +25,13 @@ DEVICE = os.environ.get("DEVICE", "CPU")
 MODEL_NAME = os.environ.get("MODEL_NAME", "yolo11n")
 if DEVICE == "GPU":
     batch_size = int(os.environ.get("GPU_BATCH_SIZE", 1))
+    run_platform_name = "engine"
+    print("[!] USING GPU & TENSORRT")
 else:
     # batch_size = 8
     batch_size = int(os.environ.get("CPU_BATCH_SIZE", 1))  # 8
-
+    run_platform_name = "openvino"
+    print("[!] USING CPU & OPENVINO")
 
 def get_model(model_dir, run_platform, device_input, batch=1):
     final_model_path = f"{model_dir}/{MODEL_NAME}.pt"
@@ -61,6 +64,7 @@ def get_model(model_dir, run_platform, device_input, batch=1):
             format="engine",
             half=half_flag,
             dynamic=dynamic_flag,
+            device=device_input,
             simplify=True,
             batch=batch,
         )
@@ -117,15 +121,8 @@ if __name__ == "__main__":
         )
 
     ydir = Path(dir_path)
-    device = os.environ.get("DEVICE", "CPU")
-    if device == "GPU":
-        run_platform = "engine"
-        print("[!] USING GPU & TENSORRT")
-    else:
-        run_platform = "openvino"
-        print("[!] USING CPU & OPENVINO")
 
-    device_input = device.lower() if device == "CPU" else 0
-    _, _ = get_model(ydir, run_platform, device_input, batch=batch_size)
+    device_input = DEVICE.lower() if DEVICE == "CPU" else "0"
+    _, _ = get_model(ydir, run_platform_name, device_input, batch=batch_size)
 
     os.remove(f"{ydir}/{MODEL_NAME}.pt")

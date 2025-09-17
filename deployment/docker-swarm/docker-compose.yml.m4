@@ -10,3 +10,4 @@ include(network.m4)
 
 volumes:
     app-content:
+    vdms-content:

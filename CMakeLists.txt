@@ -50,36 +50,6 @@ if (NOT DEFINED DEBUG)
     set(DEBUG "0")
 endif()
 
-if (NOT DEFINED DOCKER_TAR)
-    set(DOCKER_TAR "0")
-endif()
-
-set(DOCKER_TAR_DIR ${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars)
-
-if(DOCKER_TAR MATCHES "1")
-    set(TAR_FILES
-        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_frontend_stream.tar"
-        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_video_stream.${DEVICE}.tar"
-        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_vdms_stream.tar"
-        "${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/lcc_certificate_stream.tar"
-    )
-
-    # Check if all files exist
-    set(ALL_TARS_EXIST TRUE)
-    foreach(TAR_FILE ${TAR_FILES})
-        if(NOT EXISTS "${TAR_FILE}")
-            set(ALL_TARS_EXIST FALSE)
-        endif()
-    endforeach()
-
-    if(NOT ALL_TARS_EXIST)
-        message(WARNING "All required tar files do not exist.")
-        set(DOCKER_TAR "0")
-        set(DOCKER_TAR_DIR "${EMPTY}")
-    endif()
-
-endif()
-
 if (NOT DEFINED IN_SOURCE)
     set(IN_SOURCE "videos") # Use videos
 endif()
@@ -102,6 +72,40 @@ endif()
 
 if (NOT DEFINED NCPU)
     set(NCPU 0)
+endif()
+
+if (NOT DEFINED DOCKER_TAR)
+    set(DOCKER_TAR "0")
+endif()
+
+if (RESIZE_FLAG STREQUAL "True")
+    set(DOCKER_TAR_DIR ${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/resize)
+else()
+    set(DOCKER_TAR_DIR ${CMAKE_HOME_DIRECTORY}/deployment/DockerImageTars/full)
+endif()
+
+if(DOCKER_TAR MATCHES "1")
+    set(TAR_FILES
+        "${DOCKER_TAR_DIR}/lcc_frontend_stream.tar"
+        "${DOCKER_TAR_DIR}/lcc_video_stream.${DEVICE}.tar"
+        "${DOCKER_TAR_DIR}/lcc_vdms_stream.tar"
+        "${DOCKER_TAR_DIR}/lcc_certificate_stream.tar"
+    )
+
+    # Check if all files exist
+    set(ALL_TARS_EXIST TRUE)
+    foreach(TAR_FILE ${TAR_FILES})
+        if(NOT EXISTS "${TAR_FILE}")
+            set(ALL_TARS_EXIST FALSE)
+        endif()
+    endforeach()
+
+    if(NOT ALL_TARS_EXIST)
+        message(WARNING "All required tar files do not exist.")
+        set(DOCKER_TAR "0")
+        set(DOCKER_TAR_DIR "${EMPTY}")
+    endif()
+
 endif()
 
 
