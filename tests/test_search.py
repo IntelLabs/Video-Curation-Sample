@@ -5,6 +5,7 @@ import os
 import subprocess
 import time
 import traceback
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from random import randint
@@ -20,7 +21,6 @@ import vdms
 
 video_name = "*"  # If querying specific video change to name stored in VDMS
 dbhost = "localhost"  # os.environ["DBHOST"]
-# vdhost = os.environ["VDHOST"]
 DEBUG = os.environ["DEBUG"]
 LOCKTIMEOUT_RETRIES = 5
 ERR_KEYWORDS = [
@@ -32,6 +32,144 @@ ERR_KEYWORDS = [
 
 
 query_dict = {
+    "handbag-umbrella|backpack-umberlla": [
+        [
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "handbag",
+                    },
+                    {
+                        "name": "Object Count",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Object Count Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            },
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "umbrella",
+                    },
+                    {
+                        "name": "Object Count",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Object Count Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            },
+        ],
+        [
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "backpack",
+                    },
+                    {
+                        "name": "Object Count",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Object Count Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            },
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "umbrella",
+                    },
+                    {
+                        "name": "Object Count",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Object Count Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            },
+        ],
+    ],
     "findperson": [
         [
             {
@@ -75,6 +213,16 @@ query_dict = {
                         "type": "list",
                         "values": all_labels,
                         "value": "person",
+                    },
+                    {
+                        "name": "Object Count",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Object Count Condition",
+                        "type": "list",
+                        "value": "==",
                     },
                     {
                         "name": "Frame ID",
@@ -261,6 +409,16 @@ query_dict = {
                         "value": "person",
                     },
                     {
+                        "name": "Object Count",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Object Count Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                    {
                         "name": "Frame ID",
                         "type": "text",
                         "value": "skip",
@@ -282,6 +440,86 @@ query_dict = {
                         "type": "list",
                         "values": all_labels,
                         "value": "car",
+                    },
+                    {
+                        "name": "Object Count",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Object Count Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            },
+        ]
+    ],
+    "person-umbrella": [
+        [
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "person",
+                    },
+                    {
+                        "name": "Object Count",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Object Count Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                    {
+                        "name": "Frame ID",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Frame Condition",
+                        "type": "list",
+                        "value": "==",
+                    },
+                ],
+            },
+            {
+                "name": "object",
+                "icon": "images/object.png",
+                "description": "Find Object",
+                "params": [
+                    {
+                        "name": "Object List",
+                        "type": "list",
+                        "values": all_labels,
+                        "value": "umbrella",
+                    },
+                    {
+                        "name": "Object Count",
+                        "type": "text",
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Object Count Condition",
+                        "type": "list",
+                        "value": "==",
                     },
                     {
                         "name": "Frame ID",
@@ -423,6 +661,49 @@ def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0
     return response
 
 
+def find_indices_of_objects_in_entities(
+    ent_list_of_dicts, objects_of_interest, requested_cnts
+):
+    """
+    Helps with AND operations
+    Returns list of dicts containing all objects in same video/frame
+    """
+    # Use defaultdict to group indices and objects by the unique (videoname, frame) combination
+    grouped_data = defaultdict(lambda: {"indices": [], "objects": [], "dict": []})
+    for idx, ent in enumerate(ent_list_of_dicts):
+        if ent["objectID"] in objects_of_interest:
+            k = (ent["server_filepath"], ent["frameID"])
+            grouped_data[k]["indices"].append(idx)
+            grouped_data[k]["objects"].append(ent["objectID"])
+            grouped_data[k]["dict"].append(ent)
+    reduced_ents = []
+    for k, v in grouped_data.items():
+        objs = v["objects"]
+        satisfied = []
+        if all(o in objs for o in objects_of_interest):  # All objects present
+            # Check values
+            for obj in objects_of_interest:
+                if obj not in requested_cnts.keys():
+                    requested_cnts[obj] = [">=", 1]
+
+            for obj, (
+                obj_cond,
+                obj_cnt,
+            ) in requested_cnts.items():  # Check cnts of objects if available
+                # if obj_cnt == objs.count(obj):
+                if eval(f"{objs.count(obj)} {obj_cond} {int(obj_cnt)}"):
+                    satisfied.append(True)
+                else:  # If any cnts dont match, dont add entity
+                    satisfied.append(False)
+            if all(satisfied):
+                # satisfied_dicts = []
+                for o, d in zip(objs, v["dict"]):
+                    if o in objects_of_interest:
+                        reduced_ents.append(d)
+
+    return reduced_ents
+
+
 class SearchHandler:
     def __init__(self, **kwargs):
         self.executor = ThreadPoolExecutor(8)
@@ -482,6 +763,7 @@ class SearchHandler:
             }
         }
 
+        requested_cnts = {}
         for icon_query in line_queries:
             if icon_query["name"] == "video":
                 name = self._value(icon_query, "Video Name")
@@ -501,12 +783,19 @@ class SearchHandler:
                         }
                     )
                 else:
-                    return [q_vid, q_vid2]
+                    return [q_vid, q_vid2], requested_cnts
 
             if icon_query["name"] == "object":
                 obj_name = self._value(icon_query, "Object List")
                 frame = self._value(icon_query, "Frame ID")
                 frame_cond = self._value(icon_query, "Frame Condition")
+                obj_cnt = self._value(icon_query, "Object Count")
+                obj_cnt_cond = self._value(icon_query, "Object Count Condition")
+                if (
+                    all(x is not None for x in [obj_cnt, obj_cnt_cond])
+                    and obj_cnt != "skip"
+                ):
+                    requested_cnts[obj_name] = [obj_cnt_cond, int(obj_cnt)]
 
                 q_frame["FindBoundingBox"].setdefault("constraints", {})
                 if "objectID" in q_frame["FindBoundingBox"]["constraints"]:
@@ -569,7 +858,7 @@ class SearchHandler:
                     ]
 
         del q_vid2["FindEntity"]["link"]
-        return [q_vid2, q_frame]
+        return [q_vid2, q_frame], requested_cnts
 
     def _get_info(self, video):
         width = height = duration = fps = nb_frames = 0
@@ -630,12 +919,13 @@ class SearchHandler:
         segs = []
         for i in range(0, len(response), 2):
             if (
-                "FindVideo" in response[i]
+                len(response) > 1
+                and "FindVideo" in response[i]
                 and response[i]["FindVideo"]["status"] == 0
                 and response[i + 1]["FindEntity"]["status"] == 0
             ):
                 entities = response[i + 1]["FindEntity"]["entities"]
-                print(entities)
+                # print(entities)
 
                 uniq_name = []
                 for ent in entities:
@@ -662,12 +952,13 @@ class SearchHandler:
                         uniq_name.append(name)
 
             elif (
-                "FindBoundingBox" in response[i + 1]
+                len(response) > 1
+                and "FindBoundingBox" in response[i + 1]
                 and response[i + 1]["FindBoundingBox"]["status"] == 0
                 and "entities" in response[i + 1]["FindBoundingBox"]
             ):
                 entities = response[i + 1]["FindBoundingBox"]["entities"]
-                print(f"\t{len(entities)} bbs returned")
+                print(f"\t{len(entities)} bbs returned", flush=True)
 
                 for ent_bbox in entities:
                     stream = ent_bbox["server_filepath"]
@@ -782,17 +1073,40 @@ class SearchHandler:
         if DEBUG == "1":
             print("Queries: ", flush=True)
         for line_query in queries:  # Query per line in Gui
-            vdms_query = self._construct_query(line_query, ref)
+            vdms_query, requested_cnts = self._construct_query(line_query, ref)
             if DEBUG == "1":
                 print("vdms_query:", flush=True)
                 print(vdms_query, flush=True)
 
             responses = retry_query(self._vdms, vdms_query, sleep_timer=randint(1, 5))
+
+            # Get expected object counts
+            if len(responses) > 1 and "FindBoundingBox" in responses[1]:
+                if (
+                    "objectID" in vdms_query[1]["FindBoundingBox"]["constraints"]
+                ):  # and len(vdms_query[1]['FindBoundingBox']['constraints']["objectID"]) > 2:
+                    objects_of_interest = [
+                        vdms_query[1]["FindBoundingBox"]["constraints"]["objectID"][i]
+                        for i in range(
+                            1,
+                            len(
+                                vdms_query[1]["FindBoundingBox"]["constraints"][
+                                    "objectID"
+                                ]
+                            ),
+                            2,
+                        )
+                    ]
+                    bb_ents = responses[1]["FindBoundingBox"]["entities"]
+                    reduced_ents = find_indices_of_objects_in_entities(
+                        bb_ents, objects_of_interest, requested_cnts
+                    )
+                    responses[1]["FindBoundingBox"]["entities"] = reduced_ents
+            vdms_response.extend(responses)
+            ref += 1
+
             if DEBUG == "1":
                 print("response: ", responses, flush=True)
-
-            ref += 1
-            vdms_response.extend(responses)
 
         return vdms_response
 

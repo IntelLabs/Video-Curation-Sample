@@ -71,7 +71,7 @@ detection_threshold = 0.25  # 0.7
 half_flag = True
 iou_threshold = 0.7  # 0.9  # 0.5
 
-model_path = f"{CODE_DIR}/resources/models/ultralytics/yolo11/{MODEL_PRECISION}/yolo11n_openvino_model"
+model_path = f"{CODE_DIR}/resources/models/ultralytics/yolo11n/{MODEL_PRECISION}/yolo11n_openvino_model"
 model = YOLO(model_path, verbose=False, task="detect")
 
 

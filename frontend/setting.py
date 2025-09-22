@@ -151,6 +151,18 @@ class SettingHandler(web.RequestHandler):
                             "value": "person",
                         },
                         {
+                            "name": "Object Count",
+                            "type": "list",
+                            "values": ["skip"] + [str(x) for x in range(1, 26)],
+                            "value": "skip",
+                        },
+                        {
+                            "name": "Object Count Condition",
+                            "type": "list",
+                            "values": ["==", "<=", "<", ">=", ">"],
+                            "value": "==",
+                        },
+                        {
                             "name": "Frame ID",
                             "type": "text",
                             "value": "skip",

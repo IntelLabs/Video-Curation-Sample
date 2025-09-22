@@ -16,8 +16,7 @@ docker_compose)
     fi
 
     docker compose -f "$yml" -p lcc --compatibility down -v
-    docker volume rm app-content || true
-    # fi
+    docker volume rm lcc_app-content || true
     ;;
 *)
     docker stack services lcc

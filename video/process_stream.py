@@ -103,6 +103,7 @@ create_clip_queue = mp.Queue()
 
 
 def retry_query(query, num_retries: int = LOCKTIMEOUT_RETRIES, sleep_timer: int = 0):
+    global db
     for ridx in range(num_retries + 1):
         response, _ = db.query(query, [[]])
         if "FailedCommand" in response[0] and any(
