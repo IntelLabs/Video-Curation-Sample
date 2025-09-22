@@ -34,7 +34,7 @@ script_usage()
 
     Options:
         -h                  optional    Print this help message
-        -t or --type        optional    Deployment method (compose, k8) [Default: compose]
+        -t or --type        optional    Deployment method (compose) [Default: compose]
         -p or --prune       optional    Flag to prune docker builder
 
 EOF
@@ -57,8 +57,8 @@ cd $BUILD_DIR
 if [ $EXP_TYPE == "compose" ]; then
     make stop_docker_compose
 
-elif [ $EXP_TYPE == "k8" ]; then
-    make stop_kubernetes
+# elif [ $EXP_TYPE == "k8" ]; then
+#     make stop_kubernetes
 
 else
     echo "INVALID TYPE: ${EXP_TYPE}"
@@ -68,6 +68,7 @@ fi
 if [ $DOCKER_PRUNE == "1" ]; then
     DOCKER_BUILDKIT=1 docker builder prune -f || true
     docker container prune -f || true
+    docker volume rm lcc_app-content || true  # Verify volume is removed
     docker volume prune -f || true
     docker network prune -f || true
 fi
