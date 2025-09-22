@@ -68,7 +68,7 @@ fi
 if [ $DOCKER_PRUNE == "1" ]; then
     DOCKER_BUILDKIT=1 docker builder prune -f || true
     docker container prune -f || true
-    docker volume rm lcc_app-content || true  # Verify volume is removed
+    docker volume rm lcc_app-content lcc_vdms-content || true  # Verify volume is removed
     docker volume prune -f || true
     docker network prune -f || true
 fi

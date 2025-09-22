@@ -16,20 +16,14 @@ docker_compose)
         exit 0
     fi
 
-    echo "Cleanup $(hostname)..."
-    docker container prune -f; echo
-    docker volume prune -f; echo
-    docker network prune -f; echo
+    # echo "Cleanup $(hostname)..."
+    # docker container prune -f; echo
+    # docker volume prune -f; echo
+    # docker network prune -f; echo
 
     shift
     . "$DIR/build.sh"
-    # if [ "$DEVICE" == "GPU" ]; then
-    #     #TODO: Test running separately then running others
-    #     DOCKER_BUILDKIT=0 docker compose -f "$yml" -p lcc --compatibility up video-service
-    #     docker compose -f "$yml" -p lcc --compatibility up
-    # else
     docker compose -f "$yml" -p lcc --compatibility up
-    # fi
     ;;
 *)
     shift
