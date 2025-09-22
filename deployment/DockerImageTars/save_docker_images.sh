@@ -1,6 +1,6 @@
 #!/bin/bash -e
 #######################################################################################################################
-# Cpy volume data to another volume
+# Save docker images
 #######################################################################################################################
 # DEFAULT VARIABLES
 in_vol=$1
@@ -58,7 +58,7 @@ fi
 mkdir -p ${SAVE_DIR}
 
 #######################################################################################################################
-# SAVE CONTAINERS
+# SAVE IMAGES
 
 echo "Saving lcc_frontend:stream ..."
 docker save -o ${SAVE_DIR}/lcc_frontend_stream.tar lcc_frontend:stream

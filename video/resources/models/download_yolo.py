@@ -33,6 +33,7 @@ else:
     run_platform_name = "openvino"
     print("[!] USING CPU & OPENVINO")
 
+
 def get_model(model_dir, run_platform, device_input, batch=1):
     final_model_path = f"{model_dir}/{MODEL_NAME}.pt"
     pt_detection_model = YOLO(final_model_path, verbose=False, task="detect")
@@ -101,7 +102,7 @@ def get_model(model_dir, run_platform, device_input, batch=1):
 
     elif run_platform == "pytorch":
         object_detection_model = pt_detection_model
-        if device == "GPU":
+        if DEVICE == "GPU":
             object_detection_model.to("cuda")
         else:
             object_detection_model.to(device_input)

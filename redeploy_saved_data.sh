@@ -20,8 +20,8 @@ mv inputs/camera_config.yaml inputs/camera_config.yaml.bak
 touch inputs/camera_config.yaml
 
 # Rename saved volumes to expected names
-./deployment/DockerImageTars/rename_volume.sh _lcc_app-content lcc_app-content
-./deployment/DockerImageTars/rename_volume.sh _lcc_vdms-content lcc_vdms-content
+./deployment/DockerImageTars/rename_volume.sh lcc_app-content_saved lcc_app-content
+./deployment/DockerImageTars/rename_volume.sh lcc_app-content_saved lcc_vdms-content
 
 # Start APP
 ./start_app.sh -e GPU --tars
