@@ -109,11 +109,6 @@ if(DOCKER_TAR MATCHES "1")
 endif()
 
 
-if(REGISTRY MATCHES "${EMPTY}")
-    add_custom_target(update  ${CMAKE_HOME_DIRECTORY}/script/update-image.sh)
-endif()
-add_custom_target(dist  ${CMAKE_HOME_DIRECTORY}/script/mk-dist.sh)
-
 file(GLOB dirs "deployment" "*")
 list(REMOVE_DUPLICATES dirs)
 foreach (dir ${dirs})

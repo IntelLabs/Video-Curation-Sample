@@ -7,11 +7,6 @@
 # camera_name:     (Required) Unique name or ID for camera
 #   type:          (Required) rtsp
 #   url:           (Required) RTSP URL streaming video
-#   camera_height: (Optional) Camera height dimension (mm)
-#   camera_width:  (Optional) Camera width dimension (mm)
-#   description:   (Optional) Any description of camera
-#   focal_length:  (Optional) Focal length (mm) of camera
-#   video_dir:     (Optional) Streams video to application via udf for testing
 #########################################################################
 
 # live1:
