@@ -16,7 +16,7 @@ docker_compose)
         exit 0
     fi
 
-    # echo "Cleanup $(hostname)..."
+    echo "Cleanup $(hostname)..."
     docker container prune -f; echo
     # docker volume prune -f; echo
     docker network prune -f; echo

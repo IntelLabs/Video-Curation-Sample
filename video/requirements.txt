@@ -1,4 +1,6 @@
 inotify
+numpy>=1.23.5,<2.0.0
+opencv-python-headless==4.10.0.82
+ultralytics>=8.3.83
 vdms
 wheel
-opencv-python-headless==4.10.0.82
