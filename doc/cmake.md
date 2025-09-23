@@ -25,8 +25,11 @@ If interested in using sample videos, run the provided script to download Pexel 
 cd inputs
 ./download.sh
 ```
+
+#### Deploy Service
 Then use the start script to deploy. An example for CPU is:
 ```bash
+cd ..
 ./start_app.sh -e CPU
 ```
 <br>
@@ -34,12 +37,8 @@ Then use the start script to deploy. An example for CPU is:
 ### Stream from RTSP Camera
 This application accepts video stream from RTSP cameras.
 The URL for the camera should be set in [camera_config.yaml](/inputs/camera_config.yaml).
-Then use the start script to deploy. An example for GPU and resizing videos to lower resolution (640x640) is:
-```bash
-./start_app.sh -e GPU -z
-```
 
-#### Simulate RTSP Camera
+#### Simulate Camera Stream
 In cases where a camera is not available, Ffmpeg and MediaMTX can be used to simulate a camera feed from a source such as MP4 file.
 
 First install MediaMTX ([see MediaMTX](https://github.com/bluenviron/mediamtx)) or use their docker container to start an RTSP server:
@@ -59,9 +58,15 @@ ffmpeg -re -stream_loop -1 -i ${TEST_VIDEO} ${GENERAL_OPTS} \
 -vcodec libx264 -preset fast -crf 23 -bufsize 8M -pix_fmt yuv420p \
 -filter:v fps=fps=${FPS} -f rtsp -rtsp_transport tcp ${URL}
 ```
+
+#### Deploy Service
+Then use the start script to deploy. An example for GPU and resizing videos to lower resolution (640x640) is:
+```bash
+./start_app.sh -e GPU -z
+```
 <br>
 
-
+<!--
 ## Make Commands:
 
 - **build**: Build the sample (docker) images.
@@ -69,9 +74,9 @@ ffmpeg -re -stream_loop -1 -i ${TEST_VIDEO} ${GENERAL_OPTS} \
 - **dist**: Create the sample distribution package.
 - **start/stop_docker_compose**: Start/stop the sample orchestrated by docker-compose.
 - **start/stop_docker_swarm**: Start/stop the sample orchestrated by docker swarm.
-<!-- - **start/stop_kubernetes**: Start/stop the sample orchestrated by Kubernetes. -->
+- **start/stop_kubernetes**: Start/stop the sample orchestrated by Kubernetes.
 
 ## See Also:
 
 - [Sample Distribution](dist.md)
-
+ -->
