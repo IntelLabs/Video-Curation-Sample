@@ -5,11 +5,6 @@
 # DEFAULT VARIABLES
 INGESTION="object,face"
 EXP_TYPE=compose
-REGISTRY=None
-NCPU=0
-NCURATIONS=1
-NSTREAMS=1
-IN_SOURCE=stream
 DEBUG="0"
 DEVICE="CPU"
 DOCKER_TAR="0"
@@ -23,14 +18,9 @@ BUILD_DIR=$DIR/build
 LONG_LIST=(
     "ingestion:"
     "type:"
-    "registry:"
     "resize"
     "model:"
-    "ncurations:"
-    "nstreams:"
-    "ncpu:"
     "omit-det"
-    "source:"
     "debug"
     "device:"
     "tars"
@@ -39,7 +29,7 @@ LONG_LIST=(
 OPTS=$(getopt \
     --longoptions "$(printf "%s," "${LONG_LIST[@]}")" \
     --name "$(basename "$0")" \
-    --options "hdlozi:t:r:m:n:v:c:s:e:" \
+    --options "hdlozi:t:m:e:" \
     -- "$@"
 )
 
@@ -67,12 +57,8 @@ script_usage()
         -i or --ingestion   optional    Ingestion type (object, face) [Default: "object,face"]
         -l or --tars        optional    Flag to load docker images instead of building from Dockerfiles
         -m or --model       optional    Custom YOLO model name (<model name>.pt). If not provided model YOLO11n is used.
-        -n or --ncurations  optional    Number of ingestion containers [Default: 1]
         -o or --omit-det    optional    By default, object detections are printed. To omit printing detections to screen, enable flag.
-        -r or --registry    optional    Registry [Default: None]
-        -s or --source      optional    Input source type (videos, stream) [Default: stream]
         -t or --type        optional    Deployment method (compose) [Default: compose]
-        -v or --nstreams    optional    Number of video streams [Default: 1]
         -z or --resize      optional    Flag to resize video to model input size
 
 EOF
@@ -81,17 +67,12 @@ EOF
 while true; do
     case "$1" in
         -h) script_usage; exit 0 ;;
-        -c | --ncpu) shift; NCPU=$1; shift ;;
         -d | --debug) shift; DEBUG="1" ;;
         -l | --tars) shift; DOCKER_TAR="1" ;;
         -e | --device) shift; DEVICE=$1; shift ;;
         -i | --ingestion) shift; INGESTION=$1; shift ;;
         -m | --model) shift; MODEL_NAME=$1; shift ;;
-        -n | --ncurations) shift; NCURATIONS=$1; shift ;;
-        -r | --registry) shift; REGISTRY="$1"; shift ;;
-        -s | --source) shift; IN_SOURCE="$1"; shift ;;
         -t | --type) shift; EXP_TYPE="$1"; shift ;;
-        -v | --nstreams) shift; NSTREAMS=$1; shift ;;
         -z | --resize) shift; RESIZE_FLAG="True" ;;
         -o | --omit-det) shift; OMIT_DETECTIONS_FLAG="True" ;;
         --) shift; break ;;
@@ -103,48 +84,20 @@ done
 # BUILD AND START APP
 cd $BUILD_DIR
 
-if [ $REGISTRY == "None" ]; then
-    cmake \
-        -DDEBUG=$DEBUG \
-        -DDEVICE=$DEVICE \
-        -DDOCKER_TAR=$DOCKER_TAR \
-        -DINGESTION=$INGESTION \
-        -DIN_SOURCE=$IN_SOURCE \
-        -DNCPU=$NCPU \
-        -DNCURATIONS=$NCURATIONS \
-        -DNSTREAMS=$NSTREAMS \
-        -DRESIZE_FLAG=$RESIZE_FLAG \
-        -DOMIT_DETECTIONS_FLAG=$OMIT_DETECTIONS_FLAG \
-        -DMODEL_NAME=$MODEL_NAME \
-        ..
-else
-    cmake \
-        -DDEBUG=$DEBUG \
-        -DDEVICE=$DEVICE \
-        -DDOCKER_TAR=$DOCKER_TAR \
-        -DINGESTION=$INGESTION \
-        -DIN_SOURCE=$IN_SOURCE \
-        -DNCPU=$NCPU \
-        -DNCURATIONS=$NCURATIONS \
-        -DNSTREAMS=$NSTREAMS \
-        -DRESIZE_FLAG=$RESIZE_FLAG \
-        -DOMIT_DETECTIONS_FLAG=$OMIT_DETECTIONS_FLAG \
-        -DMODEL_NAME=$MODEL_NAME \
-        -DREGISTRY=$REGISTRY \
-        ..
-fi
+cmake \
+    -DDEBUG=$DEBUG \
+    -DDEVICE=$DEVICE \
+    -DDOCKER_TAR=$DOCKER_TAR \
+    -DINGESTION=$INGESTION \
+    -DMODEL_NAME=$MODEL_NAME \
+    -DOMIT_DETECTIONS_FLAG=$OMIT_DETECTIONS_FLAG \
+    -DRESIZE_FLAG=$RESIZE_FLAG \
+    ..
 
 make
 
 if [ $EXP_TYPE == "compose" ]; then
     make start_docker_compose
-
-# elif [ $EXP_TYPE == "k8" ]; then
-#     if [ $REGISTRY == "None" ]; then
-#         make update
-#     fi
-
-#     make start_kubernetes
 
 else
     echo "INVALID TYPE: ${EXP_TYPE}"

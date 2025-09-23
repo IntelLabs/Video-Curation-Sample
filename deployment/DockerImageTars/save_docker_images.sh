@@ -3,9 +3,8 @@
 # Save docker images
 #######################################################################################################################
 # DEFAULT VARIABLES
-in_vol=$1
-out_vol=$2
 RESIZE_FLAG="False"
+DEVICE="CPU"
 
 DIR=$(dirname $(readlink -f "$0"))
 
@@ -14,12 +13,13 @@ DIR=$(dirname $(readlink -f "$0"))
 
 LONG_LIST=(
     "resize"
+    "device:"
 )
 
 OPTS=$(getopt \
     --longoptions "$(printf "%s," "${LONG_LIST[@]}")" \
     --name "$(basename "$0")" \
-    --options "hz" \
+    --options "hze:" \
     -- "$@"
 )
 
@@ -34,6 +34,7 @@ script_usage()
 
     Options:
         -h                  optional    Print this help message
+        -e or --device      optional    Device for inference (CPU, GPU) [Default: CPU]
         -z or --resize      optional    Flag to resize video to model input size
 
 EOF
@@ -42,6 +43,7 @@ EOF
 while true; do
     case "$1" in
         -h) script_usage; exit 0 ;;
+        -e | --device) shift; DEVICE=$1; shift ;;
         -z | --resize) shift; RESIZE_FLAG="True" ;;
         --) shift; break ;;
         *) script_usage; exit 0 ;;
@@ -64,7 +66,7 @@ echo "Saving lcc_frontend:stream ..."
 docker save -o ${SAVE_DIR}/lcc_frontend_stream.tar lcc_frontend:stream
 
 echo "Saving lcc_video:stream ..."
-docker save -o ${SAVE_DIR}/lcc_video_stream.GPU.tar lcc_video:stream
+docker save -o ${SAVE_DIR}/lcc_video_stream.${DEVICE}.tar lcc_video:stream
 
 echo "Saving lcc_vdms:stream ..."
 docker save -o ${SAVE_DIR}/lcc_vdms_stream.tar lcc_vdms:stream

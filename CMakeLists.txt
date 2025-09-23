@@ -118,18 +118,13 @@ file(GLOB dirs "deployment" "*")
 list(REMOVE_DUPLICATES dirs)
 foreach (dir ${dirs})
     if(EXISTS ${dir}/CMakeLists.txt)
-        if(${dir} MATCHES "stream" AND IN_SOURCE MATCHES "stream")
-            add_subdirectory(${dir})
-        elseif(NOT ${dir} MATCHES "stream")
-            add_subdirectory(${dir})
-        endif()
+        add_subdirectory(${dir})
     endif()
 endforeach()
 
 # legal message
 execute_process(COMMAND printf "\n\nThis script will build third party components licensed under various open source licenses into your container images. The terms under which those components may be used and distributed can be found with the license document that is provided with those components. Please familiarize yourself with those terms to ensure your distribution of those components complies with the terms of those licenses.\n\n")
-
-execute_process(COMMAND printf "PLATFORM=${PLATFORM}, NSTREAMS=${NSTREAMS}, NCURATIONS=${NCURATIONS}, INGESTION=${INGESTION}\n")
-execute_process(COMMAND printf "IN_SOURCE=${IN_SOURCE}, NCPU=${NCPU}, DEVICE=${DEVICE}, DEBUG=${DEBUG}, RESIZE_FLAG=${RESIZE_FLAG}, OMIT_DETECTIONS_FLAG=${OMIT_DETECTIONS_FLAG}\n")
-execute_process(COMMAND printf "DOCKER_TAR=${DOCKER_TAR}, DOCKER_TAR_DIR=${DOCKER_TAR_DIR}, REGISTRY=${REGISTRY}, MODEL_NAME=${MODEL_NAME}, CUSTOM_MODEL_FLAG=${CUSTOM_MODEL_FLAG}\n\n")
+execute_process(COMMAND printf "INGESTION=${INGESTION}, DEVICE=${DEVICE}, DEBUG=${DEBUG}, RESIZE_FLAG=${RESIZE_FLAG}, OMIT_DETECTIONS_FLAG=${OMIT_DETECTIONS_FLAG}\n")
+execute_process(COMMAND printf "DOCKER_TAR=${DOCKER_TAR}, DOCKER_TAR_DIR=${DOCKER_TAR_DIR}, MODEL_NAME=${MODEL_NAME}, CUSTOM_MODEL_FLAG=${CUSTOM_MODEL_FLAG}\n")
+execute_process(COMMAND printf "PLATFORM=${PLATFORM}, NSTREAMS=${NSTREAMS}, NCURATIONS=${NCURATIONS}, IN_SOURCE=${IN_SOURCE}, NCPU=${NCPU}, REGISTRY=${REGISTRY}\n\n")
 

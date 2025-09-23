@@ -5,72 +5,61 @@ Use the following definitions to customize the building process:
 - **DEBUG**: Flag to enable debug messages
 - **DEVICE**: Specify the device: `CPU` or `GPU`
 - **DOCKER_TAR**: Flag to load docker images instead of building from Dockerfiles
-- **IN_SOURCE**: Specify the input video source: `videos` and/or `stream` (comma-delimited).
+<!-- - **IN_SOURCE**: Specify the input video source: `videos` and/or `stream` (comma-delimited). -->
 - **INGESTION**: Specify the ingestion mode: `face` and/or `object`. Use comma as the deliminator to specify more than 1 ingestion mode.
-- **MODEL_NAME**: Specify the custom YOLO model name which is expected to be in `video/resources/models/ultralytics/custom_models/<model name>.pt`. If not provided, the Ultralytics YOLO11n (`yolo11n`) is used.
-- **NCURATIONS**: Specify the number of curation processes running in the background.
-- **NSTREAMS**: Specify the number of video streams
+- **MODEL_NAME**: Specify the custom YOLO model name which is expected to be in `video/resources/models/ultralytics/custom_models/<model name>.pt`. If not provided, the Ultralytics YOLO11n (`yolo11n`) is used.  If custom model is used, be sure the object list in `frontend/setting.py` matches the classes of the model.
+<!-- - **NCURATIONS**: Specify the number of curation processes running in the background. -->
+<!-- - **NSTREAMS**: Specify the number of video streams -->
 - **OMIT_DETECTIONS_FLAG**: Flag to omit printing detections to screen. By default, object detections are printed.
-- **PLATFORM**: Specify the target platform: `Xeon`
+<!-- - **PLATFORM**: Specify the target platform: `Xeon` -->
 - **RESIZE_FLAG**: Specify `True` to resize videos to model input size or `False` (default) to use video resolution.
 <!-- - **REGISTRY**: Name of private registry to push image. If registry secret is available, update `imagePullSecrets` field in [frontend.yaml.m4](../deployment/kubernetes/frontend.yaml.m4), [video_stream.yaml.m4](../deployment/kubernetes/video_stream.yaml.m4), and/or [video.yaml.m4](../deployment/kubernetes/video.yaml.m4) for Kubernetes. `docker login` may be necessary. -->
 <br>
 
-<!-- ***Optimizations for sharing host with other applications:*** -->
-<!-- The following optimizations are helpful if running other applications on the same host.
-- [Assigning CPU resources](https://kubernetes.io/docs/tasks/configure-pod-container/assign-cpu-resource/) is helpful in this case. In this sample, we specify a CPU request for the ingest container by including the resources:requests field in the container resource manifest. Remove the following from [frontend.yaml.m4](../deployment/kubernetes/frontend.yaml.m4) under configurations for ingest container to disable this feature or modify as needed.
-    ```JSON
-    resources:
-        requests:
-            cpu: "1"
-    ``` -->
-<!-- - **NCPU**: Use `NCPU` in your cmake command to specify number of CPU cores for Ingestion. The ingest pool will run on randomly selected CPUs. Similar to `taskset` on Linux. -->
-<br>
 
-<!-- ## Examples:
+## Examples:
 ### Use videos
-This sample uses a list of ten video from Pexel.  Please accept the license when prompted.  Use the following command to build the sample:
+This sample provides a list of ten sample videos from Pexel.
+If interested in using sample videos, run the provided script to download Pexel videos and accept the terms and conditions of the data set license.
 ```bash
-mkdir build
-cd build
-cmake ..
-make
+cd inputs
+./download.sh
 ```
-Then run your preference [make command](#make-commands)  for deploying.
-
-Or you use the start script to deploy. An example is:
+Then use the start script to deploy. An example for CPU is:
 ```bash
-./start_app.sh -e DEVICE -s videos -d
+./start_app.sh -e CPU
 ```
 <br>
 
-### Stream from webcam or URL
-Build the sample:
+### Stream from RTSP Camera
+This application accepts video stream from RTSP cameras.
+The URL for the camera should be set in [camera_config.yaml](/inputs/camera_config.yaml).
+Then use the start script to deploy. An example for GPU and resizing videos to lower resolution (640x640) is:
 ```bash
-mkdir build
-cd build
-cmake -DIN_SOURCE=stream ..
-make
+./start_app.sh -e GPU -z
 ```
-Then run your preference [make command](#make-commands) for deploying.
 
-Or you use the start script to deploy. An example is:
+#### Simulate RTSP Camera
+In cases where a camera is not available, Ffmpeg and MediaMTX can be used to simulate a camera feed from a source such as MP4 file.
+
+First install MediaMTX ([see MediaMTX](https://github.com/bluenviron/mediamtx)) or use their docker container to start an RTSP server:
 ```bash
-./start_app.sh -e DEVICE -s stream -d
+docker run --rm -it --network=host --name rstp_server bluenviron/mediamtx:latest
+```
+
+Use Ffmpeg to send video to the running server.
+For example, to stream video `TEST_VIDEO` in a continuous loop to `URL` (specified in `camera_config.yaml`) at 30 frames per second, run the following:
+```bash
+FPS=30
+GENERAL_OPTS="-threads 0 -flags +global_header -hide_banner -loglevel error -nostats -tune zerolatency -flush_packets 0"
+TEST_VIDEO="<path_to_MP4_video>"
+URL="rtsp://<HOSTNAME>:8554/rtsp1"  # User-defined
+
+ffmpeg -re -stream_loop -1 -i ${TEST_VIDEO} ${GENERAL_OPTS} \
+-vcodec libx264 -preset fast -crf 23 -bufsize 8M -pix_fmt yuv420p \
+-filter:v fps=fps=${FPS} -f rtsp -rtsp_transport tcp ${URL}
 ```
 <br>
-
-
-Once application is deployed, then use FFMPeg to start your webcam locally (or send a MP4 URL) and send via UDP to the host machine (`<hostname>`) and udp port (`<stream_port>`).
-Below is a sample command to stream using the internal camera on an HP laptop:
-```bash
-ffmpeg -re -f dshow -rtbufsize 100M -i video="HP HD Camera" -c copy -f mpegts -flush_packets 0 udp://<hostname>:<stream_port>?pkt_size=18800
-```
-
-Below is another sample command to stream a local video:
-```bash
-ffmpeg -re -i <mp4 video> -c copy -f mpegts -flush_packets 0 "udp://<hostname>:<stream_port>?pkt_size=18800"
-``` -->
 
 
 ## Make Commands:

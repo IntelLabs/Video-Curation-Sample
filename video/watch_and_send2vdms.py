@@ -11,7 +11,6 @@ from inotify.adapters import Inotify
 
 num_workers = mp.cpu_count()  #  5,  mp.cpu_count()
 
-in_source = os.environ["IN_SOURCE"]
 DEBUG = os.environ["DEBUG"]
 DEBUG_FLAG = True if DEBUG == "1" else False
 

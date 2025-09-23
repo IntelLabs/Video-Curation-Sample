@@ -5,7 +5,6 @@
         environment:
             RETENTION_MINS: "60"
             CLEANUP_INTERVAL: "10m"
-            SHOST: "http://stream-service:8080"
             DBHOST: "vdms-service"
             UDF_PORT: 5011
             `RESIZE_FLAG': "defn(`RESIZE_FLAG')"
@@ -13,7 +12,6 @@
             GPU_BATCH_SIZE: 1
             `DEBUG': "defn(`DEBUG')"
             `DEVICE': "defn(`DEVICE')"
-            `IN_SOURCE': "defn(`IN_SOURCE')"
             `INGESTION': "defn(`INGESTION')"
             http_proxy: "${http_proxy}"
             HTTP_PROXY: "${HTTP_PROXY}"
@@ -30,7 +28,7 @@
         depends_on:
             - vdms-service
         deploy:
-            replicas: defn(`NCURATIONS')
+            replicas: 1
     udf-bkgd-service:
         image: defn(`REGISTRY_PREFIX')lcc_udf:stream
         expose:
@@ -38,7 +36,6 @@
         environment:
             RETENTION_MINS: "60"
             CLEANUP_INTERVAL: "10m"
-            SHOST: "http://stream-service:8080"
             DBHOST: "vdms-service"
             UDF_PORT: 5012
             `RESIZE_FLAG': "defn(`RESIZE_FLAG')"
@@ -46,7 +43,6 @@
             GPU_BATCH_SIZE: 1
             `DEBUG': "defn(`DEBUG')"
             `DEVICE': "defn(`DEVICE')"
-            `IN_SOURCE': "defn(`IN_SOURCE')"
             `INGESTION': "defn(`INGESTION')"
             http_proxy: "${http_proxy}"
             HTTP_PROXY: "${HTTP_PROXY}"

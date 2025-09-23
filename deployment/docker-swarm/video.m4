@@ -26,16 +26,14 @@ define(`PROFILE_GPU', `depends_on:
             GPU_BATCH_SIZE: 1
             `DEBUG': "defn(`DEBUG')"
             `DEVICE': "defn(`DEVICE')"
-            `IN_SOURCE': "defn(`IN_SOURCE')"
             `INGESTION': "defn(`INGESTION')"
-            `NCURATIONS': "defn(`NCURATIONS')"
             WATCH_DIR: "/watch_dir"
             http_proxy: "${http_proxy}"
             HTTP_PROXY: "${HTTP_PROXY}"
             https_proxy: "${https_proxy}"
             HTTPS_PROXY: "${HTTPS_PROXY}"
-            no_proxy: "stream-service,vdms-service,udf-service,${no_proxy}"
-            NO_PROXY: "stream-service,vdms-service,udf-service,${NO_PROXY}"
+            no_proxy: "vdms-service,udf-service,${no_proxy}"
+            NO_PROXY: "vdms-service,udf-service,${NO_PROXY}"
         volumes:
             - /etc/localtime:/etc/localtime:ro
             - app-content:/var/www

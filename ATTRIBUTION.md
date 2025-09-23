@@ -35,7 +35,7 @@ Component: gst-libav
 Repository: https://github.com/GStreamer/gst-libav
 License: https://github.com/GStreamer/gst-libav/blob/master/COPYING
 
-Component: Gstreamer
+<!-- Component: Gstreamer
 Repository: https://github.com/GStreamer/gstreamer
 License: https://github.com/GStreamer/gstreamer/blob/master/COPYING
 
@@ -61,7 +61,7 @@ License: https://github.com/GStreamer/gst-plugins-ugly/blob/master/COPYING
 
 Component: Gstreamer vaapi
 Repository: https://github.com/GStreamer/gstreamer-vaapi
-License: https://github.com/GStreamer/gstreamer-vaapi/blob/master/COPYING.LIB
+License: https://github.com/GStreamer/gstreamer-vaapi/blob/master/COPYING.LIB -->
 
 Component: Intel DLDT
 Repository: https://github.com/openvinotoolkit/openvino
@@ -159,9 +159,9 @@ Component: python-requests
 Repository: https://github.com/psf/requests
 License: https://github.com/psf/requests/blob/master/LICENSE
 
-Component: scanner
+<!-- Component: scanner
 Repository: https://github.com/scanner-research/scanner
-License: https://github.com/scanner-research/scanner/blob/master/LICENSE
+License: https://github.com/scanner-research/scanner/blob/master/LICENSE -->
 
 Component: python tornado
 Repository: https://github.com/tornadoweb/tornado
