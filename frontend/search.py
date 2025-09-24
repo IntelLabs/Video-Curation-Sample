@@ -68,7 +68,7 @@ def find_indices_of_objects_in_entities(
     Helps with AND operations
     Returns list of dicts containing all objects in same video/frame
     """
-    # Use defaultdict to group indices and objects by the unique (videoname, frame) combination
+    # Use defaultdict to group indices and objects by the unique (server_filepath, frameID)
     grouped_data = defaultdict(lambda: {"indices": [], "objects": [], "dict": []})
     for idx, ent in enumerate(ent_list_of_dicts):
         if ent["objectID"] in objects_of_interest:
@@ -90,13 +90,11 @@ def find_indices_of_objects_in_entities(
                 obj_cond,
                 obj_cnt,
             ) in requested_cnts.items():  # Check cnts of objects if available
-                # if obj_cnt == objs.count(obj):
                 if eval(f"{objs.count(obj)} {obj_cond} {int(obj_cnt)}"):
                     satisfied.append(True)
                 else:  # If any cnts dont match, dont add entity
                     satisfied.append(False)
             if all(satisfied):
-                # satisfied_dicts = []
                 for o, d in zip(objs, v["dict"]):
                     if o in objects_of_interest:
                         reduced_ents.append(d)
@@ -427,9 +425,7 @@ class SearchHandler(web.RequestHandler):
 
             # Get expected object counts
             if len(responses) > 1 and "FindBoundingBox" in responses[1]:
-                if (
-                    "objectID" in vdms_query[1]["FindBoundingBox"]["constraints"]
-                ):  # and len(vdms_query[1]['FindBoundingBox']['constraints']["objectID"]) > 2:
+                if "objectID" in vdms_query[1]["FindBoundingBox"]["constraints"]:
                     objects_of_interest = [
                         vdms_query[1]["FindBoundingBox"]["constraints"]["objectID"][i]
                         for i in range(

@@ -54,7 +54,6 @@ TEST_MODE = str2bool(os.getenv("TEST_FLAG", False))
 TMP_LOCATION = os.getenv("TMP_LOCATION", "/var/www/cache/")
 UDF_HOST = os.getenv("UDF_HOST", "video-service")
 MODEL_NAME = os.getenv("MODEL_NAME", "yolo11n")
-# vdms_pool_size = 10
 
 LOCKTIMEOUT_RETRIES = 5
 ERR_KEYWORDS = ["timeout", "null search iterator", "outoftransactions"]
@@ -62,27 +61,22 @@ ERR_KEYWORDS = ["timeout", "null search iterator", "outoftransactions"]
 BATCH_SIZE = 1
 DBPORT = 55555
 DEBUG_FLAG = True if DEBUG == "1" else False
-DETECTION_THRESHOLD = 0.25  # 0.7
+DETECTION_THRESHOLD = 0.25
 DEVICE_OV = "AUTO"
 HALF_FLAG = True
-IOU_THRESHOLD = 0.7  # 0.9  # 0.5
+IOU_THRESHOLD = 0.7
 MODEL_PRECISION = "FP16"
 MODEL_W, MODEL_H = (640, 640)
-TARGET_FPS = 15  # 15  30
+TARGET_FPS = 15
 UDF_PORT = 5011
-WRITER_FOURCC = cv2.VideoWriter_fourcc(*"mp4v")  # avc1, mp4v, AVC1
+WRITER_FOURCC = cv2.VideoWriter_fourcc(*"mp4v")  # avc1, mp4v
+NUM_USUABLE_CPUS = 2  # os.cpu_count()
 
 if CUSTOM_MODEL_FLAG:
     model_path = f"{CODE_DIR}/resources/models/ultralytics/custom_models/{MODEL_NAME}"
 else:
     model_path = f"{CODE_DIR}/resources/models/ultralytics/{MODEL_NAME}/{MODEL_PRECISION}/{MODEL_NAME}"
 
-# if hasattr(os, "process_cpu_count"):
-#     num_usuable_cpus = os.process_cpu_count()
-# elif hasattr(os, "sched_getaffinity"):
-#     num_usuable_cpus = len(os.sched_getaffinity(0))
-# else:
-num_usuable_cpus = 2  # os.cpu_count()
 if not TEST_MODE:
     db = vdms.vdms()
     db.connect(DBHOST, DBPORT)
@@ -212,9 +206,6 @@ def extract_metadata_from_results(
                         fH,
                         fW,
                     ]
-                    # OBJ_COUNTER.setdefault(class_name, 0)
-                    # OBJ_COUNTER[class_name] += 1
-                    # current_cnt = OBJ_COUNTER[class_name]
 
                     framenum_str = f"{frameNum:04d}_{oidx:04d}"
                     if DEBUG_FLAG:
@@ -258,13 +249,10 @@ def face_detection(
     em_c, em_h, em_w = em_CHW
     W, H = img_size
     bs = 1
-    # Model expects BGRA
-    # face detect -> age-gender -> emotions
-    # global face_det_compiled_model, ag_compiled_model, em_compiled_model
+
     genders = ["female", "male"]
     emotions = ["neutral", "happy", "sad", "surprise", "anger"]
 
-    # input_layer = face_det_compiled_model.input(0)
     # Resize expects HWC
     input_image = cv2.resize(
         frame, (face_det_w, face_det_h), interpolation=cv2.INTER_AREA
@@ -348,7 +336,7 @@ def face_detection(
                     "frameW": int(W),
                 },
             }
-            # framenum_str = f"{frameNum}_{oidx}"
+
             framenum_str = f"{frameNum:04d}_{oidx:04d}"
             if DEBUG_FLAG:
                 meta_str = ",".join([str(o) for o in face_res + [framenum_str]])
@@ -373,9 +361,6 @@ def infer_worker(
     INGESTION,
     fps=TARGET_FPS,
 ):  # img_size:(W,H)
-    # global model
-    # Load models
-    # model, face_models, face_det_CHW, ag_CHW, em_CHW = load_models()
     global model, face_models, face_det_CHW, ag_CHW, em_CHW
 
     height, width = frame.shape[:2]
@@ -454,7 +439,6 @@ def get_udf_query(
     metadata=None,
     test_mode=TEST_MODE,
 ):
-    # global dbs
     query = {
         "AddVideo": {
             "from_file_path": str(filename_path),  # from_server_file
@@ -478,26 +462,18 @@ def get_udf_query(
     }
 
     if id == "udf_metadata" and metadata is not None:
-        # print(f"udf_metadata metadata: {metadata}", flush=True)
-        query["AddVideo"]["operations"][0]["options"]["metadata"] = (
-            metadata  # json.dumps(metadata)
-        )
+        query["AddVideo"]["operations"][0]["options"]["metadata"] = metadata
 
     if test_mode:
-        # print(f"{filename_path} Query: {query}", flush=True)
         return
 
     filename = str(Path(filename_path).name)
-    # db = vdms.vdms()
-    # if not db.is_connected():
-    #     db.connect(DBHOST, DBPORT)
     if DEBUG_FLAG:
         print(
             f"[TIMING],start_udf_ingest_{ingest_mode},{filename}," + str(time.time()),
             flush=True,
         )
     try:
-        # res, _ = db.query([query])
         res = retry_query([query], sleep_timer=randint(1, 5))
 
         if DEBUG_FLAG:
@@ -575,19 +551,6 @@ def metadata2vdms(
         "category": "video_path_rop",
     }
 
-    # for ingest_mode in INGESTION.split(","):
-    #     get_udf_query(
-    #         # db,
-    #         # start_t,
-    #         clip_filename,
-    #         properties,
-    #         ingest_mode,
-    #         (width, height),
-    #         id="udf_metadata",
-    #         metadata=clip_metadata[ingest_mode],
-    #         test_mode=TEST_MODE,
-    #     )
-
     combined_metadata = clip_metadata["object"] if "object" in clip_metadata else {}
     if "face" in clip_metadata:
         for face_frameidx_bbidx, value in clip_metadata["face"].items():
@@ -627,65 +590,6 @@ def metadata2vdms(
 """ CLASSES """
 
 
-# def connect_to_stream(stream_id, stream_name, time_limit_mins=5):
-#     # opening video capture stream
-#     video_obj = cv2.VideoCapture(stream_id, cv2.CAP_FFMPEG)
-
-#     stream_available = False
-#     time_limit_secs = time_limit_mins * 60
-#     connect_time = time.time()
-#     while not stream_available:
-#         if video_obj.isOpened():
-#             stream_available = True
-#         elif stream_id.startswith("rtsp"):
-#             if time.time() - connect_time < time_limit_secs:
-#                 video_obj = cv2.VideoCapture(stream_id, cv2.CAP_FFMPEG)
-#             else:
-#                 print(
-#                     f"Exceeds {time_limit_mins} mins limit to connect to {stream_name}. Exiting ..."
-#                 )
-#                 exit(1)
-#     return video_obj
-
-
-# Gets video fps and framecount
-# def get_fps_and_framecnt(stream_id, stream_name, video_obj, fps):
-#     input_fps = int(video_obj.get(cv2.CAP_PROP_FPS))  # hardware fps
-#     if input_fps == 0:  # Case when FPs isn't available
-#         input_fps = manual_fps_calculation(stream_id, num_frames=10)
-
-#     target_fps = fps if input_fps > fps else input_fps
-#     frame_skip = int(input_fps / target_fps)
-#     if frame_skip < 1:
-#         frame_skip = 1
-
-#     print(f"FPS of {stream_name} input stream: {input_fps}", flush=True)
-#     print(f"FPS of {stream_name} output mp4: {target_fps}", flush=True)
-
-#     # Frame count for videos
-#     frame_count = None
-#     if "://" not in str(stream_id):
-#         frame_count = int(video_obj.get(cv2.CAP_PROP_FRAME_COUNT))
-#     return input_fps, target_fps, frame_skip, frame_count
-
-
-# Gets frame W and H details
-# def get_frameWH(video_obj):
-#     input_width = int(video_obj.get(cv2.CAP_PROP_FRAME_WIDTH))
-#     input_height = int(video_obj.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-#     if RESIZE_FLAG or ((input_height * input_width) < (MODEL_H * MODEL_W)):
-#         new_sizeHW = check_imgsz([MODEL_H, MODEL_W])  # expects hxw
-#     else:
-#         new_sizeHW = check_imgsz([input_height, input_width])  # expects hxw
-
-#     new_sizeWH = (new_sizeHW[1], new_sizeHW[0])
-
-#     # width = new_sizeWH[0]
-#     # height = new_sizeWH[1]
-#     return new_sizeWH
-
-
 # method to save clip
 def save_clip(
     clip_filename, clip_id, tmp_file, _out_vid, frame_count, frameNum, target_fps
@@ -708,7 +612,6 @@ def save_clip(
             f"[TIMING],end_get_clips,{clip_key},{time.time()}",
             flush=True,
         )
-    # clip_end_frame[clip_key] = frameNum
     return _out_vid
 
 
@@ -767,7 +670,7 @@ def get_clips():
                 clip_total_frames,
             ) = queue_details
             clip_key = Path(clip_filename).name
-            # print("frameNum, clip_frameNume, clip_id", queue_details[:3])
+
             if clip_frame_idx == 0:
                 if DEBUG == "1":
                     print(
@@ -817,20 +720,17 @@ def get_clips():
 class VideoStream:
     # initialization method
     def __init__(self, src, fps=TARGET_FPS, fourcc=WRITER_FOURCC, camera_name=None):
-        self.stream_id = src  # default is 0 for main camera
+        self.stream_id = src
         self.fourcc = fourcc
 
         if "://" in str(self.stream_id):
-            # self.src_id = src.split("/")[-1]
             if camera_name is not None:
                 self.stream_name = camera_name
             else:
                 self.stream_name = str(self.stream_id).split("/")[-1]
         else:
-            # self.src_id = Path(src).stem
             self.stream_name = Path(self.stream_id).stem
 
-        # os.environ["OPENCV_FFMPEG_WRITER_OPTIONS"]="vcodec;x264|preset;medium|crf;23"
         if self.stream_id.startswith("rtsp"):
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
@@ -845,12 +745,11 @@ class VideoStream:
         self.setup_stream(fps)
 
         # Create ThreadPoolExecutor
-        self.executor = ThreadPoolExecutor(max_workers=num_usuable_cpus)
+        self.executor = ThreadPoolExecutor(max_workers=NUM_USUABLE_CPUS)
 
     # method to start thread
     def start(self):
         self.stopped = False
-        # [t.start() for t in self.t]
         self.t = []
         self.t.append(
             self.executor.submit(
@@ -865,7 +764,6 @@ class VideoStream:
 
     # method to stop reading frames
     def stop(self):
-        # [t.join() for t in self.t]
         for t in as_completed(self.t):
             try:
                 _ = t.result()
@@ -960,7 +858,7 @@ class VideoStream:
         while True:
             grabbed, frame = self.video_obj.read()  # Read next frame
 
-            if not grabbed or self.stopped:  # or frame is None:
+            if not grabbed or self.stopped:
                 self.stopped = True
                 self.inference_queue.put(None)
                 break
@@ -991,7 +889,7 @@ class VideoStream:
                     tmp_file,
                     frame.copy(),  # Frame
                 )
-                # self.frame_queue.put(queue_details)
+
                 self.inference_queue.put(queue_details)
                 self.retrieved_frames += 1
 
@@ -1003,31 +901,6 @@ class VideoStream:
             print(
                 f"[TIMING],end_get_frames,{self.stream_name},{time.time()}", flush=True
             )
-
-    # method to save clip
-    # def save_clip(
-    #     self, clip_filename, clip_id, tmp_file, _out_vid, frame_count, frameNum
-    # ):
-    #     clip_key = Path(clip_filename).name
-    #     if DEBUG == "1":
-    #         print(
-    #             f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames (end of stream)",
-    #             flush=True,
-    #         )
-    #     _out_vid = release_clip_and_reencode(
-    #         clip_key,
-    #         _out_vid,
-    #         clip_filename,
-    #         tmp_file,
-    #         self.target_fps,
-    #     )
-    #     if DEBUG == "1":
-    #         print(
-    #             f"[TIMING],end_get_clips,{clip_key},{time.time()}",
-    #             flush=True,
-    #         )
-    #     self.clip_end_frame[clip_key] = frameNum
-    #     return _out_vid
 
 
 def process_stream(camera_src, camera_name=None):
@@ -1092,37 +965,16 @@ def process_stream(camera_src, camera_name=None):
             webcam_stream.height,
             webcam_stream.clip_total_frames,
         )
-        # print("frameNum, clip_frameNume, clip_id", queue_details[:3])
+
         create_clip_queue.put(queue_details)
 
         clip_frame_idx += 1
         if clip_frame_idx % webcam_stream.clip_total_frames == 0:
             clip_id += 1
 
-    # metadata, metadata_face = infer_worker(
-    #     stream_name,
-    #     frameNum,
-    #     frame,
-    #     img_size,
-    #     INGESTION,
-    #     fps=fps,
-    # )
-    # num_frames_processed += 1
-
-    # Clip
-
-    # [t.join() for t in ts]
-    # for t in as_completed(ts):
-    #     try:
-    #         _ = t.result()
-    #     except Exception as t_e:
-    # print(f"[DEBUG] Exception occurred in thread: {t_e}")
     webcam_stream.stop()
 
     end = time.time()
-    # Release resources
-    # video_obj.release()
-    # cv2.destroyAllWindows()
 
     # printing time elapsed and fps
     if DEBUG == "1":

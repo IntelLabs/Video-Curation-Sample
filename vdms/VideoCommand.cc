@@ -268,7 +268,6 @@ Json::Value AddVideo::construct_responses(Json::Value &response,
   ret[_cmd_name] = RSCommand::check_responses(response);
 
   if (inserted_video_metadata.isMember("uid")){
-    // std::cout << "[DEBUG VideoCommand] Creating metadata chunks for " << inserted_video_metadata["uid"] << std::endl;
 
     VCL::Video video(inserted_video_metadata["uid"].asString());
     Json::Value props = inserted_video_metadata["props"];
@@ -354,13 +353,10 @@ Json::Value AddVideo::construct_responses(Json::Value &response,
       }
       counter++;
       if (bb_counter == desired_chunk_size || bb_idx == num_bbs){
-          // std::cout << "[DEBUG add_metadata_bg_vid] bb_counter: " << bb_counter << " bb_idx: " << bb_idx << " int(num_bbs/bb_count): " << desired_chunk_size <<
-          //              "[DEBUG add_metadata_bg_vid] Chunk created for " << props["Name"].asString() << " and sending to add_metadata" << std::endl;
           options["metadata"] = metadata_chunk;
           options["Name"] = props["Name"].asString();
           options_vector.push_back(options);
 
-          // std::cout << "[DEBUG add_metadata_bg_vid] Chunk for " << props["Name"].asString() << " added to syncremoteOperation" << std::endl;
           metadata_chunk.clear();
           counter = 0;
           bb_counter = 0;
@@ -370,15 +366,12 @@ Json::Value AddVideo::construct_responses(Json::Value &response,
     VDMSThreadPool& pool = VDMSThreadPool::instance();
     for (auto opts : options_vector){
       VCL::Video video_chunk(video);
-      // VDMSThreadPool::instance().enqueue([url, opts, &video]() {
       pool.enqueue([url, opts, video_chunk]() mutable {
           video_chunk.syncremoteOperation(url, opts);  // Run each chunk in thread
           video_chunk.execute_operations();
         });
     }
 
-
-    // std::cout << props["Name"].asString() << " ADDED TO THREAD" << std::endl;
   }
 
   return ret;

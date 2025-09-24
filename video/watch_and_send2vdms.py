@@ -1,15 +1,14 @@
-# importing required libraries
 import multiprocessing as mp
 import os
 import queue
 import subprocess
 import sys
-import time  # time library
+import time
 
 import yaml
 from inotify.adapters import Inotify
 
-num_workers = mp.cpu_count()  #  5,  mp.cpu_count()
+num_workers = mp.cpu_count()
 
 DEBUG = os.environ["DEBUG"]
 DEBUG_FLAG = True if DEBUG == "1" else False

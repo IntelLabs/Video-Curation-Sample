@@ -112,9 +112,6 @@ def run(ipfilename, format, options, tmp_dir_path):
         fref = 2
         added_frames = {}
         for _, metadata in options["metadata"].items():
-            # metadata = options["metadata"][k]
-            # frameidx, framebbidx = frameidx_framebbidx.split("_")
-            # fref += 2
             if metadata["frame_props"]["frameID"] not in added_frames:
                 add_query = {
                     "AddEntity": {
@@ -167,8 +164,6 @@ def run(ipfilename, format, options, tmp_dir_path):
             query.append(add_bbox_conn_query)
             fref += 1
 
-        # response, res_arr = db.query(query, [[]])
-        # print(response)
         response = retry_query(db, query, sleep_timer=randint(1, 5))
 
         if DEBUG == "1":
