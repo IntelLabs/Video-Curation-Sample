@@ -20,8 +20,6 @@ This sample is powered by the following software stacks:
 
 ### License Obligations
 - FFmpeg is an open source project licensed under LGPL and GPL. See https://www.ffmpeg.org/legal.html. You are solely responsible for determining if your use of FFmpeg requires any additional licenses. Intel is not responsible for obtaining any such licenses, nor liable for any licensing fees due, in connection with your use of FFmpeg.
-
-- Ultralytics is an open source project licensed under AGPL-3.0. See [Ultralytics License](https://github.com/ultralytics/ultralytics/blob/main/LICENSE). You are solely responsible for determining if your use of Ultralytics requires any additional licenses. Intel is not responsible for obtaining any such licenses, nor liable for any licensing fees due, in connection with your use of Ultralytics. The YOLO model used is downloaded during deployment of the sample and run via Ultralytics at runtime.
 <br>
 
 
