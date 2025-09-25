@@ -4,7 +4,11 @@ FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1
 ARG DEBUG="0"
 ENV DEBUG="${DEBUG}"
 
-RUN apt-get update && apt-get install -y -q --no-install-recommends python3-tornado python3-requests python3-ply python3-pip python3-psutil && rm -rf /var/lib/apt/lists/*
+# fixes CVE-2023-4911 vulnerability on Ubuntu 22.04
+RUN apt-get update && \
+    apt-get install --only-upgrade libc-bin libc6  && \
+    apt-get install -y -q --no-install-recommends python3-tornado python3-requests python3-ply python3-pip python3-psutil && \
+    rm -rf /var/lib/apt/lists/*
 RUN pip3 install 'protobuf==4.24.2' vdms
 
 COPY *.py /home/

@@ -25,7 +25,8 @@ This sample is powered by the following software stacks:
 
 ## Install Prerequisites:
 
-- **Time Zone**: Check that the timezone setting of your host machine is correctly configured. Timezone is used during build. If you plan to run the sample on a cluster of machines managed by Docker Swarm or Kubernetes, please make sure to synchronize time among the manager/master node and worker nodes.
+- **Time Zone**: Check that the timezone setting of your host machine is correctly configured. Timezone is used during build.
+<!-- If you plan to run the sample on a cluster of machines managed by Docker Swarm or Kubernetes, please make sure to synchronize time among the manager/master node and worker nodes. -->
 
 - **Build Tools**: Install ```cmake``` and ```m4``` if they are not available on your system.
 

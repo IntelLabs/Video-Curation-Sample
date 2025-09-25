@@ -4,7 +4,9 @@ FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1
 ENV VIRTUAL_ENV=/opt/venv
 ARG DEBIAN_FRONTEND=noninteractive
 
+# fixes CVE-2023-4911 vulnerability on Ubuntu 22.04
 RUN apt-get update && \
+    apt-get install --only-upgrade libc-bin libc6  && \
     apt-get install -y -q  --no-install-recommends python3-setuptools \
     python3-tornado python3-requests python3-ply python3-pip python3-psutil python3-venv \
     curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
