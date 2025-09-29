@@ -56,7 +56,12 @@ UDF_HOST = os.getenv("UDF_HOST", "video-service")
 MODEL_NAME = os.getenv("MODEL_NAME", "yolo11n")
 
 LOCKTIMEOUT_RETRIES = 5
-ERR_KEYWORDS = ["timeout", "null search iterator", "outoftransactions"]
+ERR_KEYWORDS = [
+    "timeout",
+    "null search iterator",
+    "outoftransactions",
+    "internal server",
+]
 
 BATCH_SIZE = 1
 DBPORT = 55555
@@ -369,34 +374,37 @@ def infer_worker(
 
     metadata = {}
     metadata_face = {}
-    if "object" in INGESTION:
-        results = model.predict(
-            frame,
-            imgsz=(img_size[1], img_size[0]),
-            batch=BATCH_SIZE,
-            conf=DETECTION_THRESHOLD,
-            iou=IOU_THRESHOLD,
-            half=HALF_FLAG,
-            device=device_input,
-            verbose=False,
-            stream=True,
-        )
-        metadata = extract_metadata_from_results(
-            stream_name, frameNum, results, img_size, fps=fps
-        )
+    try:
+        if "object" in INGESTION:
+            results = model.predict(
+                frame,
+                imgsz=(img_size[1], img_size[0]),
+                batch=BATCH_SIZE,
+                conf=DETECTION_THRESHOLD,
+                iou=IOU_THRESHOLD,
+                half=HALF_FLAG,
+                device=device_input,
+                verbose=False,
+                stream=True,
+            )
+            metadata = extract_metadata_from_results(
+                stream_name, frameNum, results, img_size, fps=fps
+            )
 
-    if "face" in INGESTION:
-        metadata_face = face_detection(
-            stream_name,
-            frameNum,
-            frame,
-            img_size,
-            face_models,
-            face_det_CHW,
-            ag_CHW,
-            em_CHW,
-        )
-
+        if "face" in INGESTION:
+            metadata_face = face_detection(
+                stream_name,
+                frameNum,
+                frame,
+                img_size,
+                face_models,
+                face_det_CHW,
+                ag_CHW,
+                em_CHW,
+            )
+    except Exception:
+        e = traceback.format_exc()
+        print(f"Error in {stream_name} infer_worker: {e}", flush=True)
     return metadata, metadata_face
 
 
@@ -597,7 +605,7 @@ def save_clip(
     clip_key = Path(clip_filename).name
     if DEBUG == "1":
         print(
-            f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames (end of stream)",
+            f"[DEBUG] Clip {clip_key} (clip_id: {clip_id}) contains {frame_count} frames",
             flush=True,
         )
     _out_vid = release_clip_and_reencode(
@@ -633,7 +641,7 @@ def get_clips():
             queue_details = create_clip_queue.get()
             if queue_details is None:
                 if _out_vid is not None:
-                    frame_count = clip_frame_idx + 1
+                    frame_count = clip_frame_idx
                     if frame_count > target_fps:
                         _out_vid = save_clip(
                             clip_filename,
@@ -671,7 +679,7 @@ def get_clips():
             ) = queue_details
             clip_key = Path(clip_filename).name
 
-            if clip_frame_idx == 0:
+            if clip_frame_idx - 1 == 0:
                 if DEBUG == "1":
                     print(
                         f"[TIMING],start_get_clips,{clip_key},{time.time()}",
@@ -691,8 +699,8 @@ def get_clips():
 
             _out_vid.write(frame)
 
-            if clip_frame_idx == clip_total_frames - 1:
-                frame_count = clip_frame_idx + 1
+            if clip_frame_idx == clip_total_frames:
+                frame_count = clip_frame_idx
                 _out_vid = save_clip(
                     clip_filename,
                     clip_id,
@@ -770,7 +778,7 @@ class VideoStream:
             except Exception as t_e:
                 print(f"[DEBUG] Exception occurred in thread: {t_e}")
 
-        self.stopped = True
+        # self.stopped = True
         self.video_obj.release()
 
     # method to open stream/video within 5min (default) limit
@@ -858,8 +866,8 @@ class VideoStream:
         while True:
             grabbed, frame = self.video_obj.read()  # Read next frame
 
-            if not grabbed or self.stopped:
-                self.stopped = True
+            if not grabbed:  # or self.stopped:
+                # self.stopped = True
                 self.inference_queue.put(None)
                 break
 
@@ -883,7 +891,8 @@ class VideoStream:
 
                 queue_details = (
                     frameNum,  # Overall frame number
-                    clip_frame_idx % self.clip_total_frames,  # Frame index in clip
+                    (clip_frame_idx % self.clip_total_frames)
+                    + 1,  # Frame index in clip [1-indexed like opencv]
                     clip_id,  # Clip number
                     clip_filename,
                     tmp_file,
@@ -929,12 +938,13 @@ def process_stream(camera_src, camera_name=None):
         clip_key = Path(clip_filename).name
         if DEBUG == "1":
             print(
-                f"[TIMING],start_infer_worker,{clip_key}-{clip_frame_idx % webcam_stream.clip_total_frames},{time.time()}",
+                f"[TIMING],start_infer_worker,{clip_key}-{clip_frame_idx},{time.time()}",
                 flush=True,
             )
+
         metadata, metadata_face = infer_worker(
             webcam_stream.stream_name,
-            clip_frame_idx % webcam_stream.clip_total_frames,
+            clip_frame_idx,
             frame,
             (webcam_stream.width, webcam_stream.height),  # img_size,
             INGESTION,
@@ -943,9 +953,10 @@ def process_stream(camera_src, camera_name=None):
 
         if DEBUG == "1":
             print(
-                f"[TIMING],end_infer_worker,{clip_key}-{clip_frame_idx % webcam_stream.clip_total_frames},{time.time()}",
+                f"[TIMING],end_infer_worker,{clip_key}-{clip_frame_idx},{time.time()}",
                 flush=True,
             )
+
         all_metadata.setdefault(clip_key, {})
         all_metadata[clip_key].setdefault("object", {})
         all_metadata[clip_key]["object"].update(metadata)
@@ -954,11 +965,11 @@ def process_stream(camera_src, camera_name=None):
         webcam_stream.num_frames_processed += 1
         queue_details = (
             frameNum,  # Overall frame number
-            clip_frame_idx % webcam_stream.clip_total_frames,  # Frame index in clip
+            clip_frame_idx,  # Frame index in clip
             clip_id,  # Clip number
             clip_filename,
             tmp_file,
-            frame.copy(),  # Frame,
+            frame,  # Frame,
             webcam_stream.target_fps,
             webcam_stream.fourcc,
             webcam_stream.width,
@@ -967,10 +978,6 @@ def process_stream(camera_src, camera_name=None):
         )
 
         create_clip_queue.put(queue_details)
-
-        clip_frame_idx += 1
-        if clip_frame_idx % webcam_stream.clip_total_frames == 0:
-            clip_id += 1
 
     webcam_stream.stop()
 
