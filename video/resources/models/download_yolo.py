@@ -64,6 +64,7 @@ def get_model(model_dir, run_platform, device_input, batch=1):
         pt_detection_model.export(
             format="engine",
             half=half_flag,
+            imgsz=3840,  # Max dimensions (8K)
             dynamic=dynamic_flag,
             device=device_input,
             simplify=True,
