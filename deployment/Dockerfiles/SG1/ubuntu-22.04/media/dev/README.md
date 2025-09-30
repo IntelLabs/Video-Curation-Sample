@@ -1,4 +1,4 @@
-This docker image is part of Open Visual Cloud software stacks. This is development image aim towards enabling C++ application compilation, debugging (with the debugging, profiling tools) and optimization (with the optimization tools.) You can compile C++ applications with this image and then copy the applications to the corresponding deployment image. Included what are in FFmpeg or GStreamer media creation and delivery images . Also included Intel hardware accelaration software stack such as media SDK, media driver, gmmlib and libva. The docker image can be used in the FROM field of a downstream Dockerfile. 
+This docker image is part of Open Visual Cloud software stacks. This is development image aim towards enabling C++ application compilation, debugging (with the debugging, profiling tools) and optimization (with the optimization tools.) You can compile C++ applications with this image and then copy the applications to the corresponding deployment image. Included what are in FFmpeg or GStreamer media creation and delivery images . Also included Intel hardware accelaration software stack such as media SDK, media driver, gmmlib and libva. The docker image can be used in the FROM field of a downstream Dockerfile.
 
 ## Supported tags and respective Dockerfile links
  - [sg1-ubuntu-2204-media-dev](https://github.com/OpenVisualCloud/Dockerfiles/blob/v23.06/SG1/ubuntu-22.04/media/dev/Dockerfile)
@@ -8,7 +8,7 @@ This docker image is part of Open Visual Cloud software stacks. This is developm
   Intel&reg; SG1 platform, Ubuntu 22.04
 
 - #### Usage instructions:
-  [FFmpeg](https://github.com/OpenVisualCloud/Dockerfiles/blob/master/doc/ffmpeg.md)	[GStreamer](https://github.com/OpenVisualCloud/Dockerfiles/blob/master/doc/gst.md)	
+  [FFmpeg](https://github.com/OpenVisualCloud/Dockerfiles/blob/master/doc/ffmpeg.md)	[GStreamer](https://github.com/OpenVisualCloud/Dockerfiles/blob/master/doc/gst.md)
 
 
 - #### Getting started with Dockerfiles:
@@ -41,5 +41,5 @@ This docker installs third party components licensed under various open source l
 |FFmpeg|GNU Lesser General Public License v2.1 or later|
 
 
-More license information can be found in [components source package](https://github.com/OpenVisualCloud/Dockerfiles-Resources).   
+More license information can be found in [components source package](https://github.com/OpenVisualCloud/Dockerfiles-Resources).
 As for any pre-built image usage, it is the image user's responsibility to ensure that any use of this image complies with any relevant licenses and potential fees for all software contained within. We will have no indemnity or warranty coverage from suppliers.

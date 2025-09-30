@@ -77,7 +77,7 @@ RUN cd BUILD_HOME/paho.mqtt.c-LIBPAHO_VER && \
   cp src/MQTTClientPersistence.h BUILD_DESTDIR/usr/local/include/ && \
   cp src/MQTTProperties.h BUILD_DESTDIR/usr/local/include/ && \
   cp src/MQTTReasonCodes.h BUILD_DESTDIR/usr/local/include/ && \
-  cp src/MQTTSubscribeOpts.h BUILD_DESTDIR/usr/local/include/; 
+  cp src/MQTTSubscribeOpts.h BUILD_DESTDIR/usr/local/include/;
 ')dnl
 
 REG(LIBPAHO)

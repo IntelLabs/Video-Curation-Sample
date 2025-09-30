@@ -24,7 +24,7 @@ do
    #DL3008/ DL3007 / DL3016 / DL3013 - pin versions of installations - maintenance heavy
    docker exec -i my_linter hadolint --ignore DL3003 --ignore SC2164 --ignore SC1073 --ignore SC1072 --ignore DL4001 --ignore SC2039 --ignore DL3008 --ignore DL3007 --ignore DL3016 --ignore DL3013 - < $line || printf "FAILURE: See above\n"
 #   if [ $error ]
-#   then 
+#   then
 #        printf "FAILURE: See above\n"
 #        unset error
 #   fi

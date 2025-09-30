@@ -183,7 +183,7 @@ RUN cd /opt/build/opencv-4.5.3-openvino-2021.4.2 && mkdir build && cd build && \
     .. && \
   make -j "$(nproc)" && \
   make install DESTDIR=/opt/dist && \
-  make install 
+  make install
 
 RUN apt-get update && \
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -222,7 +222,7 @@ RUN cd /opt/build/openvino && \
     .. && \
   make -j "$(nproc)" && \
   make install && \
-  make install DESTDIR=/opt/dist 
+  make install DESTDIR=/opt/dist
 
 
 ARG OPENVINO_INSTALL_DIR=/usr/local/openvino
@@ -379,7 +379,7 @@ RUN cd /opt/build && \
       -Dfdkaac=disabled \
     && cd build && \
     ninja install && \
-    DESTDIR=/opt/dist ninja install 
+    DESTDIR=/opt/dist ninja install
 
 RUN apt-get update && \
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -429,7 +429,7 @@ RUN git clone -b master $GVA_REPO /opt/build/gst-video-analytics && \
     .. \
     && make -j "$(nproc)" \
     && make install \
-    && make install DESTDIR=/opt/dist 
+    && make install DESTDIR=/opt/dist
 
 ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/local/lib/gstreamer-1.0/:/usr/local/lib/
 
@@ -655,8 +655,8 @@ RUN cd /opt/build && \
     git clone -b master ${OWT_SDK_REPO} && \
     cd owt-client-javascript/scripts && \
     git reset --hard v5.0 && \
-    npm install && grunt 
-    
+    npm install && grunt
+
 # Get quic
 ARG OWT_QUIC_REPO=https://github.com/open-webrtc-toolkit/owt-deps-quic/releases/download/v0.1/dist.tgz
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -743,7 +743,7 @@ ARG CUSTOM_IE_DIR=/usr/local/openvino/
 ARG CUSTOM_IE_LIBDIR=${CUSTOM_IE_DIR}/runtime/lib/intel64
 RUN printf "${CUSTOM_IE_LIBDIR}\n${CUSTOM_IE_DIR}/3rdparty/tbb/lib\n" >/etc/ld.so.conf.d/openvino.conf && ldconfig
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/gstreamer-1.0/
-ENV GI_TYPELIB_PATH=${GI_TYPELIB_PATH}:/usr/local/lib/girepository-1.0/ 
+ENV GI_TYPELIB_PATH=${GI_TYPELIB_PATH}:/usr/local/lib/girepository-1.0/
 ENV PYTHONPATH=${PYTHONPATH}:/opt/intel/dl_streamer/python
 ENV GST_PLUGIN_PATH=${GST_PLUGIN_PATH}:/usr/local/lib/gstreamer-1.0/
 

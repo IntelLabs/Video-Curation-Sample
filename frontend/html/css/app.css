@@ -19,7 +19,7 @@ body {
     border-right: 2px solid #5b9bd5;
     width: 400px;
     height: calc(100vh - 150px);
-    overflow-x: hide; 
+    overflow-x: hide;
     overflow-y: auto;
     vertical-align: top;
 }

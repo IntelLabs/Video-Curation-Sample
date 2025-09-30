@@ -1,4 +1,4 @@
-The media server for Open WebRTC Toolkit (OWT) provides an efficient video conference and streaming service that is based on WebRTC. It scales a single WebRTC stream out to many endpoints and supports real-time video and audio transcoding. 
+The media server for Open WebRTC Toolkit (OWT) provides an efficient video conference and streaming service that is based on WebRTC. It scales a single WebRTC stream out to many endpoints and supports real-time video and audio transcoding.
 
 ### Supported Media Codecs
 

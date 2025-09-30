@@ -4,7 +4,7 @@ if grep --quiet 'NAME="CentOS Linux"' /etc/os-release; then
   yum install -y -q wget
 else
   apt-get update
-  apt-get install -y wget 
+  apt-get install -y wget
 fi
 
 wget https://raw.githubusercontent.com/Netflix/vmaf/master/model/vmaf_v0.6.1.json

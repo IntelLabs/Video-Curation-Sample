@@ -50,7 +50,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN cd BUILD_HOME && \
   wget -O - ${LIBVMAF_REPO} | tar xz && ls
 RUN cd BUILD_HOME/vmaf-LIBVMAF_VER/libvmaf && \
-  ls && \ 
+  ls && \
   ifelse(OS_NAME:OS_VERSION,centos:7,`(. /opt/rh/devtoolset-9/enable && ') meson build --prefix=BUILD_PREFIX --libdir BUILD_LIBDIR --buildtype=plain && \
   cd build && \
   ninja install && \

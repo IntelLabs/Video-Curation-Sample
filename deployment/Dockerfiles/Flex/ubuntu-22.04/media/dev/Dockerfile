@@ -283,7 +283,7 @@ RUN cd /opt/build/libva-utils-2.15.0 && \
   ./autogen.sh --prefix=/usr/local --libdir=/usr/local/lib && \
   make -j"$(nproc)" && \
   make install DESTDIR=/opt/dist && \
-  make install 
+  make install
 
 RUN apt-get update && \
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -338,7 +338,7 @@ RUN apt-get update && \
 ARG ONEVPL_DISP_REPO=https://github.com/oneapi-src/oneVPL/archive/refs/tags/v2022.2.0.tar.gz
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN cd /opt/build && \
-    wget -O - ${ONEVPL_DISP_REPO} | tar xz 
+    wget -O - ${ONEVPL_DISP_REPO} | tar xz
 RUN cd /opt/build/oneVPL-2022.2.0 && \
     cp /opt/build/media-delivery/patches/libvpl2/* . && \
     { set -e; \

@@ -5,16 +5,18 @@ yml="$DIR/docker-compose.yml"
 
 case "$1" in
 docker_compose)
-    dcv="$(docker-compose --version | cut -f3 -d' ' | cut -f1 -d',')"
-    mdcv="$(printf '%s\n' $dcv 1.10 | sort -r -V | head -n 1)"
-    if test "$mdcv" = "1.10"; then
+    dcv="$(docker compose version | cut -f4 -d' ' | cut -f1 -d',')"
+    mdcv="$(printf '%s\n' $dcv v2.18 | sort -r -V | head -n 1)"
+    if test "$mdcv" = "v2.18"; then
         echo ""
-        echo "docker-compose >=1.10 is required."
-        echo "Please upgrade docker-compose at https://docs.docker.com/compose/install."
+        echo "docker compose >=2.18 is required."
+        echo "Please upgrade docker compose at https://docs.docker.com/compose/install."
         echo ""
         exit 0
     fi
-    docker-compose -f "$yml" -p lcc --compatibility down
+
+    docker compose -f "$yml" -p lcc --compatibility down  # -v
+    # docker volume rm lcc_app-content || true
     ;;
 *)
     docker stack services lcc
@@ -25,6 +27,7 @@ docker_compose)
     ;;
 esac
 
+docker rmi $(docker images | grep '<none>' | awk '{print $3}') || true
 docker container prune -f; echo
-docker volume prune -f; echo
+# docker volume prune -f; echo
 docker network prune -f; echo

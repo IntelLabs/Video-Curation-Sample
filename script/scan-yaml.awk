@@ -24,7 +24,7 @@ function saveim() {
 /initContainers:/ {
     c_space=index($0,"initContainers:");
 }
-    
+
 /image:/ && c_space==0 {
     saveim();
     im=$2;
@@ -41,7 +41,7 @@ function saveim() {
 /- node\..*==.*/ && labels!="*" {
     gsub(/[\" ]/,"",$2);
     if (index(labels,$2)==0) {
-        im=""; 
+        im="";
         matched=0;
     }
 }
@@ -50,7 +50,7 @@ function saveim() {
     gsub(/[\" ]/,"",$2);
     gsub(/!=/,"==",$2);
     if (index(labels,$2)!=0) {
-        im=""; 
+        im="";
         matched=0;
     }
 }
@@ -77,7 +77,7 @@ function saveim() {
        gsub(/[\" ]/,"",label_eqn);
        i=index(labels,label_eqn);
        if ((operator=="In" && i==0) || (operator=="NotIn" && i!=0)) {
-           im=im2=""; 
+           im=im2="";
            matched=0;
        }
     }

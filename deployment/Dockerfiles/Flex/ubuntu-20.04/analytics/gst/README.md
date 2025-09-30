@@ -1,4 +1,4 @@
-This docker image is part of Open Visual Cloud software stacks. Optimized for Media Analytics. Included what are in media delivery GStreamer image, inferencing engine and video analytics plugins. The docker image can be used in the FROM field of a downstream Dockerfile. 
+This docker image is part of Open Visual Cloud software stacks. Optimized for Media Analytics. Included what are in media delivery GStreamer image, inferencing engine and video analytics plugins. The docker image can be used in the FROM field of a downstream Dockerfile.
 
 ## Supported tags and respective Dockerfile links
  - [flex-ubuntu-2004-analytics-gst](https://github.com/OpenVisualCloud/Dockerfiles/blob/v23.06/Flex/ubuntu-20.04/analytics/gst/Dockerfile)
@@ -8,7 +8,7 @@ This docker image is part of Open Visual Cloud software stacks. Optimized for Me
   Intel&reg; Flex platform, Ubuntu 20.04
 
 - #### Usage instructions:
-  [GStreamer](https://github.com/OpenVisualCloud/Dockerfiles/blob/master/doc/gst.md)	
+  [GStreamer](https://github.com/OpenVisualCloud/Dockerfiles/blob/master/doc/gst.md)
 
 
 - #### Getting started with Dockerfiles:
@@ -53,5 +53,5 @@ This docker installs third party components licensed under various open source l
 |gst python|GNU Library General Public License Version 2.1|
 
 
-More license information can be found in [components source package](https://github.com/OpenVisualCloud/Dockerfiles-Resources).   
+More license information can be found in [components source package](https://github.com/OpenVisualCloud/Dockerfiles-Resources).
 As for any pre-built image usage, it is the image user's responsibility to ensure that any use of this image complies with any relevant licenses and potential fees for all software contained within. We will have no indemnity or warranty coverage from suppliers.

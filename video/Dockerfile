@@ -1,19 +1,58 @@
 
-FROM openvisualcloud/xeon-ubuntu2004-media-nginx:23.1
+FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1 as build
+
+ENV VIRTUAL_ENV=/opt/venv
+ARG DEBIAN_FRONTEND=noninteractive
+
+# fixes CVE-2023-4911 vulnerability on Ubuntu 22.04
+RUN apt-get update && \
+    apt-get install --only-upgrade libc-bin libc6  && \
+    apt-get install -y -q  --no-install-recommends python3-setuptools \
+    python3-tornado python3-requests python3-ply python3-pip python3-psutil python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3 -m venv ${VIRTUAL_ENV}
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+COPY resources /home/resources
+COPY requirements.* /home/
+
+ARG DEVICE="CPU"
+ENV DEVICE="${DEVICE}"
+
+RUN pip3 install pip --no-cache-dir --upgrade && \
+    if [ "${DEVICE}" = "CPU" ]; then \
+        pip3 install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu; \
+    else \
+        pip3 install --no-cache-dir torch torchvision; \
+    fi;
+RUN pip3 install --no-cache-dir -r /home/requirements.txt && \
+    pip3 install --no-cache-dir -r /home/requirements.${DEVICE}.txt
+
+RUN omz_downloader --list /home/resources/models/models.lst -o /home/resources/models --precisions FP16
+
+# FINAL IMAGE
+FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1
+ENV VIRTUAL_ENV=/opt/venv
+ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
+    apt-get install --only-upgrade libc-bin libc6  && \
     apt-get install -y -q  --no-install-recommends python3-setuptools \
-    python3-tornado python3-requests python3-ply python3-pip python3-psutil \
-    kafkacat curl && rm -rf /var/lib/apt/lists/*
-RUN pip3 install 'kafka-python>=1.4.7' inotify
+    python3-tornado python3-requests \
+    curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
+# COPY --from=build /usr/local/lib/python3.10 /usr/local/lib/python3.10
+COPY --from=build ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+COPY --from=build /home /home
+
+
+WORKDIR /home
 COPY *.py /home/
 COPY cleanup.sh /home/
 COPY manage.sh /home/
 COPY *.conf /etc/nginx/
-COPY archive /var/www/mp4
-RUN rm /var/www/mp4/.gitignore || true
-CMD  ["/bin/bash","-c","/home/manage.sh"]
+CMD  ["/bin/bash","-c","python3 /home/resources/models/download_yolo.py && /home/manage.sh"]
 
 ####
 ARG  USER
@@ -21,11 +60,12 @@ ARG  GROUP
 ARG  UID
 ARG  GID
 ## must use ; here to ignore user exist status code
+## --no-log-init option can prevent the creation of large, sparse files in /var/log/lastlog and /var/log/faillog
 RUN if [ ${GID} -gt 0 ]; then groupadd -f -g ${GID} ${GROUP}; fi; \
-    if [ ${UID} -gt 0 ]; then useradd -d /home/${USER} -g ${GID} -K UID_MAX=${UID} -K UID_MIN=${UID} ${USER}; fi; \
-     touch /var/run/nginx.pid && \
-     mkdir -p /var/log/nginx /var/lib/nginx /var/www/cache /var/www/gen /var/www/mp4 /var/www/streams && \
-     chown -R ${UID}.${GID} /var/run/nginx.pid /var/log/nginx /var/lib/nginx /var/www /etc/nginx/nginx.conf
+    if [ ${UID} -gt 0 ]; then useradd --no-log-init -d /home/${USER} -g ${GID} -K UID_MAX=${UID} -K UID_MIN=${UID} ${USER}; fi; \
+    touch /var/run/nginx.pid && \
+    mkdir -p /var/log/nginx /var/lib/nginx /var/www/cache /var/www/gen /var/www/mp4 && \
+    chown -R ${UID}.${GID} /var/run/nginx.pid /var/log/nginx /var/lib/nginx /var/www /etc/nginx/nginx.conf /home/resources
 VOLUME ["/var/www"]
 USER ${UID}
 ####

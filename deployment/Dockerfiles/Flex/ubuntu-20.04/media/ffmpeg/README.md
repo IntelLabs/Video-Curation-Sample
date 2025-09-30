@@ -1,4 +1,4 @@
-This docker image is part of Open Visual Cloud software stacks. Optimized for the media creation and delivery use case. Included FFmpeg and codecs such as opus, ogg, vorbis, x264, x265, VP8/9, SVT-AV1 and SVT-HEVC. Also included Intel hardware accelaration software stack such as media SDK, media driver, gmmlib and libva. The docker image can be used in the FROM field of a downstream Dockerfile. 
+This docker image is part of Open Visual Cloud software stacks. Optimized for the media creation and delivery use case. Included FFmpeg and codecs such as opus, ogg, vorbis, x264, x265, VP8/9, SVT-AV1 and SVT-HEVC. Also included Intel hardware accelaration software stack such as media SDK, media driver, gmmlib and libva. The docker image can be used in the FROM field of a downstream Dockerfile.
 
 ## Supported tags and respective Dockerfile links
  - [flex-ubuntu-2004-media-ffmpeg](https://github.com/OpenVisualCloud/Dockerfiles/blob/v23.06/Flex/ubuntu-20.04/media/ffmpeg/Dockerfile)
@@ -8,7 +8,7 @@ This docker image is part of Open Visual Cloud software stacks. Optimized for th
   Intel&reg; Flex platform, Ubuntu 20.04
 
 - #### Usage instructions:
-  [FFmpeg](https://github.com/OpenVisualCloud/Dockerfiles/blob/master/doc/ffmpeg.md)	
+  [FFmpeg](https://github.com/OpenVisualCloud/Dockerfiles/blob/master/doc/ffmpeg.md)
 
 
 - #### Getting started with Dockerfiles:
@@ -44,5 +44,5 @@ This docker installs third party components licensed under various open source l
 |FFmpeg|GNU Lesser General Public License v2.1 or later|
 
 
-More license information can be found in [components source package](https://github.com/OpenVisualCloud/Dockerfiles-Resources).   
+More license information can be found in [components source package](https://github.com/OpenVisualCloud/Dockerfiles-Resources).
 As for any pre-built image usage, it is the image user's responsibility to ensure that any use of this image complies with any relevant licenses and potential fees for all software contained within. We will have no indemnity or warranty coverage from suppliers.

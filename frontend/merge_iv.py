@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+
 def _intersect(interval1, interval2):
     """
     Find whether two intervals intersect
@@ -21,6 +22,7 @@ def _intersect(interval1, interval2):
     else:
         return False
 
+
 def _merge(interval1, interval2):
     """
     Finds merge of two intersecting intervals. This function should be called only if it's checked that
@@ -31,6 +33,7 @@ def _merge(interval1, interval2):
     :return: new interval that contains only both intervals
     """
     return [min(interval1[0], interval2[0]), max(interval1[1], interval2[1])]
+
 
 def merge_iv(intervals, interval_to_add):
     """

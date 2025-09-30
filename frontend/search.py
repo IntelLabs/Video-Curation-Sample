@@ -1,31 +1,118 @@
 #!/usr/bin/python3
 
-from urllib.parse import unquote,quote
-from tornado import web,gen
-from tornado.concurrent import run_on_executor
-from concurrent.futures import ThreadPoolExecutor
-from merge_iv import merge_iv
-from requests import get
-import os
 import json
-import vdms
+import os
 import time
 import traceback
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from random import randint
+from urllib.parse import quote, unquote
 
-dbhost=os.environ["DBHOST"]
-vdhost=os.environ["VDHOST"]
+from merge_iv import merge_iv
+from requests import get
+from tornado import gen, web
+from tornado.concurrent import run_on_executor
+
+import vdms
+
+dbhost = os.environ["DBHOST"]
+vdhost = os.environ["VDHOST"]
+DEBUG = os.environ["DEBUG"]
+
+LOCKTIMEOUT_RETRIES = 5
+ERR_KEYWORDS = [
+    "timeout",
+    "null search iterator",
+    "outoftransactions",
+    "no entities found",
+]
+
+
+def retry_query(db, query, num_retries=LOCKTIMEOUT_RETRIES, sleep_timer: int = 0):
+    for ridx in range(num_retries + 1):
+        response, _ = db.query(query, [[]])
+        if (
+            "FailedCommand" in response[0]
+            and any(k in response[0]["info"].lower() for k in ERR_KEYWORDS)
+        ) or (
+            ("FindVideo" in response[0])
+            and ("info" in response[0]["FindVideo"])
+            and any(k in response[0]["FindVideo"]["info"].lower() for k in ERR_KEYWORDS)
+        ):
+            if "FailedCommand" in response[0]:
+                err = response[0]["info"]
+            else:
+                err = response[0]["FindVideo"]["info"]
+            if DEBUG == "1":
+                print(
+                    f"[DEBUG search Attempt #{ridx}] Received '{err}' for {query} ",
+                    flush=True,
+                )
+            if sleep_timer > 0:
+                time.sleep(sleep_timer)
+        else:
+            if DEBUG == "1":
+                print(
+                    f"[DEBUG search] Successful query response: {response}",
+                    flush=True,
+                )
+            break  # Continue
+    return response
+
+
+def find_indices_of_objects_in_entities(
+    ent_list_of_dicts, objects_of_interest, requested_cnts
+):
+    """
+    Helps with AND operations
+    Returns list of dicts containing all objects in same video/frame
+    """
+    # Use defaultdict to group indices and objects by the unique (server_filepath, frameID)
+    grouped_data = defaultdict(lambda: {"indices": [], "objects": [], "dict": []})
+    for idx, ent in enumerate(ent_list_of_dicts):
+        if ent["objectID"] in objects_of_interest:
+            k = (ent["server_filepath"], ent["frameID"])
+            grouped_data[k]["indices"].append(idx)
+            grouped_data[k]["objects"].append(ent["objectID"])
+            grouped_data[k]["dict"].append(ent)
+    reduced_ents = []
+    for k, v in grouped_data.items():
+        objs = v["objects"]
+        satisfied = []
+        if all(o in objs for o in objects_of_interest):  # All objects present
+            # Check values
+            for obj in objects_of_interest:
+                if obj not in requested_cnts.keys():
+                    requested_cnts[obj] = [">=", 1]
+
+            for obj, (
+                obj_cond,
+                obj_cnt,
+            ) in requested_cnts.items():  # Check cnts of objects if available
+                if eval(f"{objs.count(obj)} {obj_cond} {int(obj_cnt)}"):
+                    satisfied.append(True)
+                else:  # If any cnts dont match, dont add entity
+                    satisfied.append(False)
+            if all(satisfied):
+                for o, d in zip(objs, v["dict"]):
+                    if o in objects_of_interest:
+                        reduced_ents.append(d)
+
+    return reduced_ents
+
 
 class SearchHandler(web.RequestHandler):
     def __init__(self, app, request, **kwargs):
         super(SearchHandler, self).__init__(app, request, **kwargs)
-        self.executor= ThreadPoolExecutor(8)
-        self._vdms=vdms.vdms()
+        self.executor = ThreadPoolExecutor(8)
+        self._vdms = vdms.vdms()
         while True:
             try:
                 self._vdms.connect(dbhost)
                 break
             except Exception as e:
-                print("Exception: "+str(e), flush=True)
+                print("Exception: " + str(e), flush=True)
             time.sleep(10)
 
     def check_origin(self, origin):
@@ -33,84 +120,195 @@ class SearchHandler(web.RequestHandler):
 
     def _value(self, query1, key):
         for kv in query1["params"]:
-            if kv["name"]==key: return kv["value"]
+            if kv["name"] == key:
+                return kv["value"]
         return None
 
-    def _construct_single_query(self, query1, ref):
-        q_bbox={
-            "FindBoundingBox": {
+    def _construct_query(self, line_queries, ref):
+        q_vid = {
+            "FindVideo": {
                 "_ref": ref,
-                "results": {
-                    "list": [ "frameID", "objectID", "video_name", "_coordinates" ],
-                },
-            },
-        }
-        q_conn={
-            "FindConnection": {
-                "class": "Frame2BB",
-                "ref2": ref,
-                "results": {
-                    "list": [ "frameID", "video_name" ],
-                },
-            },
-        }
-
-        if query1["name"]=="video":
-            name=self._value(query1, "Video Name")
-            if name!="*" and name!="":
-                q_conn["FindConnection"].update({
-                    "constraints": {
-                        "video_name": [ "==", name ],
-                    },
-                })
-        if query1["name"]=="object":
-            q_bbox["FindBoundingBox"].update({
                 "constraints": {
-                    "objectID": [ "==", self._value(query1, "Object List") ],
+                    "category": ["==", "video_path_rop"],
                 },
-            })
-        if query1["name"]=="person":
-            constraints={
-                "age": [
-                    ">=", self._value(query1, "Age Min"),
-                    "<=", self._value(query1, "Age Max"),
-                ],
-                "objectID": [
-                    "==", "face"
-                ],
+                "results": {"list": ["Name"], "blob": False},
             }
-            if "age" not in q_bbox["FindBoundingBox"]["results"]["list"]:
-                q_bbox["FindBoundingBox"]["results"]["list"].append("age")
+        }
+        q_vid2 = {
+            "FindEntity": {
+                "_ref": ref + 1,
+                "class": "Frame",
+                "results": {"list": ["server_filepath", "frameID"]},
+                "link": {"ref": ref},
+            }
+        }
+        q_frame = {
+            "FindBoundingBox": {
+                "link": {"ref": ref + 1},
+                "results": {
+                    "list": [
+                        "objectID",
+                        "server_filepath",
+                        "frameID",
+                        "VD:x1",
+                        "VD:y1",
+                        "VD:width",
+                        "VD:height",
+                        "frameW",
+                        "frameH",
+                        "confidence",
+                    ]
+                },
+            }
+        }
 
-            emotion=self._value(query1, "Emotion List")
-            if emotion!="skip":
-                constraints["emotion"]=[ "==", emotion ]
-                if "emotion" not in q_bbox["FindBoundingBox"]["results"]["list"]:
-                    q_bbox["FindBoundingBox"]["results"]["list"].append("emotion")
+        requested_cnts = {}
+        for icon_query in line_queries:
+            if icon_query["name"] == "video":
+                name = self._value(icon_query, "Video Name")
+                if name != "*" and name != "":
+                    q_frame["FindBoundingBox"].update(
+                        {
+                            "constraints": {
+                                "server_filepath": ["==", name],
+                            },
+                        }
+                    )
+                    q_vid2["FindEntity"].update(
+                        {
+                            "constraints": {
+                                "server_filepath": ["==", name],
+                            },
+                        }
+                    )
+                else:
+                    return [q_vid, q_vid2], requested_cnts
 
-            gender=self._value(query1, "Gender")
-            if gender!="skip":
-                constraints["gender"]=[ "==", gender ]
-                if "gender" not in q_bbox["FindBoundingBox"]["results"]["list"]:
-                    q_bbox["FindBoundingBox"]["results"]["list"].append("gender")
+            if icon_query["name"] == "object":
+                obj_name = self._value(icon_query, "Object List")
+                frame = self._value(icon_query, "Frame ID")
+                frame_cond = self._value(icon_query, "Frame Condition")
+                obj_cnt = self._value(icon_query, "Object Count")
+                obj_cnt_cond = self._value(icon_query, "Object Count Condition")
+                if (
+                    all(x is not None for x in [obj_cnt, obj_cnt_cond])
+                    and obj_cnt != "skip"
+                ):
+                    requested_cnts[obj_name] = [obj_cnt_cond, int(obj_cnt)]
 
-            q_bbox["FindBoundingBox"].update({ "constraints": constraints })
+                q_frame["FindBoundingBox"].setdefault("constraints", {})
+                if "objectID" in q_frame["FindBoundingBox"]["constraints"]:
+                    if (
+                        obj_name
+                        not in q_frame["FindBoundingBox"]["constraints"]["objectID"]
+                    ):
+                        q_frame["FindBoundingBox"]["constraints"]["objectID"].extend(
+                            ["==", obj_name]
+                        )
+                else:
+                    q_frame["FindBoundingBox"]["constraints"]["objectID"] = [
+                        "==",
+                        obj_name,
+                    ]
 
-        return [q_bbox, q_conn]
+                if frame != "skip":
+                    q_frame["FindBoundingBox"]["constraints"]["frameID"] = [
+                        frame_cond,
+                        int(frame.strip()),
+                    ]
+                    q_vid2["FindEntity"].setdefault("constraints", {})
+                    q_vid2["FindEntity"]["constraints"]["frameID"] = [
+                        frame_cond,
+                        int(frame.strip()),
+                    ]
+
+            if icon_query["name"] == "person":
+                q_frame["FindBoundingBox"].setdefault("constraints", {})
+                q_frame["FindBoundingBox"]["constraints"]["age"] = [
+                    ">=",
+                    int(self._value(icon_query, "Age Min")),
+                    "<=",
+                    int(self._value(icon_query, "Age Max")),
+                ]
+
+                emotion = self._value(icon_query, "Emotion List")
+                if emotion != "skip":
+                    q_frame["FindBoundingBox"]["constraints"]["emotion"] = [
+                        "==",
+                        emotion,
+                    ]
+
+                gender = self._value(icon_query, "Gender")
+                if gender != "skip":
+                    q_frame["FindBoundingBox"]["constraints"]["gender"] = ["==", gender]
+
+                if "objectID" in q_frame["FindBoundingBox"]["constraints"]:
+                    if (
+                        "face"
+                        not in q_frame["FindBoundingBox"]["constraints"]["objectID"]
+                    ):
+                        q_frame["FindBoundingBox"]["constraints"]["objectID"].extend(
+                            ["==", "face"]
+                        )
+                else:
+                    q_frame["FindBoundingBox"]["constraints"]["objectID"] = [
+                        "==",
+                        "face",
+                    ]
+
+        del q_vid2["FindEntity"]["link"]
+        return [q_vid2, q_frame], requested_cnts
 
     def _decode_response(self, response):
-        clips={}
-        for i in range(0,len(response)-1,2):
-            if response[i+1]["FindConnection"]["status"]==0 and response[i]["FindBoundingBox"]["status"]==0:
-                # connections=response[i+1]["FindConnection"]["connections"]
-                bboxes=response[i]["FindBoundingBox"]["entities"]
-                # if len(connections)!=len(bboxes): continue
+        clips = {}
+        segs = []
+        for i in range(0, len(response), 2):
+            if (
+                len(response) > 1
+                and "FindVideo" in response[i]
+                and response[i]["FindVideo"]["status"] == 0
+                and response[i + 1]["FindEntity"]["status"] == 0
+            ):
+                entities = response[i + 1]["FindEntity"]["entities"]
+                # print(entities)
 
-                for j in range(0,len(bboxes)):
-                    stream=bboxes[j]["video_name"]
+                uniq_name = []
+                for ent in entities:
+                    name = ent["server_filepath"]
+                    if name not in uniq_name:
+                        r = get(vdhost + "/api/info", params={"video": name}).json()
+                        duration = r["duration"]
+                        seg1c = {
+                            "name": name,
+                            "stream": quote(
+                                "/api/segment/0/" + str(duration) + "/" + name
+                            ),
+                            "thumbnail": quote("/api/thumbnail/0/" + name + ".png"),
+                            "fps": r["fps"],
+                            "time": 0,
+                            "duration": duration,
+                            "offset": 0,
+                            "width": r["width"],
+                            "height": r["height"],
+                            "frames": [x for x in range(0, r["frame_count"])],
+                        }
+                        segs.append(seg1c)
+                        uniq_name.append(name)
+
+            elif (
+                len(response) > 1
+                and "FindBoundingBox" in response[i + 1]
+                and response[i + 1]["FindBoundingBox"]["status"] == 0
+                and "entities" in response[i + 1]["FindBoundingBox"]
+            ):
+                entities = response[i + 1]["FindBoundingBox"]["entities"]
+                print(f"\t{len(entities)} bbs returned", flush=True)
+
+                for ent_bbox in entities:
+                    stream = ent_bbox["server_filepath"]
                     if stream not in clips:
-                        r=get(vdhost+"/api/info",params={"video":stream}).json()
-                        clips[stream]={
+                        r = get(vdhost + "/api/info", params={"video": stream}).json()
+                        clips[stream] = {
                             "fps": r["fps"],
                             "duration": r["duration"],
                             "width": r["width"],
@@ -120,277 +318,173 @@ class SearchHandler(web.RequestHandler):
                         }
 
                     # time stamp and duration
-                    stream1=clips[stream]
-                    ts=float(bboxes[j]["frameID"])/stream1["fps"]
+                    stream1 = clips[stream]
+                    ts = float(ent_bbox["frameID"]) / stream1["fps"]
 
                     # merge segs
-                    segmin=1
-                    seg1=[max(ts-segmin,0),min(ts+segmin,stream1["duration"])]
-                    stream1["segs"]=merge_iv(stream1["segs"], seg1)
+                    segmin = 1  # 1, 2
+                    seg1 = [
+                        max(ts - segmin, 0),
+                        min(ts + segmin, stream1["duration"]),
+                    ]
+                    stream1["segs"] = merge_iv(stream1["segs"], seg1)
 
                     if ts not in stream1["frames"]:
-                        stream1["frames"][ts]={
-                            "time": ts,
-                            "objects": []
+                        stream1["frames"][ts] = {"time": ts, "objects": []}
+
+                    if "objectID" in ent_bbox:
+                        bbc = {
+                            "x": ent_bbox["VD:x1"],
+                            "y": ent_bbox["VD:y1"],
+                            "w": ent_bbox["VD:width"],
+                            "h": ent_bbox["VD:height"],
                         }
 
-                    if "objectID" in bboxes[j]:
-                        bbc=bboxes[j]["_coordinates"]
-                        stream1["frames"][ts]["objects"].append({
-                            "detection" : {
-                                "bounding_box" : {
-                                    "x_max" : float(bbc["w"]+bbc["x"])/float(stream1["width"]),
-                                    "x_min" : float(bbc["x"])/float(stream1["width"]),
-                                    "y_max" : float(bbc["h"]+bbc["y"])/float(stream1["height"]),
-                                    "y_min" : float(bbc["y"])/float(stream1["height"]),
+                        # Normalize BBs to frame size
+                        frameW = (
+                            ent_bbox["frameW"]
+                            if not isinstance(ent_bbox["frameW"], str)
+                            else ent_bbox["width"]
+                        )
+                        frameH = (
+                            ent_bbox["frameH"]
+                            if not isinstance(ent_bbox["frameH"], str)
+                            else ent_bbox["height"]
+                        )
+
+                        obj = {
+                            "detection": {
+                                "bounding_box": {
+                                    "x_max": float(bbc["w"] + bbc["x"]) / float(frameW),
+                                    "x_min": float(bbc["x"]) / float(frameW),
+                                    "y_max": float(bbc["h"] + bbc["y"]) / float(frameH),
+                                    "y_min": float(bbc["y"]) / float(frameH),
                                 },
-                                "confidence" : 0.99,
-                                "label" : bboxes[j]["objectID"],
+                                "label": ent_bbox["objectID"],
                             },
-                        })
-        print("clips:", flush=True)
-        print(clips, flush=True)
+                        }
+                        if "confidence" in ent_bbox:
+                            obj["detection"]["confidence"] = ent_bbox["confidence"]
+                        stream1["frames"][ts]["objects"].append(obj)
 
-        # create segments
-        segs=[]
-        for name in clips:
-            stream1=clips[name]
-            for seg1 in stream1["segs"]:
-                seg1c={
-                    "name": name,
-                    "stream": quote("/api/segment/"+str(seg1[0])+"/"+str(seg1[1])+"/"+name),
-                    "thumbnail": quote("/api/thumbnail/"+str(seg1[0])+"/"+name+".png"),
-                    "fps": stream1["fps"],
-                    "time": seg1[0],
-                    "duration": seg1[1]-seg1[0],
-                    "offset": 0,
-                    "width": stream1["width"],
-                    "height": stream1["height"],
-                    "frames": [],
-                }
-                for ts in stream1["frames"]:
-                    if ts>=seg1[0] and ts<=seg1[1]:
-                        stream1["frames"][ts].update({ "time": (ts-seg1[0])*1000 })
-                        seg1c["frames"].append(stream1["frames"][ts])
-                segs.append(seg1c)
+                if DEBUG == "1":
+                    print("clips:", flush=True)
+                    print(clips, flush=True)
 
-        print("segs:", flush=True)
-        print(segs, flush=True)
+                # create segments
+                segs = []
+                for name in clips:
+                    stream1 = clips[name]
+                    for seg1 in stream1["segs"]:
+                        seg1c = {  # var "data" used in playback.js
+                            "name": name,
+                            "stream": quote(
+                                "/api/segment/"
+                                + str(seg1[0])
+                                + "/"
+                                + str(seg1[1])
+                                + "/"
+                                + name
+                            ),
+                            "thumbnail": quote(
+                                "/api/thumbnail/" + str(seg1[0]) + "/" + name + ".png"
+                            ),
+                            "fps": stream1["fps"],
+                            "time": seg1[0],
+                            "duration": seg1[1] - seg1[0],
+                            "offset": 0,
+                            "width": stream1["width"],
+                            "height": stream1["height"],
+                            "frames": [],
+                        }
+                        for ts in stream1["frames"]:
+                            if ts >= seg1[0] and ts <= seg1[1]:
+                                stream1["frames"][ts].update(
+                                    {"time": (ts - seg1[0]) * 1000}
+                                )
+                                seg1c["frames"].append(stream1["frames"][ts])
+                        segs.append(seg1c)
+
+        if DEBUG == "1":
+            print("segs:", flush=True)
+            print(segs, flush=True)
         return segs
 
-    def find_common_elements(self,list_a, list_b):
-        set_a = set(list_a)
-        set_b = set(list_b)
-
-        common_elements = set_a.intersection(set_b)
-        if len(common_elements) > 0:
-            return list(common_elements)
-        else:
-            return list()
-
-    def get_details_from_BB(self, response):
-        bb_entities = response[0]["FindBoundingBox"]["entities"]
-        con_entity = response[1]["FindConnection"]["connections"][0]
-
-        bb_info = {}
-        for j in range(0,len(bb_entities)):
-            video_name=bb_entities[j]["video_name"]
-            frameID = bb_entities[j]["frameID"]
-            objectID = bb_entities[j]["objectID"]
-            con_entity["video_name"] = video_name
-            con_entity["frameID"] = frameID
-
-            if video_name not in bb_info:
-                bb_info[video_name] = {frameID: [[bb_entities[j], con_entity]]}
-
-            elif frameID not in bb_info[video_name]:
-                bb_info[video_name][frameID] = [[bb_entities[j], con_entity]]
-
-            else:
-                bb_info[video_name][frameID].append([bb_entities[j], con_entity])
-        return bb_info
-
-    def intersect_reponses(self, responses):
-        # Find reponse with least number of returned elements
-        prev_info = self.get_details_from_BB(responses[0])
-        responses_info = []
-        for ridx in range(1, len(responses)):
-            if prev_info == {}:
-                break
-
-            response_info = self.get_details_from_BB(responses[ridx])
-
-            prev_videos = prev_info.keys()
-            cur_videos = response_info.keys()
-            valid_videos = self.find_common_elements(prev_videos, cur_videos)
-
-            if len(valid_videos) == 0:
-                response_info = {}
-                break
-
-            for vid in set(prev_videos).difference(set(valid_videos)):
-                del prev_info[vid]
-
-            for vid in set(cur_videos).difference(set(valid_videos)):
-                del response_info[vid]
-
-            for vid in valid_videos:
-                prev_frames = prev_info[vid].keys()
-                cur_frames = response_info[vid].keys()
-                valid_frames = self.find_common_elements(prev_frames, cur_frames)
-
-                if len(valid_frames) == 0:
-                    del response_info[vid]
-                    continue
-
-                for frame in set(prev_frames).difference(set(valid_frames)):
-                    del prev_info[vid][frame]
-
-                for frame in set(cur_frames).difference(set(valid_frames)):
-                    del response_info[vid][frame]
-
-                for frame in valid_frames:
-                    response_info[vid][frame].extend(prev_info[vid][frame])
-
-            responses_info.append(response_info)
-            prev_info = response_info.copy()
-
-        print("responses_info: ", flush=True)
-        print(prev_info, flush=True)
-
-        new_connections=[]
-        new_bboxes=[]
-        for vid in prev_info.keys():
-            for frame in prev_info[vid].keys():
-                bb_info = prev_info[vid][frame]
-                for j in range(0,len(bb_info)):
-                    new_bboxes.append(bb_info[j][0])
-                    new_connections.append(bb_info[j][1])
-
-        final_response = responses[0]
-        print("Number bboxes: ", len(new_bboxes))
-        final_response[0]["FindBoundingBox"]["entities"] = new_bboxes
-        final_response[0]["FindBoundingBox"]['returned'] = len(new_bboxes)
-        final_response[1]["FindConnection"]["connections"] = new_connections
-        final_response[1]["FindConnection"]['returned'] = len(new_connections)
-        return final_response
-
-    def one_shot_query(self, queries):
+    def one_shot_query(self, queries: list):
         vdms_response = []
         ref = 1
-        print("Queries: ", flush=True)
-        for query1 in queries: # Query per line in Gui
-            responses = []
-            for q in query1: #Queries on a single line (one icon)
-                # print(f"Icon query: {q}", flush=True)
-
-                # BB & Connection query for each icon
-                vdms_query = self._construct_single_query(q, ref)
-
+        if DEBUG == "1":
+            print("Queries: ", flush=True)
+        for line_query in queries:  # Query per line in Gui
+            vdms_query, requested_cnts = self._construct_query(line_query, ref)
+            if DEBUG == "1":
                 print("vdms_query:", flush=True)
                 print(vdms_query, flush=True)
 
-                response, _ =self._vdms.query(vdms_query)
+            responses = retry_query(self._vdms, vdms_query, sleep_timer=randint(1, 5))
 
-                responses.append(response)
-                ref += 1
+            # Get expected object counts
+            if len(responses) > 1 and "FindBoundingBox" in responses[1]:
+                if "objectID" in vdms_query[1]["FindBoundingBox"]["constraints"]:
+                    objects_of_interest = [
+                        vdms_query[1]["FindBoundingBox"]["constraints"]["objectID"][i]
+                        for i in range(
+                            1,
+                            len(
+                                vdms_query[1]["FindBoundingBox"]["constraints"][
+                                    "objectID"
+                                ]
+                            ),
+                            2,
+                        )
+                    ]
+                    bb_ents = responses[1]["FindBoundingBox"]["entities"]
+                    reduced_ents = find_indices_of_objects_in_entities(
+                        bb_ents, objects_of_interest, requested_cnts
+                    )
+                    responses[1]["FindBoundingBox"]["entities"] = reduced_ents
 
-            if len(responses) > 1 and "FindBoundingBox" in responses[0][0]:
-                # And operation; multiple on one line
-                # Find common response/frames for all icons on line
-                final_response = self.intersect_reponses(responses)
-                vdms_response.extend(final_response)
-            else:
-                # Single query
-                vdms_response.extend(responses[0])
+            vdms_response.extend(responses)
+            ref += 1
+
+            if DEBUG == "1":
+                print("response: ", responses, flush=True)
 
         return vdms_response
 
     @run_on_executor
     def _search(self, queries, size):
+        if DEBUG == "1":
+            print("[TIMING],start_frontend_search,," + str(time.time()), flush=True)
         try:
             vdms_response = self.one_shot_query(queries)
         except Exception as e:
             vdms_response = []
-            print("Exception: "+str(e)+"\n"+traceback.format_exc(), flush=True)
-        # print("VDMS response:")
-        # print(vdms_response, flush=True)
+            print("Exception: " + str(e) + "\n" + traceback.format_exc(), flush=True)
+
+        if DEBUG == "1":
+            print("VDMS response:", flush=True)
+            print(vdms_response, flush=True)
+
         segs = self._decode_response(vdms_response)
+        if DEBUG == "1":
+            print("[TIMING],end_frontend_search,," + str(time.time()), flush=True)
         return segs
 
     @gen.coroutine
     def get(self):
-        queries=json.loads(unquote(str(self.get_argument("queries"))))
-        size=int(self.get_argument("size"))
-        # print("queries",flush=True)
-        # print(queries,flush=True)
-        r=yield self._search(queries, size)
+        queries = json.loads(unquote(str(self.get_argument("queries"))))
+        size = int(self.get_argument("size"))
+
+        if DEBUG == "1":
+            print("queries:", flush=True)
+            print(queries, flush=True)
+
+        r = yield self._search(queries, size)
         if isinstance(r, str):
             self.set_status(400, str(r))
             return
 
-        self.write({"response":r})
-        self.set_status(200, 'OK')
+        self.write({"response": r})
+        self.set_status(200, "OK")
         self.finish()
-
-
-    # def intersect_reponses2(self, responses):
-    #     # Find reponse with least number of returned elements
-    #     responses_info = []
-    #     for response in responses:
-    #         bboxes=response[0]["FindBoundingBox"]["entities"]
-
-    #         response_info = {}
-    #         for j in range(0,len(bboxes)):
-    #             video_name=bboxes[j]["video_name"]
-    #             frameID = bboxes[j]["frameID"]
-    #             if video_name not in response_info:
-    #                 response_info[video_name] = [frameID]
-    #             else:
-    #                 response_info[video_name].append(frameID)
-    #         responses_info.append(response_info)
-
-    #     print("responses_info: ", flush=True)
-    #     print(responses_info, flush=True)
-
-    #     # List of videos in all reponses
-    #     valid_videos = responses_info[0].keys()
-    #     for idx in range(1, len(responses_info)):
-    #         valid_videos = self.find_common_elements(valid_videos, responses_info[idx].keys())
-
-    #     if valid_videos is None:
-    #         return []
-
-    #     combined_response = {}
-    #     for video in valid_videos:
-    #         valid_frames = responses_info[0][video]
-    #         for idx in range(1, len(responses_info)):
-    #             valid_frames = self.find_common_elements(valid_frames, responses_info[idx][video])
-    #         if valid_frames:
-    #             combined_response[video] = valid_frames
-
-    #     if len(combined_response.keys()) == 0:
-    #         return []
-
-    #     new_connections=[]
-    #     new_bboxes=[]
-    #     for ridx, response in enumerate(responses):
-    #         bboxes=response[0]["FindBoundingBox"]["entities"]
-    #         connections=response[1]["FindConnection"]["connections"]
-
-    #         for j in range(0,len(bboxes)):
-    #             video_name=bboxes[j]["video_name"]
-    #             frameID = bboxes[j]["frameID"]
-    #             if video_name in combined_response and frameID in combined_response[video_name]:
-    #                 connections[j]["video_name"] = video_name
-    #                 connections[j]["frameID"] = frameID
-    #                 new_connections.append(connections[j])
-    #                 new_bboxes.append(bboxes[j])
-
-    #     final_response = responses[0]
-    #     print("Number bboxes: ", len(new_bboxes))
-    #     final_response[0]["FindBoundingBox"]["entities"] = new_bboxes
-    #     final_response[0]["FindBoundingBox"]['returned'] = len(new_bboxes)
-    #     final_response[1]["FindConnection"]["connections"] = new_connections
-    #     final_response[1]["FindConnection"]['returned'] = len(new_connections)
-    #     return final_response

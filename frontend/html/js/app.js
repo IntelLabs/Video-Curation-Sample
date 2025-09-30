@@ -18,7 +18,7 @@ function selectPage1(page, options) {
     var contents=$("body");
     contents.children().show().not("#pg-"+page).hide().trigger(":closepage");
     contents.find("#pg-"+page).trigger(":initpage", options);
-    $(window).trigger('resize');    
+    $(window).trigger('resize');
 }
 
 function selectPage(page, options) {

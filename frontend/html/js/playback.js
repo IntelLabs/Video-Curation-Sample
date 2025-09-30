@@ -25,20 +25,25 @@ function draw_analytics(video, data) {
             svg.empty();
             if (tid in timed) {
                 $.each(timed[tid], function (ignord,v) {
-                    var sx=svg.width()/data.width;
-                    var sy=svg.height()/data.height;
-                    var sxy=Math.min(sx,sy);
-                    var sw=sxy*data.width;
-                    var sh=sxy*data.height;
-                    var sxoff=(svg.width()-sw)/2;
-                    var syoff=(svg.height()-sh)/2;
+                    console.log("data.width: "+data.width+" data.height: "+data.height);
+                    console.log("svg.width(): "+svg.width()+" svg.height(): "+svg.height());
+                    var sx=svg.width()/data.width; // ratio windowW to frameW
+                    var sy=svg.height()/data.height; // ratio windowH to frameH
+                    var sxy=Math.min(sx,sy); // Avoid distortion use smaller ratio for w and h
+                    var sw=sxy*data.width;  // Get new frameW using sxy
+                    var sh=sxy*data.height;  // Get new frameH using sxy
+                    var sxoff=(svg.width()-sw)/2; // Offset to center width
+                    var syoff=(svg.height()-sh)/2; // Offset to center height
                     $.each(v.objects, function (ignored, v1) {
                         if ("detection" in v1) {
                             if ("bounding_box" in v1.detection) {
+                                // x* and y* are ratios of frame size
                                 var xmin=v1.detection.bounding_box.x_min*sw;
                                 var xmax=v1.detection.bounding_box.x_max*sw;
                                 var ymin=v1.detection.bounding_box.y_min*sh;
                                 var ymax=v1.detection.bounding_box.y_max*sh;
+                                console.log("xmin: "+xmin+" xmax: "+xmax);
+                                console.log("ymin: "+ymin+" ymax: "+ymax);
                                 if (xmin!=xmax && ymin!=ymax) {
                                     svg.append($(document.createElementNS(svg.attr('xmlns'),"rect")).attr({
                                         x:sxoff+xmin,

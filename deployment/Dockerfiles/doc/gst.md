@@ -26,19 +26,19 @@ In GPU images, the GStreamer docker images are accelerated through `VAAPI`. Note
 
 ### Examples:
 
-- Transcode raw yuv420 content to mp4:  
+- Transcode raw yuv420 content to mp4:
 
 ```bash
 gst-launch-1.0 -v filesrc location=test.yuv ! videoparse format=i420 width=320 height=240 framerate=30 ! x264enc ! mpegtsmux ! filesink location=test.ts
 ```
 
-- Encoding with `VAAPI`:  
+- Encoding with `VAAPI`:
 
 ```bash
 gst-launch-1.0 -v filesrc location=test.yuv ! videoparse format=i420 width=320 height=240 framerate=30 ! vaapih264enc ! mpegtsmux ! filesink location=test.ts
 ```
 
-- Encoding with SVT encoders:  
+- Encoding with SVT encoders:
 
 ```bash
 gst-launch-1.0 -v videotestsrc ! video/x-raw ! svthevcenc! mpegtsmux ! filesink location=hevc.ts
@@ -46,7 +46,7 @@ gst-launch-1.0 -v videotestsrc ! video/x-raw ! svtav1enc ! webmmux ! filesink lo
 gst-launch-1.0 -v videotestsrc ! video/x-raw ! svtvp9enc ! webmmux ! filesink location=vp9.mkv
 ```
 
-- Use the Intel<sup>&reg;</sup> OpenVINO<sup>&trade;</sup> inference engine to detect items in a scene: 
+- Use the Intel<sup>&reg;</sup> OpenVINO<sup>&trade;</sup> inference engine to detect items in a scene:
 
 ```bash
 gst-launch-1.0 -v filesrc location=test.ts ! decodebin ! video/x-raw ! videoconvert ! \
@@ -54,7 +54,7 @@ gst-launch-1.0 -v filesrc location=test.ts ! decodebin ! video/x-raw ! videoconv
   gvawatermark ! videoconvert ! fakesink
 ```
 
-- Use the Intel OpenVINO inference engine to classify items in a scene:  
+- Use the Intel OpenVINO inference engine to classify items in a scene:
 
 ```bash
 gst-launch-1.0 -v filesrc location=test.ts ! decodebin ! video/x-raw ! videoconvert ! \
@@ -65,5 +65,5 @@ gst-launch-1.0 -v filesrc location=test.ts ! decodebin ! video/x-raw ! videoconv
 
 ### See Also:
 
-- [GStreamer Video Analytics Plugin](https://github.com/opencv/gst-video-analytics)   
+- [GStreamer Video Analytics Plugin](https://github.com/opencv/gst-video-analytics)
 

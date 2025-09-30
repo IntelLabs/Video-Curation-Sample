@@ -5,19 +5,22 @@ PLATFORM="${1:-Xeon}"
 NCURATIONS="$2"
 INGESTION="$3"
 IN_SOURCE="$4"
-STREAM_URL="$5"
-NCPU="$6"
-REGISTRY="$7"
+NCPU="$5"
+REGISTRY="$6"
+NSTREAMS="$7"
+DEVICE="$8"
+DEBUG="$9"
+DOCKER_TAR="${10}"
+DOCKER_TAR_DIR="${11}"
+RESIZE_FLAG="${12}"
+MODEL_NAME="${13}"
+CUSTOM_MODEL_FLAG="${14}"
+OMIT_DETECTIONS_FLAG="${15}"
 
-echo "Generating templates with PLATFORM=${PLATFORM},NCURATIONS=${NCURATIONS},INGESTION=${INGESTION},IN_SOURCE=${IN_SOURCE},STREAM_URL=${STREAM_URL},NCPU=${NCPU},HOSTIP=${HOSTIP}"
-if [[ $IN_SOURCE == *"videos"* ]]; then
-    if test -f "${DIR}/docker-compose.yml.m4"; then
-        echo "Generating docker-compose.yml"
-        m4 -DREGISTRY_PREFIX=$REGISTRY -DINGESTION="$INGESTION" -DNCURATIONS="${NCURATIONS}" -DIN_SOURCE="${IN_SOURCE}" -DSTREAM_URL="${STREAM_URL}" -DNCPU="${NCPU}" -I "${DIR}" "${DIR}/docker-compose.yml.m4" > "${DIR}/docker-compose.yml"
-    fi
-else
-    if test -f "${DIR}/docker-compose_stream.yml.m4"; then
-        echo "Generating docker-compose.yml"
-        m4 -DREGISTRY_PREFIX=$REGISTRY -DINGESTION="$INGESTION" -DNCURATIONS="${NCURATIONS}" -DIN_SOURCE="${IN_SOURCE}" -DSTREAM_URL="${STREAM_URL}" -DNCPU="${NCPU}" -I "${DIR}" "${DIR}/docker-compose_stream.yml.m4" > "${DIR}/docker-compose.yml"
-    fi
+echo "Generating templates with PLATFORM=${PLATFORM},NCURATIONS=${NCURATIONS},NSTREAMS=${NSTREAMS},INGESTION=${INGESTION},DEVICE=${DEVICE},IN_SOURCE=${IN_SOURCE},NCPU=${NCPU},HOSTIP=${HOSTIP},DEBUG=${DEBUG},DOCKER_TAR=${DOCKER_TAR},DOCKER_TAR_DIR=${DOCKER_TAR_DIR},RESIZE_FLAG=${RESIZE_FLAG},OMIT_DETECTIONS_FLAG=${OMIT_DETECTIONS_FLAG}"
+
+if test -f "${DIR}/docker-compose.yml.m4"; then
+    echo "Generating docker-compose.yml"
+    m4 -D${DEVICE} -Din_${IN_SOURCE} -DREGISTRY_PREFIX=$REGISTRY -DINGESTION="$INGESTION" -DDEVICE="$DEVICE" -DDEBUG="$DEBUG" -DNCURATIONS="${NCURATIONS}" -DNSTREAMS="${NSTREAMS}" -DIN_SOURCE="${IN_SOURCE}" -DNCPU="${NCPU}" -DRESIZE_FLAG="${RESIZE_FLAG}" -DMODEL_NAME="${MODEL_NAME}" -DCUSTOM_MODEL_FLAG="${CUSTOM_MODEL_FLAG}" -DOMIT_DETECTIONS_FLAG="${OMIT_DETECTIONS_FLAG}" -I "${DIR}" "${DIR}/docker-compose.yml.m4" > "${DIR}/docker-compose.yml"
 fi
+

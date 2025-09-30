@@ -1,4 +1,4 @@
-This docker image is part of Open Visual Cloud software stacks. Optimized for the media creation and delivery use case. Image with IMTL for transmitting and receiving media data with high throughput and low latency. The docker image can be used in the FROM field of a downstream Dockerfile. 
+This docker image is part of Open Visual Cloud software stacks. Optimized for the media creation and delivery use case. Image with IMTL for transmitting and receiving media data with high throughput and low latency. The docker image can be used in the FROM field of a downstream Dockerfile.
 
 ## Supported tags and respective Dockerfile links
  - [xeon-ubuntu-2004-media-imtl](https://github.com/OpenVisualCloud/Dockerfiles/blob/v23.06/Xeon/ubuntu-20.04/media/imtl/Dockerfile)
@@ -28,5 +28,5 @@ This docker installs third party components licensed under various open source l
 |Intel Media Transport Library|BSD 3-Clause 'New' or 'Revised' License|
 
 
-More license information can be found in [components source package](https://github.com/OpenVisualCloud/Dockerfiles-Resources).   
+More license information can be found in [components source package](https://github.com/OpenVisualCloud/Dockerfiles-Resources).
 As for any pre-built image usage, it is the image user's responsibility to ensure that any use of this image complies with any relevant licenses and potential fees for all software contained within. We will have no indemnity or warranty coverage from suppliers.
