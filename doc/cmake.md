@@ -34,6 +34,7 @@ cd ..
 ```
 <br>
 
+
 ### Stream from RTSP Camera
 This application accepts video stream from RTSP cameras.
 The URL for the camera should be set in [camera_config.yaml](/inputs/camera_config.yaml).

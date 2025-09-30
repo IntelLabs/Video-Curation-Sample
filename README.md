@@ -6,9 +6,8 @@ This sample implements libraries for video content analysis, database ingestion,
 - **VDMS**: Store metadata efficiently in a graph-based database.
 - **Visualization**: Visualize content search based on video metadata.
 
-<IMG src="doc/arch.png" height="250px">
-
-**This is a concept sample in active development.**
+<center><IMG src="doc/arch.png" height="250px"></center>
+<center>**This is a concept sample in active development.**</center>
 <br>
 
 
@@ -17,6 +16,7 @@ This sample is powered by the following software stacks:
 - **NGINX Web Service**:
   - [The NGINX/FFmpeg-based web serving stack](/deployment/Dockerfiles/Xeon/ubuntu-22.04/media/nginx) is used to store and segment video content and serve web services. The software stack is optimized for Intel Xeon Scalable Processors.
 <br>
+
 
 ### License Obligations
 - FFmpeg is an open source project licensed under LGPL and GPL. See https://www.ffmpeg.org/legal.html. You are solely responsible for determining if your use of FFmpeg requires any additional licenses. Intel is not responsible for obtaining any such licenses, nor liable for any licensing fees due, in connection with your use of FFmpeg.
@@ -74,8 +74,9 @@ The accepted parameters for the start script are below:<br>
 | -o or --omit-det   | optional | By default, object detections are printed. To omit printing detections to screen, enable flag. | False         |
 | -z or --resize     | optional | Flag to resize video to model input size (640x640)                                             | False         |
 <br>
-See also [Customize Build Process](doc/cmake.md) for additional information on options.
 
+See also [Customize Build Process](doc/cmake.md) for additional information on options.
+<br>
 
 The [stop_app.sh](/stop_app.sh) script is provided to stop the service from a different terminal. To stop and prune the docker images (data doesn't persist), run:
 ```bash
@@ -95,6 +96,7 @@ cd build
 cmake ..
 make
 ```
+
 See also [Customize Build Process](doc/cmake.md) for additional options.
 <br>
 
@@ -140,18 +142,19 @@ For example, to display when "person" and "car" objects are detected, run:
 ## Launch Sample UI:
 Launch your browser and browse to ```https://<hostname>:30007```. The sample UI is similar to the following:
 
-<IMG src="doc/sample-ui.gif" height="270px"></IMG>
+<center><IMG src="doc/sample-ui.gif" height="270px"></IMG></center>
 
 <!-- * For Kubernetes/Docker Swarm, ```<hostname>``` is the hostname of the manager/master node. -->
 <!-- * For Docker Swarm, ```<hostname>``` is the hostname of the manager/master node. -->
-* If you see a browser warning of self-signed certificate, please accept it to proceed to the sample UI.
+
+***NOTE:*** If you see a browser warning of self-signed certificate, please accept it to proceed to the sample UI.
 <br>
 
 
 ## Redeploy Service by Persisting Data
 There may be cases where you want to stop the service but redeploy later with data persisted.  In such cases, follow the following steps, assuming service is currently running, i.e. via `./start_app.sh -e CPU -z -d`:
 
-1. [Optional] For redeployment, we will save the state of the named volumes. To conserve space in the `lcc_vdms-content` volume, it may be beneficial to delete the `/mnt/tmp` directory, this is done by running:
+1. [*Optional*] For redeployment, we will save the state of the named volumes. To conserve space in the `lcc_vdms-content` volume, it may be beneficial to delete the `/mnt/tmp` directory, in case some files were not removed. This is done by running:
     ```bash
     docker exec -it lcc_vdms-service_1 rm -rf /mnt/tmp
     ```
@@ -196,12 +199,11 @@ There may be cases where you want to stop the service but redeploy later with da
 
     docker volume rm lcc_vdms-content
     ```
-    NOTE: Check the size of the volume using `docker system df -v`.
     <br>
 
 1. At this point, images and volumes are saved. You can safely, prune all docker images/volumes if needed via `./stop_app.sh -p`.
 
-1. Prior to redeployment, videos already inserted in previous deployment of service or videos which should not be processed (if any) should be removed from `inputs/`, and any camera configurations should be updated for next deployment.
+1. Prior to redeployment, videos already inserted in previous deployment, which should not be processed again (if any), should be removed from `inputs/`, and any camera configurations should be updated for next deployment.
 
 1. Repopulate the docker volumes to expected name. For `lcc_app-content_saved`, we can simply rename it:
     ```bash
