@@ -1,3 +1,4 @@
+import gc
 import multiprocessing as mp
 import os
 import queue
@@ -90,14 +91,15 @@ if DEVICE == "GPU":
     model_path += ".engine"
     batch_size = int(os.environ.get("GPU_BATCH_SIZE", 1))
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    from torch.cuda import empty_cache
 else:
     model_path += "_openvino_model/"
     batch_size = int(os.environ.get("CPU_BATCH_SIZE", 1))  # 8
 
-device_input = DEVICE.lower() if DEVICE == "CPU" else os.environ["CUDA_VISIBLE_DEVICES"]
+device_input = DEVICE.lower() if DEVICE == "CPU" else "cuda"
 
 all_metadata = {}
-create_clip_queue = mp.Queue()
+send_metadata_queue = mp.Queue()
 
 
 def retry_query(query, num_retries: int = LOCKTIMEOUT_RETRIES, sleep_timer: int = 0):
@@ -387,9 +389,11 @@ def infer_worker(
                 verbose=False,
                 stream=True,
             )
+
             metadata = extract_metadata_from_results(
                 stream_name, frameNum, results, img_size, fps=fps
             )
+            del results
 
         if "face" in INGESTION:
             metadata_face = face_detection(
@@ -402,6 +406,10 @@ def infer_worker(
                 ag_CHW,
                 em_CHW,
             )
+
+        if DEVICE == "GPU":
+            empty_cache()  # Frees memory no longer used
+        gc.collect()  # Forces garbage collector
     except Exception:
         e = traceback.format_exc()
         print(f"Error in {stream_name} infer_worker: {e}", flush=True)
@@ -624,101 +632,28 @@ def save_clip(
 
 
 # method to create clips (read frame write to file; add name to list)
-def get_clips():
+def send_metadata():
     global all_metadata
-    clip_frame_idx = 0
-    target_fps = TARGET_FPS
     clip_filename = ""
     clip_key = ""
-    tmp_file = ""
-    clip_id = 0
-    frameNum = 0
     width = 0
     height = 0
-    _out_vid = None
     while True:
         try:
-            queue_details = create_clip_queue.get()
+            queue_details = send_metadata_queue.get()
             if queue_details is None:
-                if _out_vid is not None:
-                    frame_count = clip_frame_idx
-                    if frame_count > target_fps:
-                        _out_vid = save_clip(
-                            clip_filename,
-                            clip_id,
-                            tmp_file,
-                            _out_vid,
-                            frame_count,
-                            frameNum,
-                            target_fps,
-                        )
-                        metadata2vdms(
-                            clip_key,
-                            clip_filename,
-                            all_metadata[clip_key],
-                            width,
-                            height,
-                        )
-                        del all_metadata[clip_key]
-                    else:
-                        _out_vid = None
                 break
 
-            (
-                frameNum,
-                clip_frame_idx,
-                clip_id,
+            (clip_key, clip_filename, width, height) = queue_details
+
+            metadata2vdms(
+                clip_key,
                 clip_filename,
-                tmp_file,
-                frame,
-                target_fps,
-                fourcc,
+                all_metadata[clip_key],
                 width,
                 height,
-                clip_total_frames,
-            ) = queue_details
-            clip_key = Path(clip_filename).name
-
-            if clip_frame_idx - 1 == 0:
-                if DEBUG == "1":
-                    print(
-                        f"[TIMING],start_get_clips,{clip_key},{time.time()}",
-                        flush=True,
-                    )
-                _out_vid = cv2.VideoWriter(
-                    tmp_file,
-                    fourcc=fourcc,
-                    fps=target_fps,
-                    frameSize=(width, height),
-                )
-                if DEBUG == "1":
-                    print(
-                        f"[TIMING],Start new clip,{clip_key},{time.time()}",
-                        flush=True,
-                    )
-
-            _out_vid.write(frame)
-
-            if clip_frame_idx == clip_total_frames:
-                frame_count = clip_frame_idx
-                _out_vid = save_clip(
-                    clip_filename,
-                    clip_id,
-                    tmp_file,
-                    _out_vid,
-                    frame_count,
-                    frameNum,
-                    target_fps,
-                )
-
-                metadata2vdms(
-                    clip_key,
-                    clip_filename,
-                    all_metadata[clip_key],
-                    width,
-                    height,
-                )
-                del all_metadata[clip_key]
+            )
+            del all_metadata[clip_key]
 
         except queue.Empty:
             pass
@@ -766,7 +701,7 @@ class VideoStream:
         )
         self.t.append(
             self.executor.submit(
-                get_clips,
+                send_metadata,
             )
         )
 
@@ -924,11 +859,40 @@ def process_stream(camera_src, camera_name=None):
     start = time.time()
     # Start retrieving frames and add to queue
     webcam_stream.start()
+    _out_vid = None
+    clip_filename = ""
+    clip_frame_idx = 0
+    clip_id = 0
+    clip_key = ""
+    frameNum = 0
+    tmp_file = ""
     while True:
         queue_details = webcam_stream.inference_queue.get()
 
         if queue_details is None:
-            create_clip_queue.put(queue_details)
+            if _out_vid is not None:
+                frame_count = clip_frame_idx
+                if frame_count > TARGET_FPS:
+                    _out_vid = save_clip(
+                        clip_filename,
+                        clip_id,
+                        tmp_file,
+                        _out_vid,
+                        frame_count,
+                        frameNum,
+                        webcam_stream.target_fps,
+                    )
+                    send_metadata_queue.put(
+                        (
+                            clip_key,
+                            clip_filename,
+                            webcam_stream.width,
+                            webcam_stream.height,
+                        )
+                    )
+                else:
+                    _out_vid = None
+            send_metadata_queue.put(None)
             print("End of stream")
             break
 
@@ -963,21 +927,45 @@ def process_stream(camera_src, camera_name=None):
         all_metadata[clip_key].setdefault("face", {})
         all_metadata[clip_key]["face"].update(metadata_face)
         webcam_stream.num_frames_processed += 1
-        queue_details = (
-            frameNum,  # Overall frame number
-            clip_frame_idx,  # Frame index in clip
-            clip_id,  # Clip number
-            clip_filename,
-            tmp_file,
-            frame,  # Frame,
-            webcam_stream.target_fps,
-            webcam_stream.fourcc,
-            webcam_stream.width,
-            webcam_stream.height,
-            webcam_stream.clip_total_frames,
-        )
 
-        create_clip_queue.put(queue_details)
+        if clip_frame_idx - 1 == 0:
+            if DEBUG == "1":
+                print(
+                    f"[TIMING],start_get_clips,{clip_key},{time.time()}",
+                    flush=True,
+                )
+            _out_vid = cv2.VideoWriter(
+                tmp_file,
+                fourcc=webcam_stream.fourcc,
+                fps=webcam_stream.target_fps,
+                frameSize=(webcam_stream.width, webcam_stream.height),
+            )
+            if DEBUG == "1":
+                print(
+                    f"[TIMING],Start new clip,{clip_key},{time.time()}",
+                    flush=True,
+                )
+
+        _out_vid.write(frame)
+
+        if clip_frame_idx == webcam_stream.clip_total_frames:
+            frame_count = clip_frame_idx
+            _out_vid = save_clip(
+                clip_filename,
+                clip_id,
+                tmp_file,
+                _out_vid,
+                frame_count,
+                frameNum,
+                webcam_stream.target_fps,
+            )
+            queue_details = (
+                clip_key,
+                clip_filename,
+                webcam_stream.width,
+                webcam_stream.height,
+            )
+            send_metadata_queue.put(queue_details)
 
     webcam_stream.stop()
 

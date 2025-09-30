@@ -8,7 +8,7 @@ import time
 import yaml
 from inotify.adapters import Inotify
 
-num_workers = mp.cpu_count()
+num_workers = mp.cpu_count() // 2
 
 DEBUG = os.environ["DEBUG"]
 DEBUG_FLAG = True if DEBUG == "1" else False

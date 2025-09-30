@@ -26,6 +26,7 @@ MODEL_NAME = os.environ.get("MODEL_NAME", "yolo11n")
 if DEVICE == "GPU":
     batch_size = int(os.environ.get("GPU_BATCH_SIZE", 1))
     run_platform_name = "engine"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     print("[!] USING GPU & TENSORRT")
 else:
     # batch_size = 8
@@ -64,13 +65,12 @@ def get_model(model_dir, run_platform, device_input, batch=1):
         pt_detection_model.export(
             format="engine",
             half=half_flag,
-            imgsz=3840,  # Max dimensions (8K)
+            imgsz=[7680, 4320],  # Max dimensions (8K-[W,H]-[7680,4320])
             dynamic=dynamic_flag,
             device=device_input,
             simplify=True,
             batch=batch,
         )
-        # pt_detection_model.export(format='engine')  # Rohit
 
         final_model_path = f"{model_dir}/{MODEL_NAME}.engine"
         object_detection_model = YOLO(
@@ -124,7 +124,7 @@ if __name__ == "__main__":
 
     ydir = Path(dir_path)
 
-    device_input = DEVICE.lower() if DEVICE == "CPU" else "0"
+    device_input = DEVICE.lower() if DEVICE == "CPU" else "cuda"
     _, _ = get_model(ydir, run_platform_name, device_input, batch=batch_size)
 
     os.remove(f"{ydir}/{MODEL_NAME}.pt")
