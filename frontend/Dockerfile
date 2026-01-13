@@ -1,5 +1,5 @@
 
-FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1
+FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1@sha256:d19eb597dc210134063803630ae2ea1ec84dfd4189138f59551e2f5ed047284a
 
 ARG DEBUG="0"
 ENV DEBUG="${DEBUG}"

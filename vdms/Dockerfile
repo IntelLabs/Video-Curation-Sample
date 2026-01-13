@@ -1,4 +1,4 @@
-FROM intellabs/vdms:v2.11.0
+FROM intellabs/vdms:v2.11.0@sha256:f856644ccdec1838feb64e55a26dad6818f2842caf8d0e18834653c597742850
 
 COPY VideoCommand.h /vdms/src/
 COPY VideoCommand.cc /vdms/src/
