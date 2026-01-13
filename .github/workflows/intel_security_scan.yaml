@@ -9,7 +9,7 @@ on:
 
 jobs:
   Call-Workflow:
-    uses: intel/.github/.github/workflows/intel_scan.yaml@main
+    uses: intel/.github/.github/workflows/intel_scan.yaml@6474e4a0e94d0d40cd88359c80dab2f6750d2128  # main (no tags) - Sep 19, 2025
     permissions:
       contents: read
       packages: read
