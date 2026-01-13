@@ -1,5 +1,5 @@
 
-FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1 as build
+FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1@sha256:d19eb597dc210134063803630ae2ea1ec84dfd4189138f59551e2f5ed047284a as build
 
 ENV VIRTUAL_ENV=/opt/venv
 ARG DEBIAN_FRONTEND=noninteractive
@@ -31,7 +31,7 @@ RUN pip3 install --no-cache-dir -r /home/requirements.txt && \
 RUN omz_downloader --list /home/resources/models/models.lst -o /home/resources/models --precisions FP16
 
 # FINAL IMAGE
-FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1
+FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1@sha256:d19eb597dc210134063803630ae2ea1ec84dfd4189138f59551e2f5ed047284a
 ENV VIRTUAL_ENV=/opt/venv
 ARG DEBIAN_FRONTEND=noninteractive
 
