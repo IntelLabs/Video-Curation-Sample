@@ -42,7 +42,7 @@ jobs:
             /*
             # Explicitly ignore the 'deployment/Dockerfiles' directory
             # Directory contains archived Dockerfiles from OpenVisualCloud
-            !deployment/Dockerfiles
+            !/deployment/Dockerfiles
           sparse-checkout-cone-mode: false
 
       - name: "Run analysis"
