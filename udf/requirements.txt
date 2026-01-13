@@ -1,6 +1,6 @@
 flask>=3.0.2
 inotify
-numpy>=1.23.5,<2.0.0
+numpy>=1.23.5,<3.0.0
 opencv-python-headless==4.10.0.82
 vdms
 wheel
