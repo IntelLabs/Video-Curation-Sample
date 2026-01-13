@@ -37,6 +37,13 @@ jobs:
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
         with:
           persist-credentials: false
+          sparse-checkout: |
+            # Include everything in the root
+            /*
+            # Explicitly ignore the 'deployment/Dockerfiles' directory
+            # Directory contains archived Dockerfiles from OpenVisualCloud
+            !deployment/Dockerfiles
+          sparse-checkout-cone-mode: false
 
       - name: "Run analysis"
         uses: ossf/scorecard-action@62b2cac7ed8198b15735ed49ab1e5cf35480ba46 # v2.4.0
