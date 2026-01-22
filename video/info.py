@@ -24,6 +24,7 @@ class InfoHandler(web.RequestHandler):
     def _get_info(self, video):
         width = height = duration = fps = nb_frames = 0
 
+        input_path = safely_join_path(self._mp4path, video)
         cmd = [
             "/usr/local/bin/ffprobe",
             "-v",
@@ -33,7 +34,7 @@ class InfoHandler(web.RequestHandler):
             "-count_frames",
             "-show_streams",
             "-i",
-            safely_join_path(self._mp4path, video),
+            input_path,
         ]
         with Popen(
             cmd, stdout=PIPE, stderr=STDOUT, bufsize=1, universal_newlines=True
@@ -56,8 +57,9 @@ class InfoHandler(web.RequestHandler):
                     fps = float(eq[0]) / float(eq[1])
                 if line.startswith("nb_read_frames="):
                     nb_frames = int(line.split("=")[-1])
-            p.stdout.close()
             p.wait()
+        if p.returncode != 0:
+            raise RuntimeError(f"ffprobe failed for input {input_path!r} with code {p.returncode}")
         if fps == 0 and (nb_frames != 0 and duration != 0):
             fps = nb_frames / duration
         return {
