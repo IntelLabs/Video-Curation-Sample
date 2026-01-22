@@ -7,6 +7,7 @@ from urllib.parse import unquote
 
 from tornado import gen, web
 from tornado.concurrent import run_on_executor
+from utils import safely_join_path
 
 
 class SegmentHandler(web.RequestHandler):
@@ -22,7 +23,8 @@ class SegmentHandler(web.RequestHandler):
     @run_on_executor
     def _gen_segment(self, video, start, end):
         output = video.replace(".mp4", "-" + start + ".mp4")
-        if not os.path.exists(self._genpath + "/" + output):
+        gen_path = safely_join_path(self._genpath, output)
+        if not os.path.exists(gen_path):
             call(
                 [
                     "/usr/local/bin/ffmpeg",
@@ -34,10 +36,10 @@ class SegmentHandler(web.RequestHandler):
                     "-to",
                     end,
                     "-i",
-                    self._mp4path + "/" + video,
+                    safely_join_path(self._mp4path, video),
                     "-c",
                     "copy",
-                    self._genpath + "/" + output,
+                    gen_path,
                 ]
             )
             # call(["/usr/local/bin/ffmpeg","-i",self._mp4path+"/"+video,"-force_key_frames",f"{start},{end}", self._genpath + "/" + output])
@@ -56,10 +58,11 @@ class SegmentHandler(web.RequestHandler):
 
     @gen.coroutine
     def get(self):
-        mm = unquote(str(self.request.path)).split("/")
-        video = mm[-1]
-        start = self._format(float(mm[-3]))
-        end = self._format(float(mm[-2]))
+        req_path = unquote(str(self.request.path))
+        get_start_time, get_end_time = req_path.split("/")[-3:-1]
+        video = os.path.basename(req_path)
+        start = self._format(float(get_start_time))
+        end = self._format(float(get_end_time))
         segment = yield self._gen_segment(video, start, end)
         self.add_header("X-Accel-Redirect", "/gen/" + segment)
         self.set_status(200, "OK")

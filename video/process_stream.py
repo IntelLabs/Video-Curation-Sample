@@ -16,21 +16,9 @@ import cv2  # OpenCV library
 from openvino.runtime import Core
 from ultralytics import YOLO
 from ultralytics.utils.checks import check_imgsz
+from utils import str2bool
 
 import vdms
-
-
-def str2bool(in_val):
-    if isinstance(in_val, bool):
-        return in_val
-
-    if not isinstance(in_val, str):
-        raise ValueError(f"{in_val} is not a bool or string")
-
-    if in_val.title() == "True":
-        return True
-    else:
-        return False
 
 
 def _sort_dict_by_frame(in_dict):
