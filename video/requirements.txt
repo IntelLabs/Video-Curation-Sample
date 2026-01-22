@@ -1,6 +1,8 @@
-inotify
-opencv-python-headless>=4.10.0.90
-openvino-dev>=2024.6.0
-ultralytics>=8.3.83
-vdms
-wheel
+inotify==0.2.12
+opencv-python-headless==4.11.0.86
+openvino-dev==2024.6.0
+psutil==7.2.1
+requests==2.32.5
+ultralytics==8.4.7
+vdms==0.0.22
+wheel==0.46.3

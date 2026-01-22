@@ -7,8 +7,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # fixes CVE-2023-4911 vulnerability on Ubuntu 22.04
 RUN apt-get update && \
     apt-get install --only-upgrade libc-bin libc6  && \
-    apt-get install -y -q  --no-install-recommends python3-setuptools \
-    python3-tornado python3-requests python3-ply python3-pip python3-psutil python3-venv \
+    apt-get install -y -q  --no-install-recommends python3-pip python3-venv \
     curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
@@ -16,7 +15,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 COPY remote_function /home/remote_function
 COPY requirements.txt /home/requirements.txt
 
-RUN pip3 install pip --upgrade && pip3 install -r /home/requirements.txt
+RUN pip3 install pip --upgrade --no-cache-dir && pip3 install --no-cache-dir -r /home/requirements.txt
 
 WORKDIR /home
 COPY *.py /home/

@@ -1,1 +1,5 @@
-vdms
+ply==3.11
+psutil==5.9.0
+requests==2.25.1
+tornado==6.1
+vdms==0.0.22

@@ -7,11 +7,11 @@ ENV DEBUG="${DEBUG}"
 # fixes CVE-2023-4911 vulnerability on Ubuntu 22.04
 RUN apt-get update && \
     apt-get install --only-upgrade libc-bin libc6  && \
-    apt-get install -y -q --no-install-recommends python3-tornado python3-requests python3-ply python3-pip python3-psutil && \
+    apt-get install -y -q --no-install-recommends python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /home/requirements.txt
-RUN pip3 install -r /home/requirements.txt
+RUN pip3 install --no-cache-dir -r /home/requirements.txt
 
 COPY *.py /home/
 COPY    *.conf /etc/nginx/

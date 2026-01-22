@@ -8,7 +8,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install --only-upgrade libc-bin libc6  && \
     apt-get install -y -q  --no-install-recommends python3-setuptools \
-    python3-tornado python3-requests python3-ply python3-pip python3-psutil python3-venv \
+    python3-tornado python3-ply python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
@@ -21,9 +21,9 @@ ENV DEVICE="${DEVICE}"
 
 RUN pip3 install pip --no-cache-dir --upgrade && \
     if [ "${DEVICE}" = "CPU" ]; then \
-        pip3 install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu; \
+        pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" --index-url https://download.pytorch.org/whl/cpu; \
     else \
-        pip3 install --no-cache-dir torch torchvision; \
+        pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" ; \
     fi;
 RUN pip3 install --no-cache-dir -r /home/requirements.txt && \
     pip3 install --no-cache-dir -r /home/requirements.${DEVICE}.txt
@@ -37,9 +37,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
     apt-get install --only-upgrade libc-bin libc6  && \
-    apt-get install -y -q  --no-install-recommends python3-setuptools \
-    python3-tornado python3-requests \
-    curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
+    apt-get install -y -q  --no-install-recommends python3-tornado curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # COPY --from=build /usr/local/lib/python3.10 /usr/local/lib/python3.10
