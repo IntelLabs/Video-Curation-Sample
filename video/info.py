@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from subprocess import PIPE, STDOUT, Popen
 from urllib.parse import unquote
@@ -70,6 +71,9 @@ class InfoHandler(web.RequestHandler):
     @gen.coroutine
     def get(self):
         video = unquote(str(self.get_argument("video")))
-        info = yield self._get_info(video)
-        self.write(info)
-        self.set_status(200, "OK")
+        if os.path.exists(safely_join_path(self._mp4path, video)):
+            info = yield self._get_info(video)
+            self.write(info)
+            self.set_status(200, "OK")
+        else:
+            self.send_error(404, reason="Resource not found")
