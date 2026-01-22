@@ -20,3 +20,19 @@ def str2bool(in_val):
         return True
     else:
         return False
+
+
+def validate_video_name(name):
+    """
+    Validate that the provided video identifier is a simple file name and
+    not a path. Returns a normalized name or raises ValueError.
+    """
+    if not isinstance(name, str):
+        raise ValueError("Video name must be a string")
+    cleaned = name.strip()
+    if not cleaned:
+        raise ValueError("Video name cannot be empty")
+    # Disallow path separators to ensure this is just a file name.
+    if os.sep in cleaned or "/" in cleaned or "\\" in cleaned:
+        raise ValueError(f"Invalid video name: {cleaned}")
+    return cleaned

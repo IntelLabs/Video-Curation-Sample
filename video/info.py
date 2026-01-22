@@ -7,7 +7,7 @@ from urllib.parse import unquote
 
 from tornado import gen, web
 from tornado.concurrent import run_on_executor
-from utils import safely_join_path
+from utils import safely_join_path, validate_video_name
 
 
 class InfoHandler(web.RequestHandler):
@@ -70,7 +70,12 @@ class InfoHandler(web.RequestHandler):
 
     @gen.coroutine
     def get(self):
-        video = unquote(str(self.get_argument("video")))
+        raw_video = unquote(str(self.get_argument("video")))
+        try:
+            video = validate_video_name(raw_video)
+        except ValueError as exc:
+            self.send_error(400, reason=str(exc))
+            return
         if os.path.exists(safely_join_path(self._mp4path, video)):
             info = yield self._get_info(video)
             self.write(info)
