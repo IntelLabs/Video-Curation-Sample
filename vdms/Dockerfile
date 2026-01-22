@@ -1,12 +1,14 @@
-FROM intellabs/vdms:v2.11.0@sha256:f856644ccdec1838feb64e55a26dad6818f2842caf8d0e18834653c597742850
+FROM intellabs/vdms:v2.12.0@sha256:7b8a655ac3d42e5e86daa012762bd4d7f6e6a9faf842b0db7857fd39ea9eb45f
 
-COPY VideoCommand.h /vdms/src/
+COPY defines.h  /vdms/src/
+COPY VDMSThreadPool.h /vdms/src/
 COPY VideoCommand.cc /vdms/src/
+COPY VideoCommand.h /vdms/src/
+
 COPY Video.cc /vdms/src/vcl/
 COPY Video.h /vdms/include/vcl/
-COPY VDMSThreadPool.h /vdms/src/
+
 COPY api_schema.json /vdms/utils/src/api_schema/
-COPY defines.h  /vdms/src/
 
 RUN sed -i 's|#define DEFAULT_PATH_TMP "/tmp"|#define DEFAULT_PATH_TMP "/mnt/tmp"|g' /vdms/src/VDMSConfig.cc
 

@@ -38,6 +38,7 @@
 #include "VideoCommand.h"
 #include "VideoLoop.h"
 #include "defines.h"
+#include "OpsIOCoordinator.h"
 #include "VDMSThreadPool.h"
 
 using namespace VDMS;
@@ -156,9 +157,7 @@ int AddVideo::construct_protobuf(PMGDQuery &query, const Json::Value &jsoncmd,
   VCL::Video video;
 
   if (_use_aws_storage) {
-    VCL::RemoteConnection *connection = new VCL::RemoteConnection();
-    std::string bucket = VDMSConfig::instance()->get_bucket_name();
-    connection->_bucket_name = bucket;
+    VCL::RemoteConnection *connection = get_existing_connection();
     video.set_connection(connection);
   }
 
@@ -592,9 +591,7 @@ Json::Value FindVideo::construct_responses(Json::Value &responses,
           !cmd.isMember("codec")) {
         // grab the video from aws and put it where vdms expects it
         if (_use_aws_storage) {
-          VCL::RemoteConnection *connection = new VCL::RemoteConnection();
-          std::string bucket = VDMSConfig::instance()->get_bucket_name();
-          connection->_bucket_name = bucket;
+          VCL::RemoteConnection *connection = get_existing_connection();
           VCL::Video video(video_path);
           video.set_connection(connection);
           bool result = video._remote->Read_Video(
@@ -856,9 +853,7 @@ Json::Value FindFrames::construct_responses(Json::Value &responses,
 
       // grab the video from aws here if necessary
       if (_use_aws_storage) {
-        VCL::RemoteConnection *connection = new VCL::RemoteConnection();
-        std::string bucket = VDMSConfig::instance()->get_bucket_name();
-        connection->_bucket_name = bucket;
+        VCL::RemoteConnection *connection = get_existing_connection();
         VCL::Video video(video_path);
         video.set_connection(connection);
         bool result = video._remote->Read_Video(
