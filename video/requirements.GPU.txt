@@ -1,4 +1,4 @@
-onnx>=1.12.0,<1.18.0
+onnx>=1.12.0  #,<1.18.0
 onnxruntime-gpu
 onnxslim
-tensorrt==10.12.0.36
+tensorrt>=10.14.1.48.post1

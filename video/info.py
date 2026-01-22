@@ -1,11 +1,13 @@
 #!/usr/bin/python3
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from subprocess import PIPE, STDOUT, Popen
 from urllib.parse import unquote
 
 from tornado import gen, web
 from tornado.concurrent import run_on_executor
+from utils import safely_join_path
 
 
 class InfoHandler(web.RequestHandler):
@@ -21,6 +23,7 @@ class InfoHandler(web.RequestHandler):
     @run_on_executor
     def _get_info(self, video):
         width = height = duration = fps = nb_frames = 0
+
         cmd = [
             "/usr/local/bin/ffprobe",
             "-v",
@@ -30,7 +33,7 @@ class InfoHandler(web.RequestHandler):
             "-count_frames",
             "-show_streams",
             "-i",
-            self._mp4path + "/" + video,
+            safely_join_path(self._mp4path, video),
         ]
         with Popen(
             cmd, stdout=PIPE, stderr=STDOUT, bufsize=1, universal_newlines=True
@@ -68,6 +71,9 @@ class InfoHandler(web.RequestHandler):
     @gen.coroutine
     def get(self):
         video = unquote(str(self.get_argument("video")))
-        info = yield self._get_info(video)
-        self.write(info)
-        self.set_status(200, "OK")
+        if os.path.exists(safely_join_path(self._mp4path, video)):
+            info = yield self._get_info(video)
+            self.write(info)
+            self.set_status(200, "OK")
+        else:
+            self.send_error(404, reason="Resource not found")

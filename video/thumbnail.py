@@ -7,6 +7,7 @@ from urllib.parse import unquote
 
 from tornado import gen, web
 from tornado.concurrent import run_on_executor
+from utils import safely_join_path
 
 
 class ThumbnailHandler(web.RequestHandler):
@@ -22,7 +23,8 @@ class ThumbnailHandler(web.RequestHandler):
     @run_on_executor
     def _gen_thumbnail(self, video, start):
         output = video.replace(".mp4", "-" + start + ".png")
-        if not os.path.exists(self._genpath + "/" + output):
+        gen_path = safely_join_path(self._genpath, output)
+        if not os.path.exists(gen_path):
             call(
                 [
                     "/usr/local/bin/ffmpeg",
@@ -32,7 +34,7 @@ class ThumbnailHandler(web.RequestHandler):
                     "-ss",
                     start,
                     "-i",
-                    self._mp4path + "/" + video,
+                    safely_join_path(self._mp4path, video),
                     "-vf",
                     "thumbnail,scale=640:360",
                     # "thumbnail,scale=854:480",
@@ -41,7 +43,7 @@ class ThumbnailHandler(web.RequestHandler):
                     "-frames:v",
                     "1",
                     "-y",
-                    self._genpath + "/" + output,
+                    gen_path,
                 ]
             )
         return output
@@ -57,9 +59,10 @@ class ThumbnailHandler(web.RequestHandler):
 
     @gen.coroutine
     def get(self):
-        mm = unquote(str(self.request.path)).split("/")
-        video = mm[-1].replace(".png", "")
-        start = self._format(float(mm[-2]))
+        req_path = unquote(str(self.request.path))
+        get_start_time = req_path.split("/")[-2]
+        start = self._format(float(get_start_time))
+        video = os.path.basename(req_path).replace(".png", "")
         thumbnail = yield self._gen_thumbnail(video, start)
         self.add_header("X-Accel-Redirect", "/gen/" + thumbnail)
         self.set_status(200, "OK")
