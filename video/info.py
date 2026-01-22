@@ -6,6 +6,7 @@ from urllib.parse import unquote
 
 from tornado import gen, web
 from tornado.concurrent import run_on_executor
+from utils import safely_join_path
 
 
 class InfoHandler(web.RequestHandler):
@@ -21,6 +22,7 @@ class InfoHandler(web.RequestHandler):
     @run_on_executor
     def _get_info(self, video):
         width = height = duration = fps = nb_frames = 0
+
         cmd = [
             "/usr/local/bin/ffprobe",
             "-v",
@@ -30,7 +32,7 @@ class InfoHandler(web.RequestHandler):
             "-count_frames",
             "-show_streams",
             "-i",
-            self._mp4path + "/" + video,
+            safely_join_path(self._mp4path, video),
         ]
         with Popen(
             cmd, stdout=PIPE, stderr=STDOUT, bufsize=1, universal_newlines=True
