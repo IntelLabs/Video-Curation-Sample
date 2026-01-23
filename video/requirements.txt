@@ -952,9 +952,9 @@ pyyaml==6.0.3 \
     # via
     #   openvino-dev
     #   ultralytics
-requests==2.32.5 \
-    --hash=sha256:2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6 \
-    --hash=sha256:dbba0bac56e100853db0ea71b82b4dfd5fe2bf6d3754a8893c3af500cec7d7cf
+requests==2.32.4 \
+    --hash=sha256:27babd3cda2a6d50b30443204ee89830707d396671944c998b5975b031ac2b2c \
+    --hash=sha256:27d0316682c8a29834d3264820024b62a36942083d52caf2f14c0591336d3422
     # via
     #   -r video/requirements.in
     #   openvino-dev
@@ -1082,6 +1082,20 @@ torchvision==0.24.1 \
     --hash=sha256:f476da4e085b7307aaab6f540219617d46d5926aeda24be33e1359771c83778f \
     --hash=sha256:fbdbdae5e540b868a681240b7dbd6473986c862445ee8a138680a6a97d6c34ff
     # via ultralytics
+tornado==6.5 \
+    --hash=sha256:007f036f7b661e899bd9ef3fa5f87eb2cb4d1b2e7d67368e778e140a2f101a7a \
+    --hash=sha256:03576ab51e9b1677e4cdaae620d6700d9823568b7939277e4690fe4085886c55 \
+    --hash=sha256:119c03f440a832128820e87add8a175d211b7f36e7ee161c631780877c28f4fb \
+    --hash=sha256:231f2193bb4c28db2bdee9e57bc6ca0cd491f345cd307c57d79613b058e807e0 \
+    --hash=sha256:542e380658dcec911215c4820654662810c06ad872eefe10def6a5e9b20e9633 \
+    --hash=sha256:7c625b9d03f1fb4d64149c47d0135227f0434ebb803e2008040eb92906b0105a \
+    --hash=sha256:9a0d8d2309faf015903080fb5bdd969ecf9aa5ff893290845cf3fd5b2dd101bc \
+    --hash=sha256:9ac1cbe1db860b3cbb251e795c701c41d343f06a96049d6274e7c77559117e41 \
+    --hash=sha256:ab75fe43d0e1b3a5e3ceddb2a611cb40090dd116a84fc216a07a298d9e000471 \
+    --hash=sha256:c70c0a26d5b2d85440e4debd14a8d0b463a0cf35d92d3af05f5f1ffa8675c826 \
+    --hash=sha256:f81067dad2e4443b015368b24e802d0083fecada4f0a4572fdb72fc06e54a9a6 \
+    --hash=sha256:fd20c816e31be1bbff1f7681f970bbbd0bb241c364220140228ba24242bcdc59
+    # via -r video/requirements.in
 triton==3.5.1 \
     --hash=sha256:02c770856f5e407d24d28ddc66e33cf026e6f4d360dcb8b2fabe6ea1fc758621 \
     --hash=sha256:0b4d2c70127fca6a23e247f9348b8adde979d2e7a20391bfbabaac6aebc7e6a8 \
