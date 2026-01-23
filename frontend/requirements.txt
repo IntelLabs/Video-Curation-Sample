@@ -196,9 +196,9 @@ tornado==6.5 \
     --hash=sha256:f81067dad2e4443b015368b24e802d0083fecada4f0a4572fdb72fc06e54a9a6 \
     --hash=sha256:fd20c816e31be1bbff1f7681f970bbbd0bb241c364220140228ba24242bcdc59
     # via -r frontend/requirements.in
-urllib3==1.26.20 \
-    --hash=sha256:0ed14ccfbf1c30a9072c7ca157e4319b70d65f623e91e7b32fadb2853431016e \
-    --hash=sha256:40c2dc0c681e47eb8f90e7e27bf6ff7df2e677421fd46756da1161c39ca70d32
+urllib3==2.6.3 \
+    --hash=sha256:1b62b6884944a57dbe321509ab94fd4d3b307075e0c2eae991ac71ee15ad38ed \
+    --hash=sha256:bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4
     # via requests
 vdms==0.0.22 \
     --hash=sha256:4d59fedd914a645fb8a42c504c9535131f9de9a435b5add00900a2abade50036 \
