@@ -4,12 +4,18 @@ FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1@sha256:d19eb597dc210134063
 ARG DEBUG="0"
 ENV DEBUG="${DEBUG}"
 
+# Prevent Python from writing .pyc files and enable unbuffered logging
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 # fixes CVE-2023-4911 vulnerability on Ubuntu 22.04
 RUN apt-get update && \
     apt-get install --only-upgrade libc-bin libc6  && \
-    apt-get install -y -q --no-install-recommends python3-tornado python3-requests python3-ply python3-pip python3-psutil && \
+    apt-get install -y -q --no-install-recommends python3-pip && \
     rm -rf /var/lib/apt/lists/*
-RUN pip3 install 'protobuf==4.24.2' vdms
+
+COPY requirements.txt /home/requirements.txt
+RUN pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt
 
 COPY *.py /home/
 COPY    *.conf /etc/nginx/
