@@ -122,3 +122,8 @@ vdms==0.0.22 \
     --hash=sha256:4d59fedd914a645fb8a42c504c9535131f9de9a435b5add00900a2abade50036 \
     --hash=sha256:a1ca7fb79f81526ccf5cc9b5066bbbaa513a9b258002e40b4b93765b4739818a
     # via -r frontend/requirements.in
+
+# WARNING: The following packages were not pinned, but pip requires them to be
+# pinned when the requirements file includes hashes and the requirement is not
+# satisfied by a package already installed. Consider using the --allow-unsafe flag.
+# pip

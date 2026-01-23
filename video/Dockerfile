@@ -19,8 +19,7 @@ COPY requirements.* /home/
 ARG DEVICE="CPU"
 ENV DEVICE="${DEVICE}"
 
-RUN pip3 install pip --no-cache-dir --upgrade && \
-    if [ "${DEVICE}" = "CPU" ]; then \
+RUN if [ "${DEVICE}" = "CPU" ]; then \
         pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" --index-url https://download.pytorch.org/whl/cpu; \
     else \
         pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" ; \

@@ -19,8 +19,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 COPY remote_function /home/remote_function
 COPY requirements.txt /home/requirements.txt
 
-RUN pip3 install pip --no-cache-dir --upgrade && \
-    pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt
+RUN pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt
 
 WORKDIR /home
 COPY *.py /home/
