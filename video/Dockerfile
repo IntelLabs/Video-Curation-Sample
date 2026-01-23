@@ -25,8 +25,8 @@ RUN pip3 install pip --no-cache-dir --upgrade && \
     else \
         pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" ; \
     fi;
-RUN pip3 install --no-cache-dir -r /home/requirements.txt && \
-    pip3 install --no-cache-dir -r /home/requirements.${DEVICE}.txt
+RUN pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt && \
+    pip3 install --no-cache-dir --require-hashes -r /home/requirements.${DEVICE}.txt
 
 RUN omz_downloader --list /home/resources/models/models.lst -o /home/resources/models --precisions FP16
 
@@ -35,9 +35,14 @@ FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1@sha256:d19eb597dc210134063
 ENV VIRTUAL_ENV=/opt/venv
 ARG DEBIAN_FRONTEND=noninteractive
 
+# Prevent Python from writing .pyc files and enable unbuffered logging
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 RUN apt-get update && \
     apt-get install --only-upgrade libc-bin libc6  && \
-    apt-get install -y -q  --no-install-recommends python3-tornado curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
+    apt-get install -y -q  --no-install-recommends python3-tornado \
+        curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # COPY --from=build /usr/local/lib/python3.10 /usr/local/lib/python3.10

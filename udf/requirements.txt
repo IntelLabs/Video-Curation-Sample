@@ -221,9 +221,7 @@ pyproject-hooks==1.2.0 \
 tomli==1.1.0 \
     --hash=sha256:33d7984738f8bb699c9b0a816eb646a8178a69eaa792d258486776a5d21b8ca5 \
     --hash=sha256:f4a182048010e89cbec0ae4686b21f550a7f2903f665e34a6de58ec15424f919
-    # via
-    #   -r udf/requirements.in
-    #   build
+    # via build
 vdms==0.0.22 \
     --hash=sha256:4d59fedd914a645fb8a42c504c9535131f9de9a435b5add00900a2abade50036 \
     --hash=sha256:a1ca7fb79f81526ccf5cc9b5066bbbaa513a9b258002e40b4b93765b4739818a

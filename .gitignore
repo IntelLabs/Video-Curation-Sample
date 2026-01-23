@@ -1,5 +1,10 @@
-build/*
-video/resources/models/ultralytics
+.venv*
 .vscode
+*.in
 *.log
 **/__pycache__/
+**/_*
+**/DockerImageTars/
+build/*
+video/resources/models/intel
+video/resources/models/ultralytics
