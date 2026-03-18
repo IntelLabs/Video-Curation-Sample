@@ -1,7 +1,8 @@
 #!/bin/bash -e
 
 # Watch directory
+echo "WATCH_DIR: ${WATCH_DIR}"
 python3 /home/watch_and_send2vdms.py ${WATCH_DIR} &
 
 # run tornado
-exec /home/manage.py
+exec ${VIRTUAL_ENV}/bin/python /home/manage.py

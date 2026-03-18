@@ -24,30 +24,30 @@ CUSTOM_MODEL_FLAG = str2bool(os.getenv("CUSTOM_MODEL_FLAG", False))
 DEVICE = os.environ.get("DEVICE", "CPU")
 MODEL_NAME = os.environ.get("MODEL_NAME", "yolo11n")
 if DEVICE == "GPU":
-    batch_size = int(os.environ.get("GPU_BATCH_SIZE", 1))
+    EXPORT_BATCH_SIZE = int(os.environ.get("GPU_BATCH_SIZE", 1))
     run_platform_name = "engine"
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     print("[!] USING GPU & TENSORRT")
 else:
-    # batch_size = 8
-    batch_size = int(os.environ.get("CPU_BATCH_SIZE", 1))  # 8
+    EXPORT_BATCH_SIZE = int(os.environ.get("CPU_BATCH_SIZE", 1))
     run_platform_name = "openvino"
     print("[!] USING CPU & OPENVINO")
 
 
-def get_model(model_dir, run_platform, device_input, batch=1):
+def get_model(model_dir, run_platform, device_input, batch=1, force_export=False):
     final_model_path = f"{model_dir}/{MODEL_NAME}.pt"
     pt_detection_model = YOLO(final_model_path, verbose=False, task="detect")
     if run_platform == "openvino":
-        pt_detection_model.export(
-            format="openvino",
-            half=half_flag,
-            dynamic=dynamic_flag,
-            device=device_input,
-            batch=batch,
-        )
-
         final_model_path = f"{model_dir}/{MODEL_NAME}_openvino_model/"
+        if not Path(final_model_path).exists() or force_export:
+            pt_detection_model.export(
+                format="openvino",
+                half=half_flag,
+                dynamic=dynamic_flag,
+                device=device_input,
+                batch=batch,
+            )
+
         object_detection_model = YOLO(
             final_model_path,
             verbose=False,
@@ -62,17 +62,18 @@ def get_model(model_dir, run_platform, device_input, batch=1):
         # object_detection_model.predictor.model.ov_compiled_model = compiled_model
 
     elif run_platform == "engine":
-        pt_detection_model.export(
-            format="engine",
-            half=half_flag,
-            imgsz=[7680, 4320],  # Max dimensions (8K-[W,H]-[7680,4320])
-            dynamic=dynamic_flag,
-            device=device_input,
-            simplify=True,
-            batch=batch,
-        )
-
         final_model_path = f"{model_dir}/{MODEL_NAME}.engine"
+        if not Path(final_model_path).exists() or force_export:
+            pt_detection_model.export(
+                format="engine",
+                half=half_flag,
+                imgsz=[7680, 4320],  # Max dimensions (8K-[W,H]-[7680,4320])
+                dynamic=dynamic_flag,
+                device=device_input,
+                simplify=True,
+                batch=batch,
+            )
+
         object_detection_model = YOLO(
             final_model_path,
             verbose=False,
@@ -90,14 +91,15 @@ def get_model(model_dir, run_platform, device_input, batch=1):
         )
 
         final_model_path = f"{model_dir}/{MODEL_NAME}.onnx"
-        pt_detection_model.export(
-            format="onnx",
-            half=half_flag,
-            dynamic=dynamic_flag,
-            device=device_input,
-            simplify=True,
-            batch=batch,
-        )
+        if not Path(final_model_path).exists() or force_export:
+            pt_detection_model.export(
+                format="onnx",
+                half=half_flag,
+                dynamic=dynamic_flag,
+                device=device_input,
+                simplify=True,
+                batch=batch,
+            )
 
         object_detection_model = YOLO(final_model_path, verbose=False, task="detect")
 
@@ -125,6 +127,12 @@ if __name__ == "__main__":
     ydir = Path(dir_path)
 
     device_input = DEVICE.lower() if DEVICE == "CPU" else "cuda"
-    _, _ = get_model(ydir, run_platform_name, device_input, batch=batch_size)
+    _, _ = get_model(
+        ydir,
+        run_platform_name,
+        device_input,
+        batch=EXPORT_BATCH_SIZE,
+        force_export=False,
+    )
 
     os.remove(f"{ydir}/{MODEL_NAME}.pt")

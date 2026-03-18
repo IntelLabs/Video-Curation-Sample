@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+opencv-python-headless  #==4.12.0.88   # Newer versions (4.13.x) have packaging dependency on XCB libraries
+openvino-dev==2024.6.0
+ultralytics
+numpy
+vdms
