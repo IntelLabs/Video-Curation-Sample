@@ -45,7 +45,7 @@ RUN python -m pip install pip --upgrade  --no-cache-dir  && \
 
 COPY *.py /home/
 COPY include /home/include
-# COPY templates /home/templates
+COPY templates /home/templates
 COPY nginx.conf /etc/nginx/nginx.conf
 
 # CMD /usr/local/sbin/nginx && uvicorn main:app --host 127.0.0.1 --port 8000

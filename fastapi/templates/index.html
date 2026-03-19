@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Detection Dashboard</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 { text-align: center; color: #00ffcc; margin-bottom: 30px; }
+
+        #camera-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            gap: 25px;
+            padding: 10px;
+        }
+
+        /* Center the grid if there is only one camera */
+        #camera-grid:has(> :last-child:nth-child(1)) {
+            display: flex;
+            justify-content: center;
+        }
+
+        .camera-card {
+            background: #2d2d2d;
+            border-radius: 12px;
+            padding: 15px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+            border: 1px solid #444;
+            max-width: 800px;
+            width: 100%;
+        }
+
+        .camera-card h3 {
+            margin-top: 0;
+            color: #00ffcc;
+            font-size: 1.2em;
+            border-bottom: 1px solid #444;
+            padding-bottom: 10px;
+        }
+
+        .stats-bar {
+            background: #111;
+            padding: 8px 12px;
+            border-radius: 6px;
+            margin-bottom: 12px;
+            font-size: 0.85em;
+            color: #888;
+            display: flex;
+            gap: 15px;
+        }
+
+        .stats-bar span { color: #00ffcc; font-weight: bold; }
+
+        .video-container {
+            position: relative;
+            background: #000;
+            border-radius: 6px;
+            overflow: hidden;
+            min-height: 300px;
+        }
+
+        img { width: 100%; display: block; }
+
+        #no-streams-msg {
+            text-align: center;
+            color: #555;
+            font-size: 1.8em;
+            margin-top: 150px;
+            font-weight: 300;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Live Detection Dashboard</h1>
+
+    <!-- Message displays if no cameras are found in initial Jinja load -->
+    <div id="no-streams-msg" style="display: {% if cameras %}none{% else %}block{% endif %};">
+        No Active Streams Detected
+    </div>
+
+    <div id="camera-grid">
+        {% for id in cameras %}
+        <div class="camera-card" id="card-{{ id }}">
+            <h3>Camera: {{ id }}</h3>
+            <div class="stats-bar">
+                <div>FPS: <span id="fps-{{ id }}">0.0</span></div>
+                <div>Frames: <span id="frames-{{ id }}">0</span></div>
+            </div>
+            <div class="video-container">
+                <img src="/view_stream?name={{ id }}" alt="Camera Stream {{ id }}">
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <script>
+        const grid = document.getElementById('camera-grid');
+        const emptyMsg = document.getElementById('no-streams-msg');
+
+        async function syncDashboard() {
+            try {
+                const response = await fetch('/stream_list');
+                if (!response.ok) return;
+                const activeIds = await response.json();
+
+                // 1. REMOVE: Check every card on screen. If its ID isn't in activeIds, delete it.
+                // This correctly handles removing the last remaining card.
+                const existingCards = document.querySelectorAll('.camera-card');
+                existingCards.forEach(card => {
+                    const cardId = card.id.replace('card-', '');
+                    if (!activeIds.includes(cardId)) {
+                        console.log("Stream ended, removing card:", cardId);
+                        card.remove();
+                    }
+                });
+
+                // 2. ADD: If an active ID isn't on the screen yet, create a new card.
+                activeIds.forEach(id => {
+                    if (!document.getElementById(`card-${id}`)) {
+                        console.log("New stream detected, adding card:", id);
+                        const card = document.createElement('div');
+                        card.className = 'camera-card';
+                        card.id = `card-${id}`;
+                        card.innerHTML = `
+                            <h3>Camera: ${id}</h3>
+                            <div class="stats-bar">
+                                <div>FPS: <span id="fps-${id}">0.0</span></div>
+                                <div>Frames: <span id="frames-${id}">0</span></div>
+                            </div>
+                            <div class="video-container">
+                                <img src="/view_stream?name=${id}" alt="Camera Stream ${id}">
+                            </div>
+                        `;
+                        grid.appendChild(card);
+                    }
+                });
+
+                // 3. TOGGLE MESSAGE: Show "No Active Streams" if the grid is physically empty.
+                if (grid.children.length === 0) {
+                    emptyMsg.style.display = 'block';
+                } else {
+                    emptyMsg.style.display = 'none';
+                }
+
+            } catch (err) {
+                console.error("Dashboard sync error:", err);
+            }
+        }
+
+        async function updateStats() {
+            try {
+                const response = await fetch('/stream_stats');
+                if (!response.ok) return;
+                const stats = await response.json();
+
+                // Update text for every active camera
+                for (const [id, data] of Object.entries(stats)) {
+                    const fpsEl = document.getElementById(`fps-${id}`);
+                    const framesEl = document.getElementById(`frames-${id}`);
+                    if (fpsEl) fpsEl.textContent = data.fps;
+                    if (framesEl) framesEl.textContent = data.frames;
+                }
+            } catch (err) {
+                console.error("Stats update error:", err);
+            }
+        }
+
+        // Sync list every 3 seconds; Update FPS/Frames every 1 second.
+        setInterval(syncDashboard, 3000);
+        setInterval(updateStats, 1000);
+
+        // Run immediately on load to catch any changes since the page request.
+        syncDashboard();
+    </script>
+</body>
+</html>
