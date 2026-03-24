@@ -14,6 +14,7 @@ define(`PROFILE_GPU', `runtime: nvidia
             CLEANUP_INTERVAL: "10m"
             DBHOST: "vdms-service"
             UDF_HOST: "udf-service"
+            BACKEND_URL: "http://fastapi-service:8000"
             `MODEL_NAME': "defn(`MODEL_NAME')"
             `CUSTOM_MODEL_FLAG': "defn(`CUSTOM_MODEL_FLAG')"
             `RESIZE_FLAG': "defn(`RESIZE_FLAG')"
@@ -51,8 +52,6 @@ define(`PROFILE_GPU', `runtime: nvidia
         restart: always
         depends_on:
             - fastapi-service
-            - udf-service
-            - vdms-service
 
     fastapi-service:
         shm_size: '2gb'  # Give it plenty of space for video frames
@@ -77,6 +76,7 @@ define(`PROFILE_GPU', `runtime: nvidia
             HTTPS_PROXY: "${HTTPS_PROXY}"
             no_proxy: "video-service,localhost,127.0.0.1,vdms-service,udf-service,${no_proxy}"
             NO_PROXY: "video-service,localhost,127.0.0.1,vdms-service,udf-service,${NO_PROXY}"
+            NVIDIA_DRIVER_CAPABILITIES: "all"
         ports:
             - target: 80
               published: 30077
@@ -95,8 +95,9 @@ define(`PROFILE_GPU', `runtime: nvidia
               mode: 0440
         volumes:
             - /etc/localtime:/etc/localtime:ro
-            - app-content:/var/www
+            - app-content:/var/www:rw
             - ../../inputs:/watch_dir:ro
+            - ../../fastapi/resources:/home/resources:rw
         networks:
             - appnet
         restart: always

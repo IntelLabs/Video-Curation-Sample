@@ -24,7 +24,14 @@ CUSTOM_MODEL_FLAG = str2bool(os.getenv("CUSTOM_MODEL_FLAG", False))
 DEVICE = os.environ.get("DEVICE", "CPU")
 MODEL_NAME = os.environ.get("MODEL_NAME", "yolo11n")
 if DEVICE == "GPU":
-    EXPORT_BATCH_SIZE = int(os.environ.get("GPU_BATCH_SIZE", 1))
+    # 1. Force PyTorch to initialize the CUDA context
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.set_device(0)
+        torch.cuda.empty_cache()
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+    EXPORT_BATCH_SIZE = 64  # 32, 50  # int(os.environ.get("GPU_BATCH_SIZE", 1))
     run_platform_name = "engine"
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     print("[!] USING GPU & TENSORRT")
@@ -67,7 +74,8 @@ def get_model(model_dir, run_platform, device_input, batch=1, force_export=False
             pt_detection_model.export(
                 format="engine",
                 half=half_flag,
-                imgsz=[7680, 4320],  # Max dimensions (8K-[W,H]-[7680,4320])
+                imgsz=[640, 640],
+                # imgsz=[7680, 4320],  # Max dimensions (8K-[W,H]-[7680,4320])
                 dynamic=dynamic_flag,
                 device=device_input,
                 simplify=True,

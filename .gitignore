@@ -6,5 +6,6 @@
 **/_*
 **/DockerImageTars/
 build/*
-video/resources/models/intel
-video/resources/models/ultralytics
+fastapi/resources/models/intel
+fastapi/resources/models/ultralytics
+finetune/.env

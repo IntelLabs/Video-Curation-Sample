@@ -25,7 +25,7 @@ BDIR=$(dirname $(dirname $DIR))
 # if video or fastapi in DIR; then
 # if [[ "$DIR" == *video* || "$DIR" == *fastapi* ]]; then
 #     echo "docker build --network host --file=${DIR}/../video/Dockerfile.base $@ -t lcc_base_video_image:latest ${DIR}/../video $(env | cut -f1 -d= | grep -E '_(proxy|REPO|VER)$' | sed 's/^/--build-arg /') --build-arg DEVICE=${DEVICE}"
-docker build --build-arg DEVICE=${DEVICE} --network host --file="${BDIR}/video/Dockerfile.base" -t "lcc_base_video_image:latest" "${BDIR}/video" $(env | cut -f1 -d= | grep -E '_(proxy|REPO|VER)$' | sed 's/^/--build-arg /')
+# docker build --build-arg DEVICE=${DEVICE} --network host --file="${BDIR}/video/Dockerfile.base" -t "lcc_base_video_image:latest" "${BDIR}/video" $(env | cut -f1 -d= | grep -E '_(proxy|REPO|VER)$' | sed 's/^/--build-arg /')
 # fi
 
 if test -f "${DIR}/docker-compose.yml.m4"; then

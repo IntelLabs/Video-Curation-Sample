@@ -9,12 +9,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update
+# RUN apt-get install --only-upgrade libc-bin libc6  && \
+#     apt-get install -y -q  --no-install-recommends python3-setuptools \
+#         python3-tornado curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
 RUN apt-get install --only-upgrade libc-bin libc6  && \
     apt-get install -y -q  --no-install-recommends python3-setuptools \
-        python3-tornado curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
+    python3-tornado python3-ply python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY --from=lcc_base_video_image:latest ${VIRTUAL_ENV} ${VIRTUAL_ENV}
-COPY --from=lcc_base_video_image:latest /home /home
+RUN python3 -m venv ${VIRTUAL_ENV}
+
+# COPY --from=lcc_base_video_image:latest ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+# COPY --from=lcc_base_video_image:latest /home /home
 
 # activate virtual environment
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
@@ -27,24 +33,26 @@ COPY requirements.* /home/
 ARG DEVICE="CPU"
 ENV DEVICE="${DEVICE}"
 
-RUN if [ "${DEVICE}" = "CPU" ]; then \
-        pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" --index-url https://download.pytorch.org/whl/cpu; \
-    else \
-        pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" ; \
-    fi;
+# RUN if [ "${DEVICE}" = "CPU" ]; then \
+#         pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" --index-url https://download.pytorch.org/whl/cpu; \
+#     else \
+#         pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" ; \
+#     fi;
 # RUN pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt && \
 #     pip3 install --no-cache-dir --require-hashes -r /home/requirements.${DEVICE}.txt
-RUN pip3 install --no-cache-dir -r /home/requirements.in && \
-    pip3 install --no-cache-dir -r /home/requirements.${DEVICE}.txt
+RUN pip3 install --no-cache-dir -r /home/requirements.in
+# && \
+#     pip3 install --no-cache-dir -r /home/requirements.${DEVICE}.txt
 
 COPY *.py /home/
 COPY *.yaml /home/
 COPY *.conf /etc/nginx/
 COPY cleanup.sh /home/
 COPY manage.sh /home/
-COPY frontend /home/frontend
+# COPY frontend /home/frontend
 # COPY include /home/include
-CMD  ["/bin/bash","-c","python /home/resources/models/download_yolo.py && /home/manage.sh"]
+# CMD  ["/bin/bash","-c","python /home/resources/models/download_yolo.py && /home/manage.sh"]
+CMD  ["/bin/bash","-c","/home/manage.sh"]
 
 ####
 ARG  USER

@@ -13,6 +13,7 @@ from random import randint
 
 import cv2
 import numpy as np
+from pydantic import BaseModel
 
 # import streamlit as st
 from ultralytics import YOLO
@@ -83,7 +84,7 @@ RESIZE_FLAG = str2bool(os.getenv("RESIZE_FLAG", False))
 SHARED_OUTPUT = os.getenv("SHARED_OUTPUT", "/var/www/mp4")
 Path(SHARED_OUTPUT).mkdir(parents=True, exist_ok=True)
 TEST_MODE = str2bool(os.getenv("TEST_FLAG", False))
-TMP_LOCATION = os.getenv("TMP_LOCATION", "/var/www/cache/")
+TMP_LOCATION = os.getenv("TMP_LOCATION", "/var/www/cache")
 UDF_HOST = os.getenv("UDF_HOST", "udf-service")
 UDF_PORT = 5011
 
@@ -95,9 +96,38 @@ else:
     EXPORT_BATCH_SIZE = int(os.environ.get("CPU_BATCH_SIZE", 1))  # 8
     print("[!] USING CPU")
 
-if not TEST_MODE:
-    db = vdms.vdms()
-    db.connect(DBHOST, DBPORT)
+# if not TEST_MODE:
+#     db = vdms.vdms()
+#     db.connect(DBHOST, DBPORT)
+import queue
+
+
+class VDMSPool:
+    def __init__(self, host, port, size=5):
+        self.host = host
+        self.port = port
+        self.size = size
+        self.pool = queue.Queue(maxsize=size)
+
+        # Pre-populate the pool with authenticated connections
+        for _ in range(size):
+            self.pool.put(self._create_connection())
+
+    def _create_connection(self):
+        client = vdms.vdms()
+        client.connect(self.host, self.port)
+        return client
+
+    def get_connection(self):
+        # Borrow a connection (blocks if pool is empty)
+        return self.pool.get(block=True, timeout=10)
+
+    def return_connection(self, conn):
+        # Put the connection back for reuse
+        self.pool.put(conn)
+
+
+VDMS_POOL = VDMSPool(DBHOST, DBPORT, size=10)
 
 LOCKTIMEOUT_RETRIES = 5
 ERR_KEYWORDS = [
@@ -286,8 +316,11 @@ def draw_label(
     )
 
 
-def retry_query(query, num_retries: int = LOCKTIMEOUT_RETRIES, sleep_timer: int = 0):
-    global db
+def retry_query(
+    query, local_db=None, num_retries: int = LOCKTIMEOUT_RETRIES, sleep_timer: int = 0
+):
+    # global db
+    db = local_db if local_db else vdms.vdms().connect(DBHOST, DBPORT)
     for ridx in range(num_retries + 1):
         response, _ = db.query(query, [[]])
         if "FailedCommand" in response[0] and any(
@@ -440,7 +473,7 @@ def get_models(model_tag: str, model_dir=PROJECT_PATH / "models"):  # , _st_side
 #
 def get_display_frame_in_bytes(foi, frame_width, display_size=(1280, 720), quality=50):
     if frame_width > display_size[0]:
-        display_frame = cv2.resize(foi, display_size, interpolation=cv2.INTER_AREA)
+        display_frame = cv2.resize(foi, display_size, interpolation=cv2.INTER_NEAREST)
         ret, buffer = cv2.imencode(
             ".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality]
         )
@@ -491,6 +524,7 @@ def get_udf_query(
     id="udf_metadata",
     metadata=None,
     test_mode=TEST_MODE,
+    local_db=None,
 ):
     query = {
         "AddVideo": {
@@ -527,7 +561,7 @@ def get_udf_query(
             flush=True,
         )
     try:
-        res = retry_query([query], sleep_timer=randint(1, 5))
+        res = retry_query([query], local_db=local_db, sleep_timer=randint(1, 5))
 
         if DEBUG_FLAG:
             print(
@@ -587,21 +621,27 @@ def metadata2vdms(
                 combined_metadata[face_frameidx_bbidx] = value
 
     combined_metadata = _sort_dict_by_frame(combined_metadata)
-    get_udf_query(
-        clip_filename,
-        properties,
-        INGESTION.replace(",", "+"),
-        (width, height),
-        id="udf_metadata",
-        metadata=combined_metadata,
-        test_mode=TEST_MODE,
-    )
 
-    if DEBUG == "1":
-        print(
-            f"[TIMING],end_clip_metadata,{clip_key},{time.time()}",
-            flush=True,
+    db = VDMS_POOL.get_connection()
+    try:
+        get_udf_query(
+            clip_filename,
+            properties,
+            INGESTION.replace(",", "+"),
+            (width, height),
+            id="udf_metadata",
+            metadata=combined_metadata,
+            test_mode=TEST_MODE,
+            local_db=db,
         )
+
+        if DEBUG == "1":
+            print(
+                f"[TIMING],end_clip_metadata,{clip_key},{time.time()}",
+                flush=True,
+            )
+    finally:
+        VDMS_POOL.return_connection(db)
 
 
 # Extract metadata from object model results
@@ -808,3 +848,8 @@ class PipelineMapping:
     erodeAndDilate_device: str.lower = "cpu"
     contour_device: str.lower = "cpu"
     detection_device: str.lower = "cpu"
+
+
+class StreamRequest(BaseModel):
+    url: str
+    name: str

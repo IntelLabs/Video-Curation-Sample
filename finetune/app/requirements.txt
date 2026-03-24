@@ -1,0 +1,25 @@
+# fastapi
+# uvicorn
+# opencv-python-headless==4.11.0.86  #==4.12.0.88   # Newer versions (4.13.x) have packaging dependency on XCB libraries
+# openvino-dev==2024.6.0
+pip==25.3
+numpy<2.0
+ultralytics==8.4.7
+# vdms==0.0.22
+wheel==0.46.3
+# nncf==2.19.0
+torch
+torchvision
+
+# cuda-python==12.2.0
+# onnx>=1.12.0,<=1.19.1
+# onnxruntime-gpu
+# onnxslim>=0.1.71
+# tensorrt==10.9.0.34  #>=10.12.0.36
+
+nvidia-cuda-runtime-cu12==12.8.*
+onnx==1.20.1
+onnxruntime-gpu==1.23.2
+onnxslim==0.1.82
+tensorrt_cu12==10.14.1.48.post1
+nvidia-cudnn-cu12

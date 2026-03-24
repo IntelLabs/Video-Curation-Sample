@@ -57,6 +57,9 @@
         }
 
         .stats-bar span { color: #00ffcc; font-weight: bold; }
+        .stats-bar span.warning { color: #ff3333 !important; animation: blink 1.5s infinite; }
+        .stats-bar span.pending { color: #ffcc00; }
+        @keyframes blink { 50% { opacity: 0.5; } }
 
         .video-container {
             position: relative;
@@ -64,9 +67,17 @@
             border-radius: 6px;
             overflow: hidden;
             min-height: 300px;
+			will-change: transform;        /* Hints to the browser to prepare the GPU */
         }
 
-        img { width: 100%; display: block; }
+        img {
+			width: 100%;
+			display: block;
+			image-rendering: -webkit-optimize-contrast; /* Chrome/Safari */
+			image-rendering: crisp-edges;               /* Firefox */
+			backface-visibility: hidden;               /* Prevents flickers during fast updates */
+			transform: translateZ(0);                  /* Forces Hardware Acceleration */
+		}
 
         #no-streams-msg {
             text-align: center;
@@ -82,8 +93,14 @@
     <h1>Live Detection Dashboard</h1>
 
     <!-- Message displays if no cameras are found in initial Jinja load -->
-    <div id="no-streams-msg" style="display: {% if cameras %}none{% else %}block{% endif %};">
+    <div id="no-streams-msg" style="display: none;">
         No Active Streams Detected
+    </div>
+
+    <div style="text-align: center; margin-bottom: 20px;">
+        <button id="refresh-btn" style="background: #444; color: #00ffcc; border: 1px solid #00ffcc; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.9em;">
+            Check for New Streams
+        </button>
     </div>
 
     <div id="camera-grid">
@@ -92,10 +109,10 @@
             <h3>Camera: {{ id }}</h3>
             <div class="stats-bar">
                 <div>FPS: <span id="fps-{{ id }}">0.0</span></div>
-                <div>Frames: <span id="frames-{{ id }}">0</span></div>
+                <!-- <div>Frames: <span id="frames-{{ id }}">0</span></div> -->
             </div>
             <div class="video-container">
-                <img src="/view_stream?name={{ id }}" alt="Camera Stream {{ id }}">
+                <img src="/view_stream?name={{ id }}" alt="Camera Stream {{ id }}" decoding="async">
             </div>
         </div>
         {% endfor %}
@@ -104,81 +121,146 @@
     <script>
         const grid = document.getElementById('camera-grid');
         const emptyMsg = document.getElementById('no-streams-msg');
+        const refreshBtn = document.getElementById('refresh-btn');
 
-        async function syncDashboard() {
-            try {
-                const response = await fetch('/stream_list');
-                if (!response.ok) return;
-                const activeIds = await response.json();
+        // 1. WORKER CODE (Using standard quotes for the inner HTML)
+        // const workerCode = "let interval = null; " +
+        //     "async function fetchData() { " +
+        //     "  try { " +
+        //     "    const listRes = await fetch(self.location.origin + '/stream_list'); " +
+        //     "    if (listRes.ok) { " +
+        //     "      const activeIds = await listRes.json(); " +
+        //     "      let stats = {}; " +
+        //     "      /* ONLY call stats if there are active cameras */ " +
+        //     "      if (activeIds.length > 0) { " +
+        //     "        const statsRes = await fetch(self.location.origin + '/stream_stats'); " +
+        //     "        if (statsRes.ok) stats = await statsRes.json(); " +
+        //     "      } " +
+        //     "      self.postMessage({ activeIds, stats }); " +
+        //     "    } " +
+        //     "  } catch (err) { } " +
+        //     "} " +
+        //     "self.onmessage = function(e) { " +
+        //     "  if (e.data.action === 'start' || e.data.action === 'resume') { " +
+        //     "    if (!interval) { fetchData(); interval = setInterval(fetchData, 1000); } " +
+        //     "  } else if (e.data.action === 'pause') { clearInterval(interval); interval = null; } " +
+        //     "};";
+        // WORKER CODE with Adaptive Polling (10s idle, 1s active)
+        const workerCode = "let currentDelay = 1000; " +
+        "let timeoutId = null; " +
+        "async function fetchData() { " +
+        "  try { " +
+        "    const listRes = await fetch(self.location.origin + '/stream_list'); " +
+        "    if (listRes.ok) { " +
+        "      const activeIds = await listRes.json(); " +
+        "      if (activeIds.length > 0) { " +
+        "        /* ACTIVE: Poll fast (1s) */ " +
+        "        currentDelay = 1000; " +
+        "        const statsRes = await fetch(self.location.origin + '/stream_stats'); " +
+        "        const stats = statsRes.ok ? await statsRes.json() : {}; " +
+        "        self.postMessage({ activeIds, stats }); " +
+        "      } else { " +
+        "        /* IDLE: Poll slow (10s) */ " +
+        "        currentDelay = 10000; " +
+        "        self.postMessage({ activeIds: [], stats: {} }); " +
+        "      } " +
+        "    } " +
+        "  } catch (err) { } " +
+        "  timeoutId = setTimeout(fetchData, currentDelay); " +
+        "} " +
+        "self.onmessage = function(e) { " +
+        "  if (e.data.action === 'start' || e.data.action === 'force') { " +
+        "    clearTimeout(timeoutId); " + // Cancel any pending slow poll
+        "    fetchData(); " +             // Run immediately
+        "  } " +
+        "  if (e.data.action === 'pause') clearTimeout(timeoutId); " +
+        "}; "
 
-                // 1. REMOVE: Check every card on screen. If its ID isn't in activeIds, delete it.
-                // This correctly handles removing the last remaining card.
-                const existingCards = document.querySelectorAll('.camera-card');
-                existingCards.forEach(card => {
-                    const cardId = card.id.replace('card-', '');
-                    if (!activeIds.includes(cardId)) {
-                        console.log("Stream ended, removing card:", cardId);
-                        card.remove();
-                    }
-                });
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        const worker = new Worker(URL.createObjectURL(blob));
 
-                // 2. ADD: If an active ID isn't on the screen yet, create a new card.
-                activeIds.forEach(id => {
-                    if (!document.getElementById(`card-${id}`)) {
-                        console.log("New stream detected, adding card:", id);
-                        const card = document.createElement('div');
-                        card.className = 'camera-card';
-                        card.id = `card-${id}`;
-                        card.innerHTML = `
-                            <h3>Camera: ${id}</h3>
-                            <div class="stats-bar">
-                                <div>FPS: <span id="fps-${id}">0.0</span></div>
-                                <div>Frames: <span id="frames-${id}">0</span></div>
-                            </div>
-                            <div class="video-container">
-                                <img src="/view_stream?name=${id}" alt="Camera Stream ${id}">
-                            </div>
-                        `;
-                        grid.appendChild(card);
-                    }
-                });
+        worker.onmessage = function(e) {
+            // console.log("Main UI received data:", e.data);
+            const { activeIds, stats } = e.data;
+            syncUI(activeIds);
+            updateUIStats(stats);
+        };
 
-                // 3. TOGGLE MESSAGE: Show "No Active Streams" if the grid is physically empty.
-                if (grid.children.length === 0) {
-                    emptyMsg.style.display = 'block';
-                } else {
-                    emptyMsg.style.display = 'none';
+        // 2. REFACTORED syncUI (No nested backticks)
+        function syncUI(activeIds) {
+            // Remove dead cards
+            document.querySelectorAll('.camera-card').forEach(card => {
+                const id = card.id.replace('card-', '');
+                if (!activeIds.includes(id)) card.remove();
+            });
+
+            // Add new cards using standard string concatenation
+            activeIds.forEach(id => {
+                if (!document.getElementById('card-' + id)) {
+                    const card = document.createElement('div');
+                    card.className = 'camera-card';
+                    card.id = 'card-' + id;
+
+                    // Using standard quotes and concatenation for VS Code compatibility
+                    card.innerHTML =
+                        '<h3>Camera: ' + id + '</h3>' +
+                        '<div class="stats-bar">' +
+                            '<div>FPS: <span id="fps-' + id + '">0.0</span></div>' +
+                            // '<div>Frames: <span id="frames-' + id + '">0</span></div>' +
+                            // '<div>Backlog: <span id="backlog-' + id + '">0</span></div>' +
+                            // '<div>Status: <span id="status-' + id + '">Pending</span></div>' +
+                        '</div>' +
+                        '<div class="video-container">' +
+                            '<img src="/view_stream?name=' + id + '" alt="Stream ' + id + '" decoding="async">' +
+                        '</div>';
+
+                    grid.appendChild(card);
                 }
+            });
 
-            } catch (err) {
-                console.error("Dashboard sync error:", err);
+            emptyMsg.style.display = grid.children.length === 0 ? 'block' : 'none';
+        }
+
+        function updateUIStats(stats) {
+            for (const [id, data] of Object.entries(stats)) {
+                // Log the IDs to the console to verify they match exactly
+                // console.log(`Updating stats for: ${id}`);
+
+                const fpsEl = document.getElementById(`fps-${id}`);
+                // const frameEl = document.getElementById(`frames-${id}`);
+                // const backlogEl = document.getElementById(`backlog-${id}`);
+                // const statusEl = document.getElementById(`status-${id}`);
+
+                if (fpsEl) fpsEl.textContent = data.fps;
+                // if (frameEl) frameEl.textContent = data.frames;
+                // if (backlogEl) {
+                //     backlogEl.textContent = data.reencode_backlog;
+                //     // Highlight in red if backlog > 3
+                //     backlogEl.className = data.reencode_backlog > 3 ? 'warning' : '';
+                // }
+
+                // if (statusEl) {
+                //     statusEl.textContent = data.last_clip_status;
+                //     statusEl.className = data.status === 'Warning' ? 'warning' : '';
+                // }
             }
         }
 
-        async function updateStats() {
-            try {
-                const response = await fetch('/stream_stats');
-                if (!response.ok) return;
-                const stats = await response.json();
-
-                // Update text for every active camera
-                for (const [id, data] of Object.entries(stats)) {
-                    const fpsEl = document.getElementById(`fps-${id}`);
-                    const framesEl = document.getElementById(`frames-${id}`);
-                    if (fpsEl) fpsEl.textContent = data.fps;
-                    if (framesEl) framesEl.textContent = data.frames;
-                }
-            } catch (err) {
-                console.error("Stats update error:", err);
+        // 3. TAB VISIBILITY
+        refreshBtn.onclick = () => {
+            refreshBtn.style.borderColor = "#00ffcc";
+            worker.postMessage({ action: 'force' });
+            setTimeout(() => refreshBtn.style.borderColor = "#444", 500);
+        };
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                worker.postMessage({ action: 'pause' });
+            } else {
+                worker.postMessage({ action: 'resume' });
             }
-        }
+        });
 
-        // Sync list every 3 seconds; Update FPS/Frames every 1 second.
-        setInterval(syncDashboard, 3000);
-        setInterval(updateStats, 1000);
-
-        // Run immediately on load to catch any changes since the page request.
-        syncDashboard();
+        worker.postMessage({ action: 'start' });
     </script>
 </body>
 </html>
