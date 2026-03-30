@@ -16,8 +16,10 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime
 
+import cupy
 import cv2
 import numpy as np
+from cucim.skimage.measure import label as cucim_label
 from ultralytics import YOLO
 from ultralytics.utils.checks import check_imgsz
 
@@ -44,10 +46,12 @@ from include.utils import (
     TARGET_FPS,
     YOLO_CLASS_NAMES,
     PipelineMapping,
+    bbox_kernel,
     draw_label,
     filter_contained_boxes,
     get_detection_color,
     get_display_frame_in_bytes,
+    gpumat2cupy,
     manual_fps_calculation,
     merge_boxes_limit,
     metadata2vdms,
@@ -224,7 +228,132 @@ async def lifespan(app: FastAPI):
     app.state.status = "Stopped"
 
 
-class VideoStreamHandler:
+class FastPinnedReader:
+    def __init__(self, source, h, w, maxlen=10, target_fps=TARGET_FPS):
+        self.cap = cv2.VideoCapture(str(source), cv2.CAP_FFMPEG)
+        # Enable multi-threaded CPU decoding (1 thread per 2K pixels approx)
+        # self.cap.set(cv2.CAP_PROP_HW_ACCEL, 0)
+        # os.environ["OPENCV_FFMPEG_THREADS"] = "4" # Force 16 CPU threads
+        self.h, self.w = h, w
+        self.maxlen = maxlen
+        self.target_fps = target_fps
+        self.frame_interval = 1.0 / target_fps  # 0.0666s for 15 FPS
+        self.frame_queue = deque(
+            maxlen=self.maxlen
+        )  # Small queue to prevent VRAM bloat
+        self.stopped = False
+        # Pre-allocate Pinned (Page-Locked) Memory for the reader thread
+        # self.pinned_buf_1 = cv2.cuda.createContinuous(h, w, cv2.CV_8UC3).reshape(h, w, 3)
+        # self.pinned_buf_2 = cv2.cuda.createContinuous(h, w, cv2.CV_8UC3).reshape(h, w, 3)
+        # self.buffers = [self.pinned_buf_1, self.pinned_buf_2]
+        self.buffers = [
+            cv2.cuda.createContinuous(h, w, cv2.CV_8UC3).reshape(h, w, 3)
+            for _ in range(self.maxlen)
+        ]
+        self.thread = None
+
+    def start(self):
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
+        return self
+
+    def stop(self):
+        """Cleanly stop the reader and release resources."""
+        self.stopped = True
+        if self.cap.isOpened():
+            self.cap.release()
+        self.frame_queue.clear()
+        # Optionally join if you want to ensure the thread is dead
+        # self.thread.join(timeout=1.0)
+
+    def update(self):
+        idx = 0
+        while not self.stopped:
+            ret, frame = self.cap.read()
+            if not ret:
+                self.stopped = True
+                break
+
+            # Rapid copy into pinned memory for DMA upload
+            target_buf = self.buffers[idx % self.maxlen]
+            target_buf[:] = frame
+            self.frame_queue.append((target_buf, idx))
+            idx += 1
+
+            # # 2. SKIP frames (Light Bitstream Parsing)
+            # # This is the "Compute Saver" - it bypasses the decoder for N frames
+            # for _ in range(self.skip_count):
+            #     if not self.cap.grab():
+            #         self.stopped = True
+            #         break
+
+    def read(self):
+        return self.frame_queue.popleft() if self.frame_queue else (None, None)
+
+
+# class FastPinnedReader:
+#     def __init__(self, source, h, w, maxlen=10, target_fps=15):
+#         self.cap = cv2.VideoCapture(str(source), cv2.CAP_FFMPEG)
+#         # Optimized for RTSP latency
+#         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+#         self.maxlen = maxlen
+#         self.buffers = [cv2.cuda.createContinuous(h, w, cv2.CV_8UC3).reshape(h, w, 3) for _ in range(self.maxlen)]
+#         self.h, self.w = h, w
+#         self.stopped = False
+
+#         # Pre-allocate two Pinned Buffers to prevent write-during-read
+#         self.buffers = [
+#             cv2.cuda.createContinuous(h, w, cv2.CV_8UC3).reshape(h, w, 3),
+#             cv2.cuda.createContinuous(h, w, cv2.CV_8UC3).reshape(h, w, 3)
+#         ]
+
+#         self.latest_idx = 0
+#         self.frame_ready = threading.Event()
+#         self.lock = threading.Lock()
+#         self.f_cnt = 0
+
+#     def start(self):
+#         self.thread = threading.Thread(target=self.update, daemon=True)
+#         self.thread.start()
+#         return self
+
+#     def update(self):
+#         write_idx = 0
+#         while not self.stopped:
+#             ret, frame = self.cap.read()
+#             if not ret:
+#                 self.stopped = True
+#                 break
+
+#             # Switch between the two pinned buffers (Double Buffering)
+#             target_buf = self.buffers[write_idx % self.maxlen]
+#             target_buf[:] = frame
+
+#             with self.lock:
+#                 self.latest_idx = write_idx % self.maxlen
+#                 self.f_cnt += 1
+
+#             self.frame_ready.set()  # Signal inference thread that new data is here
+#             write_idx += 1
+
+#     def read(self):
+#         """Returns the absolute newest frame available."""
+#         if not self.frame_ready.is_set():
+#             return None, None
+
+#         with self.lock:
+#             idx = self.latest_idx
+#             count = self.f_cnt
+#             self.frame_ready.clear()
+#             return self.buffers[idx], count
+
+#     def stop(self):
+#         self.stopped = True
+#         if self.cap.isOpened():
+#             self.cap.release()
+
+
+class BaseHandler:
     def __init__(self, source, name, active_streams):
         self.model = YOLO(model_path, verbose=False, task="detect")
         self.name = name
@@ -239,11 +368,9 @@ class VideoStreamHandler:
         self.get_frameWH()
 
         # 2. Performance Tracking
-        self.stat_start_time = time.perf_counter()
         self.stat_frame_count = 0
         self.stat_fps = 0
         self.latest_processed_frame = None
-        self.last_heartbeat = time.time()
         self.last_frame_id = 0
 
         self.video_writer = None
@@ -279,10 +406,17 @@ class VideoStreamHandler:
 
         # 3. Start dedicated inference thread
         self.model_warmup()
+        self.stat_start_time = time.perf_counter()
+        self.last_heartbeat = time.time()
+        self.setup_threads()
+
+    def setup_threads(self):
         self.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
         self.process_thread = threading.Thread(
             target=self.run_realtime_inference, daemon=True
         )
+
+    def start(self):
         self.process_thread.start()
 
     def allocate_cpu(self, bkgd_mask_queue_size=3):
@@ -478,14 +612,103 @@ class VideoStreamHandler:
         # self.update_thread.join(timeout=1.0)
         # self.process_thread.join(timeout=1.0)
 
-    def run_pipeline(self, frame, frameNume, repeat_count=1):
-        # if self.device_input == "cpu":
-        #     return self.test_full_cpu_detection_gpu(
-        #         frame, frameNume, repeat_count=repeat_count
-        #     )
-        # else:
-        return self.test_rbtd_detection_gpu(frame, frameNume, repeat_count=repeat_count)
+    def apply_background_subtraction_gpu(self, include_history=True, method="and"):
+        self.fgMask = self.backSub.apply(
+            self.resized_frame, float(self.lr), stream=self.stream
+        )
 
+        if include_history:
+            for m in list(self.mask_history):
+                # Dilate the historical mask on GPU
+                dilated = self.dilate_filter_for_enhanced_mask.apply(m)
+
+                if method == "or":
+                    # Bitwise OR on GPU
+                    cv2.cuda.bitwise_or(self.prev_bkgd, dilated, self.prev_bkgd)
+                else:
+                    # Bitwise AND on GPU
+                    cv2.cuda.bitwise_and(self.prev_bkgd, dilated, self.prev_bkgd)
+
+            self.mask_history.append(self.fgMask.clone())
+            min_val, max_val, _, _ = cv2.cuda.minMaxLoc(self.prev_bkgd)
+
+            if max_val != min_val:
+                self.fgMask = cv2.cuda.bitwise_or(self.fgMask, self.prev_bkgd)
+
+    def check_disk_usage(self, path, min_gb=0.5):
+        """Returns True if there is at least min_gb available at path."""
+        try:
+            total, used, free = shutil.disk_usage(path)
+            # Convert bytes to Gigabytes
+            free_gb = free / (2**30)
+            return free_gb > min_gb
+        except Exception as e:
+            print(f"Disk check error: {e}")
+            return False
+
+    # Gets video fps and framecount
+    def get_fps_and_framecnt(self):
+        self.input_fps = int(self.cap.get(cv2.CAP_PROP_FPS))  # hardware fps
+        if self.input_fps == 0:  # Case when FPS isn't available
+            self.input_fps = manual_fps_calculation(self.name, num_frames=10)
+
+        self.target_fps = TARGET_FPS if self.input_fps > TARGET_FPS else self.input_fps
+        self.frame_skip = int(self.input_fps / self.target_fps)
+        if self.frame_skip < 1:
+            self.frame_skip = 1
+        self.skip_count = self.frame_skip - 1
+
+        self.MAX_FRAMES_PER_CLIP = int(self.target_fps * CLIP_DURATION)
+        self.target_interval = 1.0 / self.target_fps  # 0.0666s
+
+        if DEBUG == "1":
+            print(f"FPS of {self.name} input stream: {self.input_fps}", flush=True)
+            print(f"FPS of {self.name} output mp4: {self.target_fps}", flush=True)
+
+        # Frame count for videos
+        self.frame_count = None
+        if "://" not in str(self.source):
+            self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Gets frame W and H details
+    def get_frameWH(self):
+        input_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        input_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        if (input_height * input_width) < (MODEL_H * MODEL_W):
+            new_sizeHW = check_imgsz([MODEL_H, MODEL_W])  # expects hxw
+        else:
+            new_sizeHW = check_imgsz([input_height, input_width])  # expects hxw
+
+        new_sizeWH = (new_sizeHW[1], new_sizeHW[0])
+
+        self.width = new_sizeWH[0]
+        self.height = new_sizeWH[1]
+
+    def update_frame(self):
+        self.stat_frame_count += 1
+        elapsed = time.perf_counter() - self.stat_start_time
+        if elapsed > 1.0:
+            self.stat_fps = self.stat_frame_count / elapsed
+
+    def run_model(self, frame, batch=1, device_input="cuda", stream=True):
+        results = self.model.predict(
+            frame,
+            imgsz=(self.resize_h, self.resize_w),
+            batch=batch,
+            device=device_input,
+            verbose=False,
+            stream=stream,
+            max_det=MAX_DETECTIONS,
+        )
+        return results
+
+    # Main inference loop
+    def run_realtime_inference(self):
+        pass
+
+
+class VideoStreamHandler(BaseHandler):
     def async_yolo_task(self, data):
         """Heavy lifting moved to ThreadPoolExecutor"""
         try:
@@ -513,14 +736,22 @@ class VideoStreamHandler:
             e = traceback.format_exc()
             print(f"Async YOLO Error: {e}")
 
-    def process_frame_async(self, frame, frame_num):
+    def process_frame_async(self, frame, frame_num, repeat_count=1):
         """
         Worker function to run heavy AI tasks (Resize, Bkgd Sub, YOLO)
         in the background without blocking the video reader.
         """
         try:
             # Calls your existing Page 22 logic (run_pipeline)
-            inf_data = self.run_pipeline(frame, frame_num + 1)
+            # inf_data = self.run_pipeline(frame, frame_num + 1)
+            if self.device_input == "cpu":
+                inf_data = self.test_full_cpu_detection_gpu(
+                    frame, frame_num + 1, repeat_count=repeat_count
+                )
+            else:
+                inf_data = self.test_rbtdc_detection_gpu_optimized3(
+                    frame, frame_num + 1, repeat_count=repeat_count
+                )
 
             if inf_data:
                 # Calls your Page 20 async_yolo_task to handle mask download/inference
@@ -650,6 +881,55 @@ class VideoStreamHandler:
             "repeat_count": repeat_count,
         }
 
+    def test_rbtdc_detection_gpu_optimized3(self, frame, frameNum, repeat_count=1):
+        # Resize directly into the pre-allocated Pinned Memory
+        # This avoids a temporary CPU allocation
+        # H, W = self.resize_h, self.resize_w
+        # self.cpu_resized_frame = cv2.resize(frame, (W, H))
+        # self.video_writer.write(self.cpu_resized_frame)
+        self.gpu_fullres_frame.upload(frame, self.stream)
+
+        cv2.cuda.resize(
+            self.gpu_fullres_frame,
+            (self.resize_w, self.resize_h),
+            stream=self.stream,
+            dst=self.resized_frame,
+            interpolation=cv2.INTER_NEAREST,
+        )
+        if ENABLE_QUERYING and self.video_writer:  # and not self.video_queue.full():
+            self.pinned_downloaded_resizedframe_np = self.resized_frame.download(
+                self.stream
+            )
+            # self.resized_frame.download(self.stream, self.pinned_downloaded_resizedframe_np)
+            for _ in range(repeat_count):
+                # self.video_queue.put((self.video_writer, self.pinned_downloaded_resizedframe_np.copy()))
+                self.video_writer.write(self.pinned_downloaded_resizedframe_np)
+
+        # Background Subtraction on GPU
+        self.apply_background_subtraction_gpu(include_history=True, method="and")
+
+        # Thresholding
+        cv2.cuda.threshold(
+            self.fgMask,
+            MASK_THRESHOLD_VALUE,
+            MASK_MAX_VALUE,
+            cv2.THRESH_BINARY,
+            self.gpu_threshold_dst_frame,
+            self.stream,
+        )
+
+        # mask = cv2.dilate(mask, self.dilate_kernel, iterations=1)
+        self.dilate_filter.apply(
+            self.gpu_threshold_dst_frame, self.gpu_morphed_frame, self.stream
+        )
+
+        return {
+            "frameNum": frameNum,
+            "mask": self.gpu_morphed_frame,
+            "full_frame": frame,  # Original for cropping
+            "repeat_count": repeat_count,
+        }
+
     def test_full_cpu_detection_gpu(self, frame, frameNum, repeat_count=1):
         # Resize directly into the pre-allocated Pinned Memory
         # This avoids a temporary CPU allocation
@@ -691,60 +971,986 @@ class VideoStreamHandler:
             "repeat_count": repeat_count,
         }
 
-    def update_frame(self):
-        self.stat_frame_count += 1
-        elapsed = time.perf_counter() - self.stat_start_time
-        if elapsed > 1.0:
-            self.stat_fps = self.stat_frame_count / elapsed
+    def get_detections_for_contours_bbs(
+        self, frameNum, foi, contours, thickness=2, device_input="cuda"
+    ):
+        # global active_streams
+        # source = self.source
+        stream_name = self.name
+        num_objs = 0
+        # predictions = []
+        metadata = dict()
+        # frame_bytes = 'b'
+        cropped_imgs, cropped_coords = [], []
+        H, W = foi.shape[:2]  # Unpack once
+        bbs_full_res = []
 
-    def check_disk_usage(self, path, min_gb=0.5):
-        """Returns True if there is at least min_gb available at path."""
+        # Filter and Sort in one go (Minimize Python-to-C++ crossings)
+        raw_bbs = []
+        padding = 64
+        for c in contours:
+            area = cv2.contourArea(c)
+            x1, y1, w, h = cv2.boundingRect(c)
+            if (
+                area > self.min_contour_area
+            ):  # and area / (w*h) >=0.3:  # and 0.5 < (w / h) < 2.0: # w/ solidity & aspect
+                xx1 = max(0, int((x1 * self.scale_x)) - padding)
+                yy1 = max(0, int((y1 * self.scale_y)) - padding)
+                xx2 = min(W, int(((x1 + w) * self.scale_x)) + padding)
+                yy2 = min(H, int(((y1 + h) * self.scale_y)) + padding)
+                raw_bbs.append([area, [xx1, yy1, xx2, yy2]])
+        bbs_full_res = sorted(
+            [pair[1] for pair in raw_bbs if pair[0] > self.min_contour_area],
+            key=lambda x: x[0],
+            reverse=True,
+        )[:MAX_DETECTIONS]
+
+        dist_thresh = min(0.05 * W, 0.05 * H)
+        merged = merge_boxes_limit(
+            bbs_full_res, dist_threshold=dist_thresh, size_limit=640
+        )
+
+        merged = filter_contained_boxes(merged, containment_thresh=0.9)
+
+        # for cnt, area in merged:
+        for x1, y1, x2, y2 in merged:
+            if (
+                x2 > x1
+                and y2 > y1
+                and (x2 - x1) < self.frame_width
+                and (y2 - y1) < self.frame_height
+            ):
+                crop = foi[y1:y2, x1:x2]
+                if crop.size > 0:
+                    cropped_imgs.append(crop)
+                    cropped_coords.append((x1, y1))
+
+        if not cropped_imgs:
+            frame_bytes = get_display_frame_in_bytes(
+                foi,
+                self.frame_width,
+                display_size=DISPLAY_FRAME_SIZE,
+                quality=DISPLAY_FRAME_QUALITY,
+            )
+            return metadata, frame_bytes  # num_objs, predictions
+
+        # 2. Inference (Keep stream=False as it is stable)
+        results = self.model.predict(
+            cropped_imgs,
+            imgsz=MODEL_W,
+            batch=len(cropped_imgs),
+            device=device_input,
+            verbose=False,
+            stream=True,
+            max_det=MAX_DETECTIONS,
+            # classes=[0],  # only "person",
+            # conf=0.45,
+        )
+
+        label_source = (
+            self.model.names if hasattr(self.model, "names") else YOLO_CLASS_NAMES
+        )
+
+        for ridx, r in enumerate(results):
+            if r.boxes is None or len(r.boxes) == 0:
+                continue
+
+            # Move to CPU in one bulk operation per crop
+            boxes = r.boxes.xyxy.cpu().numpy().astype(int)
+            clss = r.boxes.cls.cpu().numpy().astype(int)
+            confs = r.boxes.conf.cpu().numpy()
+            off_x, off_y = cropped_coords[ridx]
+
+            for j in range(len(boxes)):
+                num_objs += 1
+                bx1, by1, bx2, by2 = boxes[j]
+                abs_x1, abs_y1 = off_x + bx1, off_y + by1
+                abs_x2, abs_y2 = off_x + bx2, off_y + by2
+                class_id = clss[j]
+                class_name = label_source[class_id]
+                confidence = confs[j]
+                if confidence > DETECTION_THRESHOLD:
+                    if not OMIT_DETECTIONS_FLAG:
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                        print(
+                            # f"[OBJECT DETECTION] {class_name} detected in frame {frameNum} (Total detected: {current_cnt})",
+                            f"[{timestamp}] {stream_name} DETECTION on Frame {frameNum}: {class_name} detected",
+                            flush=True,
+                        )
+
+                    bb_color = get_detection_color(class_id, is_bgr=True)
+
+                    foi = cv2.rectangle(
+                        foi,
+                        (abs_x1, abs_y1),
+                        (abs_x2, abs_y2),
+                        bb_color,
+                        thickness,
+                    )
+                    label = f"{class_name} {confidence:.2f}"
+                    draw_label(foi, label, (abs_x1, abs_y1), color=bb_color, padding=5)
+
+                    height = min(abs_y2, H) - max(0, abs_y1)
+                    width = min(abs_x2, W) - max(0, abs_x1)
+                    # object_res = [
+                    #     abs_x1,
+                    #     abs_y1,
+                    #     height,
+                    #     width,
+                    #     class_name,
+                    #     confidence,
+                    #     H,
+                    #     W,
+                    # ]
+
+                    # Resized
+                    scale_x = self.resize_w / W
+                    scale_y = self.resize_h / H
+                    object_res = [
+                        int(abs_x1 * scale_x),
+                        int(abs_y1 * scale_y),
+                        int(height * scale_y),
+                        int(width * scale_x),
+                        class_name,
+                        confidence,
+                        int(self.resize_h),
+                        int(self.resize_w),
+                    ]
+
+                    framenum_str = f"{frameNum:04d}_{j:04d}"
+                    if DEBUG_FLAG:
+                        meta_str = ",".join(
+                            [str(o) for o in object_res + [framenum_str]]
+                        )
+                        print(f"[{stream_name} METADATA],{meta_str}", flush=True)
+
+                    # Full Res
+                    metadata[framenum_str] = {
+                        "frameId": frameNum,
+                        "bbId": framenum_str,
+                        "bbox": {
+                            "x": int(object_res[0]),
+                            "y": int(object_res[1]),
+                            "height": int(object_res[2]),
+                            "width": int(object_res[3]),
+                            "object": str(object_res[4]),
+                            "object_det": {
+                                "confidence": float(object_res[5]),
+                                "frameH": int(object_res[6]),
+                                "frameW": int(object_res[7]),
+                            },
+                        },
+                    }
+
+        # Queue frame for display (reduce quality slightly to 80 for 8K bandwidth)
+        frame_bytes = get_display_frame_in_bytes(
+            foi,
+            self.frame_width,
+            display_size=DISPLAY_FRAME_SIZE,
+            quality=DISPLAY_FRAME_QUALITY,
+        )
+
+        return metadata, frame_bytes
+
+    def contour2predictions(
+        self, frameNum, mask, frame, device_input="cpu", repeat_count=1
+    ):
+        # source = self.source
+        # stream_name = self.name
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # 3. Write frame
+        # self.video_writer.write(frame)
+        # if self.video_writer:
+        #     for _ in range(repeat_count):
+        # self.video_writer.write(self.cpu_resized_frame)
+
+        # num_objs = 0
+        # predictions = []
+        metadata = dict()
+        if contours:
+            metadata, frame_bytes = self.get_detections_for_contours_bbs(
+                frameNum, frame, contours, thickness=2, device_input=device_input
+            )
+
+            if metadata:
+                all_metadata.setdefault(
+                    self.clip_key,
+                    {
+                        "object": {},
+                        "face": {},
+                    },
+                )
+                all_metadata[self.clip_key]["object"].update(metadata)
+            # all_metadata[clip_key]["face"].update(metadata_face)
+        return frame_bytes
+
+
+class VideoStreamHandler2(BaseHandler):
+    def __init__(self, source, name, active_streams):
+        super().__init__(source, name, active_streams)
+        self.cap.release()
+
+    def setup_threads(self):
+        self.torch_stream = torch.cuda.ExternalStream(self.stream.cudaPtr())
+        self.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        self.reader = FastPinnedReader(
+            self.source, self.frame_height, self.frame_width, maxlen=2
+        )  # .start()
+        self.process_thread = threading.Thread(
+            target=self.run_realtime_inference, daemon=True
+        )
+        # self.process_thread.start()
+
+    def start(self):
+        self.reader.start()
+        self.process_thread.start()
+
+    def stop(self):
+        self.active = False  # Signals the while loops to exit
+        self.reader.stop()
+        # self.process_thread.join()
+
+        # Close the OpenCV capture
+        if self.cap:
+            self.cap.release()
+
+    def run_realtime_inference(self):
+        print(f"Inference thread started for {self.name}...")
+
+        # --- CRITICAL: Initialize model INSIDE the thread ---
+        # This binds the GPU context to this thread specifically.
+        # import torch
+        # self.model = YOLO(model_path, verbose=False, task="detect")
+        # self.model.to('cuda') # Explicitly move to GPU in this thread
+
+        target_interval = 1.0 / self.target_fps
+        last_process_time = time.time()
+
+        while self.active:  # and (not self.reader.stopped or self.reader.frame_queue):
+            # 1. REAL-TIME SYNC: Clear stale frames from buffer
+            # while True:
+            # grabbed = self.cap.grab()
+            # if not grabbed:
+            #     self.active = False
+            #     break
+
+            if self.device_input == "cuda":
+                now = time.time()
+                # if now - last_process_time < target_interval:
+                #     continue
+                frame, f_idx = self.reader.read()
+                if frame is None:
+                    # time.sleep(0.001) # Wait for reader thread
+                    continue
+                last_process_time = now
+            else:
+                grabbed = self.cap.grab()
+                if not grabbed:
+                    self.active = False
+
+                now = time.time()
+                if now - last_process_time < target_interval:
+                    continue
+
+                success, frame = self.cap.retrieve()
+                if not success or frame is None:
+                    continue
+
+                last_process_time = now
+
+            # 3. DECOUPLED AI: Only submit to AI if the worker queue is not backed up
+            # This prevents 'lag' if the AI is slower than the video feed
+            if self.get_executor_backlog() < MAX_WORKERS:
+                # Move the heavy 'run_pipeline' call into a background worker
+                self.executor.submit(
+                    self.process_frame_async, frame.copy(), self.stat_frame_count + 1
+                )
+            else:
+                # If AI is busy, still update the display with the raw frame
+                # so the dashboard video stays smooth and fluid
+                _, buffer = cv2.imencode(
+                    ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, DISPLAY_FRAME_QUALITY]
+                )
+                self.latest_processed_frame = buffer.tobytes()
+                self.last_frame_id += 1  # Ensure the generator sees this 'clean' frame
+
+            self.update_frame()
+            self.last_heartbeat = time.time()
+
+            # 2. SKIP frames (Light Bitstream Parsing)
+            # This is the "Compute Saver" - it bypasses the decoder for N frames
+            for _ in range(self.skip_count):
+                if self.reader.read()[0] is None:
+                    self.reader.stopped = True
+                    break
+
+        self.stop()
+        # Add this line to remove it from the dashboard immediately:
+        if self.name in self.active_streams:  # noqa: F821
+            del self.active_streams[self.name]  # noqa: F821
+
+    def process_frame_async(self, frame, frame_num, repeat_count=1):
+        """
+        Worker function to run heavy AI tasks (Resize, Bkgd Sub, YOLO)
+        in the background without blocking the video reader.
+        """
         try:
-            total, used, free = shutil.disk_usage(path)
-            # Convert bytes to Gigabytes
-            free_gb = free / (2**30)
-            return free_gb > min_gb
-        except Exception as e:
-            print(f"Disk check error: {e}")
-            return False
+            repeat_count = 1
+            # Calls your existing Page 22 logic (run_pipeline)
+            # inf_data = self.run_pipeline(frame, frame_num + 1)
+            if self.device_input == "cpu":
+                raise ValueError("CPU pipeline not added")
+                # inf_data = self.test_full_cpu_detection_gpu(
+                #     frame, frame_num + 1, repeat_count=repeat_count
+                # )
+            else:
+                # inf_data = self.test_rbtdc_detection_gpu_optimized3(frame, frame_num + 1, repeat_count=repeat_count)
+                # print(f"inf_data: {inf_data}")
+                self.test_rbtdc_detection_gpu_optimized3(
+                    frame, frame_num + 1, repeat_count=repeat_count
+                )
+            # if inf_data:
+            #     # Calls your Page 20 async_yolo_task to handle mask download/inference
+            #     self.async_yolo_task(inf_data)
 
-    # Gets video fps and framecount
-    def get_fps_and_framecnt(self):
-        self.input_fps = int(self.cap.get(cv2.CAP_PROP_FPS))  # hardware fps
-        if self.input_fps == 0:  # Case when FPS isn't available
-            self.input_fps = manual_fps_calculation(self.name, num_frames=10)
+        except Exception:
+            e = traceback.format_exc()
+            print(f"ERROR: process_frame_async failed for {self.name}: {e}")
 
-        self.target_fps = TARGET_FPS if self.input_fps > TARGET_FPS else self.input_fps
-        self.frame_skip = int(self.input_fps / self.target_fps)
-        if self.frame_skip < 1:
-            self.frame_skip = 1
+    def test_rbtdc_detection_gpu_optimized3(self, frame, frameNum, repeat_count=1):
+        # Resize directly into the pre-allocated Pinned Memory
+        # This avoids a temporary CPU allocation
+        # H, W = self.resize_h, self.resize_w
+        # self.cpu_resized_frame = cv2.resize(frame, (W, H))
+        # self.video_writer.write(self.cpu_resized_frame)
+        self.gpu_fullres_frame.upload(frame, self.stream)
 
-        self.MAX_FRAMES_PER_CLIP = int(self.target_fps * CLIP_DURATION)
-        self.target_interval = 1.0 / self.target_fps  # 0.0666s
+        cv2.cuda.resize(
+            self.gpu_fullres_frame,
+            (self.resize_w, self.resize_h),
+            stream=self.stream,
+            dst=self.resized_frame,
+            interpolation=cv2.INTER_NEAREST,
+        )
+        if ENABLE_QUERYING and self.video_writer:  # and not self.video_queue.full():
+            self.pinned_downloaded_resizedframe_np = self.resized_frame.download(
+                self.stream
+            )
+            # self.resized_frame.download(self.stream, self.pinned_downloaded_resizedframe_np)
+            for _ in range(repeat_count):
+                # self.video_queue.put((self.video_writer, self.pinned_downloaded_resizedframe_np.copy()))
+                self.video_writer.write(self.pinned_downloaded_resizedframe_np)
 
-        if DEBUG == "1":
-            print(f"FPS of {self.name} input stream: {self.input_fps}", flush=True)
-            print(f"FPS of {self.name} output mp4: {self.target_fps}", flush=True)
+        # Background Subtraction on GPU
+        self.apply_background_subtraction_gpu(include_history=True, method="and")
 
-        # Frame count for videos
-        self.frame_count = None
-        if "://" not in str(self.source):
-            self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # Thresholding
+        cv2.cuda.threshold(
+            self.fgMask,
+            MASK_THRESHOLD_VALUE,
+            MASK_MAX_VALUE,
+            cv2.THRESH_BINARY,
+            self.gpu_threshold_dst_frame,
+            self.stream,
+        )
 
-    # Gets frame W and H details
-    def get_frameWH(self):
-        input_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        input_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # mask = cv2.dilate(mask, self.dilate_kernel, iterations=1)
+        self.dilate_filter.apply(
+            self.gpu_threshold_dst_frame, self.gpu_morphed_frame, self.stream
+        )
 
-        if (input_height * input_width) < (MODEL_H * MODEL_W):
-            new_sizeHW = check_imgsz([MODEL_H, MODEL_W])  # expects hxw
+        # return {
+        #     "frameNum": frameNum,
+        #     "mask": self.gpu_morphed_frame,
+        #     "full_frame": frame,  # Original for cropping
+        #     "repeat_count": repeat_count,
+        # }
+        cropped_imgs, cropped_coords = [], []
+        H, W = frame.shape[:2]  # Unpack once
+        bbs_full_res = self.get_sorted_contours_gpu(self.gpu_morphed_frame, H, W)
+        # if not bbs_full_res:
+        #     return num_objs
+        dist_thresh = min(0.05 * W, 0.05 * H)
+        merged = merge_boxes_limit(
+            bbs_full_res, dist_threshold=dist_thresh, size_limit=640
+        )
+
+        merged = filter_contained_boxes(merged, containment_thresh=0.9)
+        for x1, y1, x2, y2 in merged:
+            if (
+                x2 > x1
+                and y2 > y1
+                and (x2 - x1) < self.frame_width
+                and (y2 - y1) < self.frame_height
+            ):
+                crop = frame[y1:y2, x1:x2]
+                if crop.size > 0:
+                    cropped_imgs.append(crop)
+                    cropped_coords.append((x1, y1))
+
+        if cropped_imgs:
+            with torch.cuda.stream(self.torch_stream):
+                results = self.run_model(
+                    cropped_imgs, batch=len(cropped_imgs), stream=True
+                )
+                if results:
+                    # for r in results: # Consume generator [0.1.38, Line 2431]
+                    #     total_objs += len(r.boxes)
+                    metadata, frame_bytes = self.extract_metadata_from_results(
+                        results,
+                        frame,
+                        cropped_coords,
+                        frameNum,
+                        self.frame_height,
+                        self.frame_width,
+                    )
         else:
-            new_sizeHW = check_imgsz([input_height, input_width])  # expects hxw
+            frame_bytes = get_display_frame_in_bytes(
+                frame,
+                self.frame_width,
+                display_size=DISPLAY_FRAME_SIZE,
+                quality=DISPLAY_FRAME_QUALITY,
+            )
 
-        new_sizeWH = (new_sizeHW[1], new_sizeHW[0])
+        self.latest_processed_frame = frame_bytes
+        self.last_heartbeat = time.time()
+        self.last_frame_id += 1
 
-        self.width = new_sizeWH[0]
-        self.height = new_sizeWH[1]
+    def async_yolo_task(self, data):
+        """Heavy lifting moved to ThreadPoolExecutor"""
+        try:
+            if self.device_input == "cuda":
+                frameNum = data["frameNum"]
+                gpu_morphed_frame = data["mask"]
+                frame = data["full_frame"]
+                # self.pinned_downloaded_frame_np = data["mask"].download(self.stream)
+                # frame_bytes = self.contour2predictions(
+                #     data["frameNum"],
+                #     self.pinned_downloaded_frame_np,
+                #     data["full_frame"],
+                #     device_input=self.device_input,
+                #     repeat_count=data["repeat_count"],
+                # )
+                cropped_imgs, cropped_coords = [], []
+                H, W = frame.shape[:2]  # Unpack once
+                bbs_full_res = self.get_sorted_contours_gpu(gpu_morphed_frame, H, W)
+                # if not bbs_full_res:
+                #     return num_objs
+                dist_thresh = min(0.05 * W, 0.05 * H)
+                merged = merge_boxes_limit(
+                    bbs_full_res, dist_threshold=dist_thresh, size_limit=640
+                )
+
+                merged = filter_contained_boxes(merged, containment_thresh=0.9)
+                for x1, y1, x2, y2 in merged:
+                    if (
+                        x2 > x1
+                        and y2 > y1
+                        and (x2 - x1) < self.frame_width
+                        and (y2 - y1) < self.frame_height
+                    ):
+                        crop = frame[y1:y2, x1:x2]
+                        if crop.size > 0:
+                            cropped_imgs.append(crop)
+                            cropped_coords.append((x1, y1))
+
+                if cropped_imgs:
+                    with torch.cuda.stream(self.torch_stream):
+                        results = self.run_model(
+                            cropped_imgs, batch=len(cropped_imgs), stream=True
+                        )
+                        if results:
+                            # for r in results: # Consume generator [0.1.38, Line 2431]
+                            #     total_objs += len(r.boxes)
+                            metadata, frame_bytes = self.extract_metadata_from_results(
+                                results,
+                                frame,
+                                cropped_coords,
+                                frameNum,
+                                self.frame_height,
+                                self.frame_width,
+                            )
+                else:
+                    frame_bytes = get_display_frame_in_bytes(
+                        frame,
+                        self.frame_width,
+                        display_size=DISPLAY_FRAME_SIZE,
+                        quality=DISPLAY_FRAME_QUALITY,
+                    )
+            else:
+                frame_bytes = self.contour2predictions(
+                    data["frameNum"],
+                    data["mask"],
+                    data["full_frame"],
+                    device_input=self.device_input,
+                    repeat_count=data["repeat_count"],
+                )
+            self.latest_processed_frame = frame_bytes
+            self.last_heartbeat = time.time()
+            self.last_frame_id += 1
+        except Exception:
+            e = traceback.format_exc()
+            print(f"Async YOLO Error: {e}")
+
+    def extract_metadata_from_results(
+        self, results, foi, cropped_coords, frameNum, H, W, thickness=2
+    ):
+        num_objs = 0
+        # predictions = []
+        metadata = dict()
+        label_source = (
+            self.model.names if hasattr(self.model, "names") else YOLO_CLASS_NAMES
+        )
+
+        for ridx, r in enumerate(results):
+            if r.boxes is None or len(r.boxes) == 0:
+                continue
+
+            # Move to CPU in one bulk operation per crop
+            boxes = r.boxes.xyxy.cpu().numpy().astype(int)
+            clss = r.boxes.cls.cpu().numpy().astype(int)
+            confs = r.boxes.conf.cpu().numpy()
+            off_x, off_y = cropped_coords[ridx][:2]
+
+            for j in range(len(boxes)):
+                num_objs += 1
+                bx1, by1, bx2, by2 = boxes[j]
+                abs_x1, abs_y1 = off_x + bx1, off_y + by1
+                abs_x2, abs_y2 = off_x + bx2, off_y + by2
+                class_id = clss[j]
+                class_name = label_source[class_id]
+                confidence = confs[j]
+                if confidence > DETECTION_THRESHOLD:
+                    bb_color = get_detection_color(class_id, is_bgr=True)
+
+                    foi = cv2.rectangle(
+                        foi,
+                        (abs_x1, abs_y1),
+                        (abs_x2, abs_y2),
+                        bb_color,
+                        thickness,
+                    )
+                    label = f"{class_name} {confidence:.2f}"
+                    draw_label(foi, label, (abs_x1, abs_y1), color=bb_color, padding=5)
+
+                    height = min(abs_y2, H) - max(0, abs_y1)
+                    width = min(abs_x2, W) - max(0, abs_x1)
+                    # object_res = [
+                    #     abs_x1,
+                    #     abs_y1,
+                    #     height,
+                    #     width,
+                    #     class_name,
+                    #     confidence,
+                    #     H,
+                    #     W,
+                    # ]
+
+                    # Resized
+                    scale_x = self.resize_w / W
+                    scale_y = self.resize_h / H
+                    object_res = [
+                        int(abs_x1 * scale_x),
+                        int(abs_y1 * scale_y),
+                        int(height * scale_y),
+                        int(width * scale_x),
+                        class_name,
+                        confidence,
+                        int(self.resize_h),
+                        int(self.resize_w),
+                    ]
+
+                    framenum_str = f"{frameNum:04d}_{j:04d}"
+
+                    # Full Res
+                    metadata[framenum_str] = {
+                        "frameId": frameNum,
+                        "bbId": framenum_str,
+                        "bbox": {
+                            "x": int(object_res[0]),
+                            "y": int(object_res[1]),
+                            "height": int(object_res[2]),
+                            "width": int(object_res[3]),
+                            "object": str(object_res[4]),
+                            "object_det": {
+                                "confidence": float(object_res[5]),
+                                "frameH": int(object_res[6]),
+                                "frameW": int(object_res[7]),
+                            },
+                        },
+                    }
+
+        # Queue frame for display (reduce quality slightly to 80 for 8K bandwidth)
+        frame_bytes = get_display_frame_in_bytes(
+            foi,
+            self.frame_width,
+            display_size=DISPLAY_FRAME_SIZE,
+            quality=DISPLAY_FRAME_QUALITY,
+        )
+
+        return metadata, frame_bytes
+
+    def get_sorted_contours(self, morphed_frame, H, W):
+        contours, _ = cv2.findContours(
+            morphed_frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        raw_bbs = []
+        padding = 64
+        for c in contours:
+            area = cv2.contourArea(c)
+            x1, y1, w, h = cv2.boundingRect(c)
+            if (
+                area > self.min_contour_area
+            ):  # and area / (w*h) >=0.3:  # and 0.5 < (w / h) < 2.0: # w/ solidity & aspect
+                xx1 = max(0, int((x1 * self.scale_x)) - padding)
+                yy1 = max(0, int((y1 * self.scale_y)) - padding)
+                xx2 = min(W, int(((x1 + w) * self.scale_x)) + padding)
+                yy2 = min(H, int(((y1 + h) * self.scale_y)) + padding)
+                raw_bbs.append([area, [xx1, yy1, xx2, yy2]])
+        bbs_full_res = sorted(
+            [pair[1] for pair in raw_bbs if pair[0] > self.min_contour_area],
+            key=lambda x: x[0],
+            reverse=True,
+        )[:MAX_DETECTIONS]
+        return bbs_full_res
+
+    def get_sorted_contours_gpu(self, morphed_frame, H, W):
+        # 1. Zero-Copy Bridge
+        gpu_frame_cp = gpumat2cupy(morphed_frame)
+
+        # 2. Fast Labeling (Still required for connectivity)
+        label_image, num_labels = cucim_label(gpu_frame_cp, return_num=True)
+        if num_labels == 0:
+            return []
+
+        # cupy.bincount counts occurrences of each label (index 0 is background)
+        areas = cupy.bincount(label_image.ravel())
+        mask = areas > self.min_contour_area
+        mask[0] = False
+        if not cupy.any(mask):
+            return []
+
+        # 3. Pre-allocate BBox buffer on GPU
+        # Format: [num_labels, 4] -> [min_y, min_x, max_y, max_x]
+        # Initialize with extreme values for min/max logic
+        bboxes_gpu = cupy.full((num_labels + 1, 4), -1, dtype=cupy.int32)
+        bboxes_gpu[:, :2] = 99999  # Initial min values
+
+        # Pass the width (morphed_frame.size()[0]) to the kernel
+        mask_w = morphed_frame.size()[0]
+
+        # 4. Run the Fast BBox Kernel
+        bbox_kernel(label_image, mask_w, bboxes_gpu)
+
+        # 5. Filter by Area & Constraints on GPU
+        # (Optional: Use cupy.bincount to get areas if needed for area filtering)
+        # Move ONLY valid bboxes to CPU in one bulk operation
+        valid_bboxes = bboxes_gpu[mask].get()
+
+        # 6. Final Coordinate Scaling
+        padding = 64
+        bbs_full_res = []
+        for y1, x1, y2, x2 in valid_bboxes[:MAX_DETECTIONS]:
+            xx1 = max(0, int(x1 * self.scale_x) - padding)
+            yy1 = max(0, int(y1 * self.scale_y) - padding)
+            xx2 = min(W, int(x2 * self.scale_x) + padding)
+            yy2 = min(H, int(y2 * self.scale_y) + padding)
+            bbs_full_res.append([xx1, yy1, xx2, yy2])
+
+        return bbs_full_res
+
+
+class VideoStreamHandler3(BaseHandler):
+    def setup_threads(self):
+        self.torch_stream = torch.cuda.ExternalStream(self.stream.cudaPtr())
+        self.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+        self.process_thread = threading.Thread(
+            target=self.run_realtime_inference, daemon=True
+        )
+
+    def async_yolo_task(self, data):
+        """Heavy lifting moved to ThreadPoolExecutor"""
+        try:
+            if self.device_input == "cuda":
+                self.pinned_downloaded_frame_np = data["mask"].download(self.stream)
+                frame_bytes = self.contour2predictions(
+                    data["frameNum"],
+                    self.pinned_downloaded_frame_np,
+                    data["full_frame"],
+                    device_input=self.device_input,
+                    repeat_count=data["repeat_count"],
+                )
+            else:
+                frame_bytes = self.contour2predictions(
+                    data["frameNum"],
+                    data["mask"],
+                    data["full_frame"],
+                    device_input=self.device_input,
+                    repeat_count=data["repeat_count"],
+                )
+            self.latest_processed_frame = frame_bytes
+            self.last_heartbeat = time.time()
+            self.last_frame_id += 1
+        except Exception:
+            e = traceback.format_exc()
+            print(f"Async YOLO Error: {e}")
+
+    def process_frame_async(self, frame, frame_num, repeat_count=1):
+        """
+        Worker function to run heavy AI tasks (Resize, Bkgd Sub, YOLO)
+        in the background without blocking the video reader.
+        """
+        try:
+            # Calls your existing Page 22 logic (run_pipeline)
+            # inf_data = self.run_pipeline(frame, frame_num + 1)
+            if self.device_input == "cpu":
+                inf_data = self.test_full_cpu_detection_gpu(
+                    frame, frame_num + 1, repeat_count=repeat_count
+                )
+            else:
+                inf_data = self.test_rbtd_detection_gpu(
+                    frame, frame_num + 1, repeat_count=repeat_count
+                )
+
+            # if inf_data:
+            #     # Calls your Page 20 async_yolo_task to handle mask download/inference
+            #     self.async_yolo_task(inf_data)
+            if inf_data and "mask" in inf_data:
+                # Calls your Page 20 async_yolo_task to handle mask download/inference
+                self.async_yolo_task(inf_data)
+            else:
+                frame_bytes = get_display_frame_in_bytes(
+                    frame,
+                    self.frame_width,
+                    display_size=DISPLAY_FRAME_SIZE,
+                    quality=DISPLAY_FRAME_QUALITY,
+                )
+                self.latest_processed_frame = frame_bytes
+                self.last_heartbeat = time.time()
+                self.last_frame_id += 1
+
+        except Exception:
+            e = traceback.format_exc()
+            print(f"ERROR: process_frame_async failed for {self.name}: {e}")
+
+    def run_realtime_inference(self):
+        """
+        Main loop: Initializes the model in this thread to fix CUDA context issues.
+        """
+        print(f"Inference thread started for {self.name}...")
+
+        # --- CRITICAL: Initialize model INSIDE the thread ---
+        # This binds the GPU context to this thread specifically.
+        # import torch
+        # self.model = YOLO(model_path, verbose=False, task="detect")
+        # self.model.to('cuda') # Explicitly move to GPU in this thread
+
+        target_interval = 1.0 / self.target_fps
+        last_process_time = time.time()
+
+        while self.active:
+            # 1. REAL-TIME SYNC: Clear stale frames from buffer
+            # while True:
+            grabbed = self.cap.grab()
+            if not grabbed:
+                self.active = False
+                break
+
+            now = time.time()
+            if now - last_process_time < target_interval:
+                continue
+
+            success, frame = self.cap.retrieve()
+            if not success or frame is None:
+                continue
+
+            last_process_time = now
+
+            # 3. DECOUPLED AI: Only submit to AI if the worker queue is not backed up
+            # This prevents 'lag' if the AI is slower than the video feed
+            if self.get_executor_backlog() < MAX_WORKERS:
+                # Move the heavy 'run_pipeline' call into a background worker
+                self.executor.submit(
+                    self.process_frame_async, frame.copy(), self.stat_frame_count
+                )
+            else:
+                # If AI is busy, still update the display with the raw frame
+                # so the dashboard video stays smooth and fluid
+                _, buffer = cv2.imencode(
+                    ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, DISPLAY_FRAME_QUALITY]
+                )
+                self.latest_processed_frame = buffer.tobytes()
+                self.last_frame_id += 1  # Ensure the generator sees this 'clean' frame
+
+            self.update_frame()
+            self.last_heartbeat = time.time()
+
+        self.stop()
+        # Add this line to remove it from the dashboard immediately:
+        if self.name in self.active_streams:  # noqa: F821
+            del self.active_streams[self.name]  # noqa: F821
+
+    def test_rbtd_detection_gpu(self, frame, frameNum, repeat_count=1):
+        # Resize directly into the pre-allocated Pinned Memory
+        # This avoids a temporary CPU allocation
+        H, W = self.resize_h, self.resize_w
+        # self.cpu_resized_frame = cv2.resize(frame, (W, H))
+        # self.video_writer.write(self.cpu_resized_frame)
+        self.gpu_fullres_frame.upload(frame, self.stream)
+        cv2.cuda.resize(
+            self.gpu_fullres_frame,
+            (W, H),
+            stream=self.stream,
+            dst=self.resized_frame,
+            interpolation=cv2.INTER_NEAREST,
+        )
+        if ENABLE_QUERYING and self.video_writer:  # and not self.video_queue.full():
+            self.pinned_downloaded_resizedframe_np = self.resized_frame.download(
+                self.stream
+            )
+            # self.resized_frame.download(self.stream, self.pinned_downloaded_resizedframe_np)
+            for _ in range(repeat_count):
+                # self.video_queue.put((self.video_writer, self.pinned_downloaded_resizedframe_np.copy()))
+                self.video_writer.write(self.pinned_downloaded_resizedframe_np)
+
+        # Background Subtraction on GPU
+        self.fgMask = self.backSub.apply(
+            self.resized_frame, float(self.lr), stream=self.stream
+        )
+
+        for m in list(self.mask_history):
+            # Dilate the historical mask on GPU
+            dilated = self.dilate_filter_for_enhanced_mask.apply(m)
+            # Bitwise AND on GPU
+            cv2.cuda.bitwise_and(self.prev_bkgd, dilated, self.prev_bkgd)
+            # dilated = cv2.dilate(m, self.dilate_kernel_for_enhanced_mask, iterations=1)
+            # cv2.bitwise_and(prev_bkgd, dilated, dst=prev_bkgd)
+        self.mask_history.append(self.fgMask.clone())
+        min_val, max_val, _, _ = cv2.cuda.minMaxLoc(self.prev_bkgd)
+
+        if max_val != min_val:
+            self.fgMask = cv2.cuda.bitwise_or(self.fgMask, self.prev_bkgd)
+
+        # Thresholding
+        cv2.cuda.threshold(
+            self.fgMask,
+            MASK_THRESHOLD_VALUE,
+            MASK_MAX_VALUE,
+            cv2.THRESH_BINARY,
+            self.gpu_threshold_dst_frame,
+            self.stream,
+        )
+
+        # mask = cv2.dilate(mask, self.dilate_kernel, iterations=1)
+        self.dilate_filter.apply(
+            self.gpu_threshold_dst_frame, self.gpu_morphed_frame, self.stream
+        )
+
+        return {
+            "frameNum": frameNum,
+            "mask": self.gpu_morphed_frame,
+            "full_frame": frame,  # Original for cropping
+            "repeat_count": repeat_count,
+        }
+
+    def test_rbtdc_detection_gpu_optimized3(self, frame, frameNum, repeat_count=1):
+        # Resize directly into the pre-allocated Pinned Memory
+        # This avoids a temporary CPU allocation
+        # H, W = self.resize_h, self.resize_w
+        # self.cpu_resized_frame = cv2.resize(frame, (W, H))
+        # self.video_writer.write(self.cpu_resized_frame)
+        self.gpu_fullres_frame.upload(frame, self.stream)
+
+        cv2.cuda.resize(
+            self.gpu_fullres_frame,
+            (self.resize_w, self.resize_h),
+            stream=self.stream,
+            dst=self.resized_frame,
+            interpolation=cv2.INTER_NEAREST,
+        )
+        if ENABLE_QUERYING and self.video_writer:  # and not self.video_queue.full():
+            self.pinned_downloaded_resizedframe_np = self.resized_frame.download(
+                self.stream
+            )
+            # self.resized_frame.download(self.stream, self.pinned_downloaded_resizedframe_np)
+            for _ in range(repeat_count):
+                # self.video_queue.put((self.video_writer, self.pinned_downloaded_resizedframe_np.copy()))
+                self.video_writer.write(self.pinned_downloaded_resizedframe_np)
+
+        # Background Subtraction on GPU
+        self.apply_background_subtraction_gpu(include_history=True, method="and")
+
+        if frameNum - 1 % self.frame_skip:
+            return {
+                "frameNum": frameNum,
+                # "mask": self.gpu_morphed_frame,
+                "full_frame": frame,  # Original for cropping
+                # "repeat_count": repeat_count,
+            }
+
+        # Thresholding
+        cv2.cuda.threshold(
+            self.fgMask,
+            MASK_THRESHOLD_VALUE,
+            MASK_MAX_VALUE,
+            cv2.THRESH_BINARY,
+            self.gpu_threshold_dst_frame,
+            self.stream,
+        )
+
+        # mask = cv2.dilate(mask, self.dilate_kernel, iterations=1)
+        self.dilate_filter.apply(
+            self.gpu_threshold_dst_frame, self.gpu_morphed_frame, self.stream
+        )
+
+        return {
+            "frameNum": frameNum,
+            "mask": self.gpu_morphed_frame,
+            "full_frame": frame,  # Original for cropping
+            "repeat_count": repeat_count,
+        }
+
+    def test_full_cpu_detection_gpu(self, frame, frameNum, repeat_count=1):
+        # Resize directly into the pre-allocated Pinned Memory
+        # This avoids a temporary CPU allocation
+        H, W = self.resize_h, self.resize_w
+        self.cpu_resized_frame = cv2.resize(
+            frame, (W, H), interpolation=cv2.INTER_NEAREST
+        )
+        if ENABLE_QUERYING:
+            for _ in range(repeat_count):
+                self.video_writer.write(self.cpu_resized_frame)
+
+        # Background Subtraction on CPU
+        fgMask = self.backSub.apply(self.cpu_resized_frame, learningRate=self.lr)
+
+        prev_bkgd = np.ones_like(fgMask)  # AND
+        for m in self.mask_history:
+            # Dilate the historical mask
+            dilated = cv2.dilate(m, self.dilate_kernel_for_enhanced_mask, iterations=1)
+            cv2.bitwise_and(prev_bkgd, dilated, dst=prev_bkgd)
+        self.mask_history.append(fgMask)
+
+        if prev_bkgd.max() != prev_bkgd.min():
+            combined_mask_bool = (fgMask > 0) | (prev_bkgd > 0)
+
+            # Convert the boolean array back to uint8 with 0 and 255 values
+            fgMask = combined_mask_bool.astype(np.uint8) * 255
+
+        # Thresholding
+        _, mask = cv2.threshold(
+            fgMask, MASK_THRESHOLD_VALUE, MASK_MAX_VALUE, cv2.THRESH_BINARY
+        )
+
+        mask = cv2.dilate(mask, self.dilate_kernel, iterations=1)
+
+        return {
+            "frameNum": frameNum,
+            "mask": mask,
+            "full_frame": frame,  # Original for cropping
+            "repeat_count": repeat_count,
+        }
 
     def get_detections_for_contours_bbs(
         self, frameNum, foi, contours, thickness=2, device_input="cuda"

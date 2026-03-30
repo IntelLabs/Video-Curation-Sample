@@ -108,7 +108,9 @@
         <div class="camera-card" id="card-{{ id }}">
             <h3>Camera: {{ id }}</h3>
             <div class="stats-bar">
-                <div>FPS: <span id="fps-{{ id }}">0.0</span></div>
+                <div>DISPLAY FPS: <span id="fps-{{ id }}">0.0</span></div>
+                <!-- <div>INPUT FPS: <span id="inputfps-{{ id }}">0.0</span></div> -->
+                <div>TARGET FPS: <span id="targetfps-{{ id }}">0.0</span></div>
                 <!-- <div>Frames: <span id="frames-{{ id }}">0</span></div> -->
             </div>
             <div class="video-container">
@@ -205,7 +207,9 @@
                     card.innerHTML =
                         '<h3>Camera: ' + id + '</h3>' +
                         '<div class="stats-bar">' +
-                            '<div>FPS: <span id="fps-' + id + '">0.0</span></div>' +
+                            '<div>DISPLAY FPS: <span id="fps-' + id + '">0.0</span></div>' +
+                            // '<div>INPUT FPS: <span id="inputfps-' + id + '">0.0</span></div>' +
+                            '<div>TARGET FPS: <span id="targetfps-' + id + '">0.0</span></div>' +
                             // '<div>Frames: <span id="frames-' + id + '">0</span></div>' +
                             // '<div>Backlog: <span id="backlog-' + id + '">0</span></div>' +
                             // '<div>Status: <span id="status-' + id + '">Pending</span></div>' +
@@ -227,11 +231,15 @@
                 // console.log(`Updating stats for: ${id}`);
 
                 const fpsEl = document.getElementById(`fps-${id}`);
+                const inputfpsEl = document.getElementById(`inputfps-${id}`);
+                const targetfpsEl = document.getElementById(`targetfps-${id}`);
                 // const frameEl = document.getElementById(`frames-${id}`);
                 // const backlogEl = document.getElementById(`backlog-${id}`);
                 // const statusEl = document.getElementById(`status-${id}`);
 
                 if (fpsEl) fpsEl.textContent = data.fps;
+                if (inputfpsEl) inputfpsEl.textContent = data.inputfps;
+                if (targetfpsEl) targetfpsEl.textContent = data.targetfps;
                 // if (frameEl) frameEl.textContent = data.frames;
                 // if (backlogEl) {
                 //     backlogEl.textContent = data.reencode_backlog;

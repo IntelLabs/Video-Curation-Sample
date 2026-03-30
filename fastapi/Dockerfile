@@ -56,22 +56,9 @@ RUN apt-get update && apt-get install -y -q --no-install-recommends \
 RUN python3 -m venv ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:/usr/local/cuda/bin:${PATH}"
 ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
-ARG DEVICE="CPU"
-ENV DEVICE="${DEVICE}"
 
-# COPY requirements.* /home/
-RUN python -m pip install pip --upgrade  --no-cache-dir  && \
-    pip3 install --no-cache-dir "fastapi==0.135.1" "uvicorn==0.42.0" "openvino-dev==2024.6.0" "numpy==1.26.4" "ultralytics==8.4.7" "vdms==0.0.22" "wheel==0.46.3" && \
-    if [ "${DEVICE}" = "CPU" ]; then \
-        pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" --index-url https://download.pytorch.org/whl/cpu; \
-        pip3 install --no-cache-dir "nncf==2.19.0"; \
-    else \
-        apt-get update; \
-        apt-get install -y -q --no-install-recommends cuda-toolkit-12-4  libcudnn9-cuda-12  libnvinfer10 libnvonnxparsers10 ibnvinfer-plugin10; \
-        rm -rf /var/lib/apt/lists/*; \
-        pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" ; \
-        pip3 install --no-cache-dir "nvidia-cuda-runtime-cu12==12.8.*" "onnx==1.20.1" "onnxruntime-gpu==1.23.2" "onnxslim==0.1.82" "tensorrt_cu12==10.14.1.48.post1" "nvidia-cudnn-cu12==9.10.2.21"; \
-    fi;
+RUN pip3 install pip --no-cache-dir --upgrade && \
+    pip3 install --no-cache-dir "torch>=2.9.1" "torchvision>=0.24.1" "numpy<2.0"
 
 
 ARG PYTHON_VERSION=3.10
@@ -127,6 +114,8 @@ RUN ${VIRTUAL_ENV}/bin/python -c "import cv2; print(cv2.__version__)"
 # Clean up
 RUN rm -rf ${DEPENDENCY_DIR}
 
+ARG DEVICE="CPU"
+ENV DEVICE="${DEVICE}"
 
 # Set the working directory in the container
 WORKDIR /home
@@ -144,6 +133,28 @@ RUN if [ "${DEVICE}" != "CPU" ]; then \
         \
         ldconfig; \
     fi
+
+COPY requirements.* /home/
+# RUN python -m pip install pip --upgrade  --no-cache-dir  && \
+#     pip3 install --no-cache-dir -r requirements.in && \
+#     if [ "${DEVICE}" = "CPU" ]; then \
+#         pip3 install --no-cache-dir -r requirements.CPU.in; \
+#     else \
+#         apt-get update; \
+#         apt-get install -y -q --no-install-recommends cuda-toolkit-12-4  libcudnn9-cuda-12  libnvinfer10 libnvonnxparsers10 ibnvinfer-plugin10; \
+#         rm -rf /var/lib/apt/lists/*; \
+#         pip3 install --no-cache-dir -r requirements.GPU.in; \
+#     fi;
+RUN python -m pip install pip --upgrade  --no-cache-dir  && \
+    pip3 install --no-cache-dir --require-hashes -r requirements.txt && \
+    if [ "${DEVICE}" = "CPU" ]; then \
+        pip3 install --no-cache-dir --require-hashes -r requirements.CPU.txt; \
+    else \
+        apt-get update; \
+        apt-get install -y -q --no-install-recommends cuda-toolkit-12-4  libcudnn9-cuda-12  libnvinfer10 libnvonnxparsers10 ibnvinfer-plugin10; \
+        rm -rf /var/lib/apt/lists/*; \
+        pip3 install --no-cache-dir --require-hashes -r requirements.GPU.txt; \
+    fi;
 
 # RUN omz_downloader --list /home/resources/models/models.lst -o /home/resources/models --precisions FP16
 

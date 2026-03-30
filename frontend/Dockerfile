@@ -15,10 +15,9 @@ RUN apt-get install --only-upgrade libc-bin libc6  && \
     apt-get install -y -q --no-install-recommends python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
-# COPY requirements.txt /home/requirements.txt
-# RUN pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt
-COPY requirements.in /home/requirements.in
-RUN pip3 install --no-cache-dir -r /home/requirements.in
+COPY requirements.* /home/
+RUN pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt
+# RUN pip3 install --no-cache-dir -r /home/requirements.in
 
 COPY *.py /home/
 COPY    *.conf /etc/nginx/

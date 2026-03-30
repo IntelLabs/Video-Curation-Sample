@@ -36,8 +36,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3 -m venv ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
+COPY requirements.* /home/
 RUN pip3 install pip --no-cache-dir --upgrade && \
-    pip3 install --no-cache-dir torch torchvision "numpy<2.0"
+    pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt
 
 # Define environment variables for OpenCV version and installation path
 ENV OPENCV_VERSION="4.10.0"
@@ -89,14 +90,5 @@ RUN rm -rf ${DEPENDENCY_DIR}
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${VIRTUAL_ENV}/lib
 
 WORKDIR /home
-# COPY .vscode /home/.vscode
-# COPY configs /app/configs
-# COPY include /app/include
-# COPY inputs /app/inputs
-# COPY models /app/models
-# COPY *.py /app/
-COPY requirements.txt /home/
-
-RUN pip3 install --no-cache-dir -r /home/requirements.txt
 
 ENTRYPOINT python3 /home/finetune_test.py 2>&1 | tee /home/finetune.log

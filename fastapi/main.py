@@ -15,6 +15,9 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
 )
 
 from include.handlers import VideoStreamHandler, lifespan
+
+# from include.handlers import VideoStreamHandler2 as VideoStreamHandler, lifespan
+# from include.handlers import VideoStreamHandler3 as VideoStreamHandler, lifespan
 from include.utils import DEBUG, StreamRequest
 
 # ----- SETUP LOGGING -----
@@ -56,6 +59,7 @@ async def stream_video(data: StreamRequest):
         app.state.active_streams[name] = VideoStreamHandler(
             url, name, app.state.active_streams
         )  # , model=app.state.model, lock=app.state.model_lock)
+        app.state.active_streams[name].start()
     # DEBUG START
     curr_keys = list(app.state.active_streams.keys())
     if DEBUG == "1":
@@ -100,6 +104,8 @@ async def get_stats(request: Request):
     return {
         name: {
             "fps": round(streamer.stat_fps, 1),
+            "inputfps": round(streamer.input_fps, 1),
+            "targetfps": round(streamer.target_fps, 1),
             "frames": streamer.stat_frame_count,
             # "status":
         }
