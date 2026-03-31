@@ -81,5 +81,6 @@ Please see below for instructions for deploying container via `docker` and `dock
   ```
 
 Once all stages are completed, stop and/or remove running container.
+<!-- docker compose down --remove-orphans -->
 Keep note of the latest model, as this model will be copied to different location for inclusion in full application.
 
