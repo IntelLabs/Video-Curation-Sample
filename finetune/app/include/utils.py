@@ -3,7 +3,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from colorlog import ColoredFormatter
+# from colorlog import ColoredFormatter
 
 # Model Variables
 DETECTION_THRESHOLD = 0.25
@@ -46,30 +46,30 @@ def get_logger(log_filename):
 
     # Define the format (added date to file, kept succinct for screen)
     # We color the name of the logger (e.g., kiss, stdout, main) differently
-    console_formatter = ColoredFormatter(
-        "%(log_color)s%(levelname)-8s%(reset)s | %(name_log_color)s%(name)-12s%(reset)s | %(message)s",
-        log_colors={
-            "DEBUG": "cyan",
-            "INFO": "green",
-            "WARNING": "yellow",
-            "ERROR": "red",
-            "CRITICAL": "bold_red",
-        },
-        secondary_log_colors={
-            "name": {
-                "stdout": "purple",  # Prints will be purple
-                "stderr": "red",  # Stderr will be red
-                "ultralytics": "blue",  # ultralytics logs will be blue
-                "openvino": "cyan",  # GEPA logs will be cyan
-                "main": "white",  # Main program is white
-            }
-        },
-        style="%",
-    )
+    # console_formatter = ColoredFormatter(
+    #     "%(log_color)s%(levelname)-8s%(reset)s | %(name_log_color)s%(name)-12s%(reset)s | %(message)s",
+    #     log_colors={
+    #         "DEBUG": "cyan",
+    #         "INFO": "green",
+    #         "WARNING": "yellow",
+    #         "ERROR": "red",
+    #         "CRITICAL": "bold_red",
+    #     },
+    #     secondary_log_colors={
+    #         "name": {
+    #             "stdout": "purple",  # Prints will be purple
+    #             "stderr": "red",  # Stderr will be red
+    #             "ultralytics": "blue",  # ultralytics logs will be blue
+    #             "openvino": "cyan",  # GEPA logs will be cyan
+    #             "main": "white",  # Main program is white
+    #         }
+    #     },
+    #     style="%",
+    # )
     file_formatter = logging.Formatter(
         "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
     )
-    # console_formatter = logging.Formatter("%(name)s: %(levelname)s: %(message)s")
+    console_formatter = logging.Formatter("%(name)s: %(levelname)s: %(message)s")
 
     # Create StreamHandler (Screen)
     console_handler = logging.StreamHandler(sys.__stdout__)
@@ -103,7 +103,7 @@ def copy_file(src: Path, dst: Path):
         raise FileExistsError(f"File exists: {dst}")
 
 
-def convert_SynDroneVision_2_Train_Structure(ORIGINAL_DATA_DIR, DATA_DIR):
+def convert_Dataset_2_Train_Structure(ORIGINAL_DATA_DIR, DATA_DIR):
     for stage in ["train", "val", "test"]:
         (DATA_DIR / f"{stage}/images").mkdir(parents=True, exist_ok=True)
         (DATA_DIR / f"{stage}/labels").mkdir(parents=True, exist_ok=True)

@@ -1,13 +1,20 @@
 
 services:
     finetune-service:
-        # image: lcc_finetune:latest
-        build: ./
-        container_name: finetune_model
+        image: lcc_finetune:latest
+        build:
+            context: ./
+            args:
+                http_proxy: "${http_proxy}"
+                HTTP_PROXY: "${HTTP_PROXY}"
+                https_proxy: "${https_proxy}"
+                HTTPS_PROXY: "${HTTPS_PROXY}"
+        container_name: finetune_container
         privileged: true
         network_mode: "host"
+        # shm_size: '2gb'  # Give it plenty of space for video frames
         ipc: "host"
-        shm_size: '2gb'  # Give it plenty of space for video frames
+        command: ["/bin/bash", "-c", "python /home/finetune.py --no-train"]
         environment:
             YOLO_CONFIG_DIR: "/tmp"
             DBHOST: "vdms-service"
@@ -20,7 +27,7 @@ services:
             GPU_BATCH_SIZE: 1
             DEBUG: "1"
             DEVICE: "GPU"
-            INGESTION: "object,face"
+            INGESTION: "object"
             WATCH_DIR: "/watch_dir"
             http_proxy: "${http_proxy}"
             HTTP_PROXY: "${HTTP_PROXY}"
@@ -32,9 +39,7 @@ services:
             - /etc/localtime:/etc/localtime:ro
             - ../../inputs:/watch_dir:ro
             - ./app:/home
-            - ${LOCAL_DATA_DIR}:/dataset
-        networks:
-            - appnet
+            - ${LOCAL_DATA_DIR}:/datasets
         restart: always
         runtime: nvidia
         deploy:

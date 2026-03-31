@@ -9,3 +9,4 @@ build/*
 fastapi/resources/models/intel
 fastapi/resources/models/ultralytics
 finetune/.env
+finetune/app/*-Results
