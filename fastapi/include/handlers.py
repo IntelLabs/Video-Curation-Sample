@@ -29,7 +29,7 @@ from fastapi import FastAPI
 model_lock = threading.Lock()
 
 # Create a global lock for stream management
-stream_lock = asyncio.Lock()
+# stream_lock = asyncio.Lock()
 
 # os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
 #     # "rtsp_transport;tcp|hwaccel;cuda|threads;2|probesize;32|analyzeduration;0"
@@ -214,7 +214,7 @@ async def auto_cleanup_janitor(app):
         await asyncio.sleep(10)
         now = time.time()
 
-        async with stream_lock:
+        async with app.state.stream_lock:
             # Iterating over a list of keys to avoid "dictionary changed size" error
             for name in list(app.state.active_streams.keys()):
                 streamer = app.state.active_streams.get(name)
@@ -237,7 +237,7 @@ async def auto_cleanup_janitor(app):
                     should_remove = True  # Hard timeout for hung processes
 
                 if should_remove:
-                    async with stream_lock:
+                    async with app.state.stream_lock:
                         if DEBUG == "1":
                             print(f"CLEANUP: Removing {name} from active_streams")
                         streamer.stop()
@@ -252,6 +252,7 @@ async def lifespan(app: FastAPI):
         app.state.status = "Ready"
         app.state.model = YOLO(model_path, verbose=False, task="detect")
         # app.state.model_lock = threading.Lock()
+        app.state.stream_lock = asyncio.Lock()
     device_input = "cuda" if DEVICE == "GPU" else "cpu"
     print("Starting shared model warmup...")
     dummy_input = torch.zeros((1, 3, MODEL_H, MODEL_W)).to(device_input)
@@ -271,7 +272,7 @@ async def lifespan(app: FastAPI):
     # for s in app.state.active_streams.values():
     #     s.stop()
 
-    async with stream_lock:
+    async with app.state.stream_lock:
         for name, streamer in list(app.state.active_streams.items()):
             print(f"Shutting down stream: {name}")
             streamer.stop()  # Custom stop method defined below
@@ -403,20 +404,14 @@ class BaseHandler:
         self.active_streams = active_streams
         self.frame_ready_event = asyncio.Event()
         self.loop = asyncio.get_event_loop()
+        self._is_stopped = False  # 🛡️ Shutdown guard
+        self._stop_lock = threading.Lock()  # 🔒 Local lock for this instance
 
         # Initialize hardware capture and determine stream properties
         self.get_valid_video_capture()
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce latency
         self.get_fps_and_framecnt(target_fps)
         self.get_frameWH()
-
-        # Configure scaling for 8K-to-Model coordinate mapping
-        self.resize_h, self.resize_w = [MODEL_H, MODEL_W]
-        self.scale_x = self.frame_width / MODEL_W
-        self.scale_y = self.frame_height / MODEL_H
-        self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.numFrames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         # Determine minimum contour size relative to frame resolution
         self.min_contour_area = int(
@@ -800,7 +795,13 @@ class BaseHandler:
         return self.executor._work_queue.qsize()
 
     def stop(self):
-        self.active = False  # Signals the while loops to exit
+        """Safely stop the handler and prevent FFmpeg async_lock crashes."""
+        with self._stop_lock:
+            if self._is_stopped:
+                return  # Already stopped by another thread
+
+            self.active = False  # Signals the while loops to exit
+            self._is_stopped = True  # Mark as stopped immediately
 
         # Release the VideoWriter if it exists
         # if ENABLE_QUERYING and self.video_writer:
@@ -822,6 +823,9 @@ class BaseHandler:
         # Join threads if you want to be 100% sure they are closed
         # self.update_thread.join(timeout=1.0)
         # self.process_thread.join(timeout=1.0)
+
+        # Unblock any waiting FastAPI generators
+        self.frame_ready_event.set()
 
     def apply_background_subtraction_cpu(
         self, include_history=True, method="and", stream=None
@@ -932,18 +936,29 @@ class BaseHandler:
 
     # Gets frame W and H details
     def get_frameWH(self):
-        input_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        input_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.numFrames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        if (input_height * input_width) < (MODEL_H * MODEL_W):
+        # input_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        # input_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        if (self.frame_height * self.frame_width) < (MODEL_H * MODEL_W):
             new_sizeHW = check_imgsz([MODEL_H, MODEL_W])  # expects hxw
         else:
-            new_sizeHW = check_imgsz([input_height, input_width])  # expects hxw
+            new_sizeHW = check_imgsz(
+                [self.frame_height, self.frame_width]
+            )  # expects hxw
 
         new_sizeWH = (new_sizeHW[1], new_sizeHW[0])
 
         self.width = new_sizeWH[0]
         self.height = new_sizeWH[1]
+
+        # Configure scaling for 8K-to-Model coordinate mapping
+        self.resize_h, self.resize_w = [MODEL_H, MODEL_W]
+        self.scale_x = self.frame_width / MODEL_W
+        self.scale_y = self.frame_height / MODEL_H
 
     def update_frame(self):
         self.stat_frame_count += 1
@@ -1043,8 +1058,13 @@ class VideoStreamHandler_WIP(BaseHandler):
         Comprehensive resource release. Stops threads, shuts down the pool,
         and purges VRAM to prevent leaks in concurrent 8K environments.
         """
-        # Signal threads to stop
-        self.active = False
+        with self._stop_lock:
+            if self._is_stopped:
+                return  # Already stopped by another thread
+
+            # Signal threads to stop
+            self.active = False
+            self._is_stopped = True  # Mark as stopped immediately
 
         # Stop reader thread first
         if hasattr(self, "reader"):

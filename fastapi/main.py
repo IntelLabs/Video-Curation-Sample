@@ -239,22 +239,30 @@ async def stop_stream(name: str, request: Request):
 
 
 @app.post("/stop_all")
-async def stop_all_streams():
+async def stop_all_streams(request: Request):
     """
     Stops all active cameras and purges hardware resources.
     Uses a list snapshot to safely iterate while modifying the dictionary.
     """
-    active_streams = app.state.active_streams
-    active_names = list(active_streams.keys())
+    # Use the global stream_lock to prevent janitor/new-streams from interfering
+    async with request.app.state.stream_lock:
+        active_streams = request.app.state.active_streams
+        active_names = list(active_streams.keys())
 
-    if not active_names:
-        return {"status": "success", "message": "No active streams to stop"}
+        if not active_names:
+            return {"status": "success", "message": "No active streams to stop"}
 
-    for name in active_names:
-        streamer = active_streams.get(name)
-        if streamer:
-            streamer.stop()
-            app.state.active_streams.pop(name, None)
+        # for name in active_names:
+        #     streamer = active_streams.get(name)
+        #     if streamer:
+        #         streamer.stop()
+        #         app.state.active_streams.pop(name, None)
+        for name in active_names:
+            streamer = active_streams.pop(name, None)
+            if streamer:
+                # Offload to executor to keep the API responsive
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, streamer.stop)
 
     return {
         "status": "success",
