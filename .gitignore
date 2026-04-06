@@ -10,3 +10,5 @@ fastapi/resources/models/intel
 fastapi/resources/models/ultralytics
 finetune/.env
 finetune/app/*-Results
+fastapi/tests/*.mp4
+fastapi/tests/*_test_imgs

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Detection Dashboard</title>
     <style>
+        /* GLOBAL STYLES: Sets a dark, high-contrast theme suitable for monitoring */
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background-color: #1a1a1a;
@@ -14,6 +15,7 @@
         }
         h1 { text-align: center; color: #00ffcc; margin-bottom: 30px; }
 
+        /* GRID SYSTEM: Dynamically arranges camera cards based on screen size */
         #camera-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
@@ -21,7 +23,7 @@
             padding: 10px;
         }
 
-        /* Center the grid if there is only one camera */
+        /* Centers the single stream if only one camera is active */
         #camera-grid:has(> :last-child:nth-child(1)) {
             display: flex;
             justify-content: center;
@@ -45,6 +47,7 @@
             padding-bottom: 10px;
         }
 
+        /* MONITORING OVERLAY: Displays real-time FPS data for each stream */
         .stats-bar {
             background: #111;
             padding: 8px 12px;
@@ -61,6 +64,7 @@
         .stats-bar span.pending { color: #ffcc00; }
         @keyframes blink { 50% { opacity: 0.5; } }
 
+        /* PERFORMANCE OPTIMIZATIONS: Critical for smooth 8K rendering */
         .video-container {
             position: relative;
             background: #000;
@@ -73,7 +77,8 @@
         img {
 			width: 100%;
 			display: block;
-			image-rendering: -webkit-optimize-contrast; /* Chrome/Safari */
+            /* Optimizes contrast for Chrome/Safari and crisp edges for Firefox */
+			image-rendering: -webkit-optimize-contrast;
 			image-rendering: crisp-edges;               /* Firefox */
 			backface-visibility: hidden;               /* Prevents flickers during fast updates */
 			transform: translateZ(0);                  /* Forces Hardware Acceleration */
@@ -92,7 +97,7 @@
 
     <h1>Live Detection Dashboard</h1>
 
-    <!-- Message displays if no cameras are found in initial Jinja load -->
+    <!-- IDLE MESSAGE: Displayed when no camera streams are active -->
     <div id="no-streams-msg" style="display: none;">
         No Active Streams Detected
     </div>
@@ -103,6 +108,7 @@
         </button>
     </div>
 
+    <!-- DYNAMIC GRID: Initialized via Jinja2 on first load; managed by JS thereafter -->
     <div id="camera-grid">
         {% for id in cameras %}
         <div class="camera-card" id="card-{{ id }}">
@@ -125,29 +131,12 @@
         const emptyMsg = document.getElementById('no-streams-msg');
         const refreshBtn = document.getElementById('refresh-btn');
 
-        // 1. WORKER CODE (Using standard quotes for the inner HTML)
-        // const workerCode = "let interval = null; " +
-        //     "async function fetchData() { " +
-        //     "  try { " +
-        //     "    const listRes = await fetch(self.location.origin + '/stream_list'); " +
-        //     "    if (listRes.ok) { " +
-        //     "      const activeIds = await listRes.json(); " +
-        //     "      let stats = {}; " +
-        //     "      /* ONLY call stats if there are active cameras */ " +
-        //     "      if (activeIds.length > 0) { " +
-        //     "        const statsRes = await fetch(self.location.origin + '/stream_stats'); " +
-        //     "        if (statsRes.ok) stats = await statsRes.json(); " +
-        //     "      } " +
-        //     "      self.postMessage({ activeIds, stats }); " +
-        //     "    } " +
-        //     "  } catch (err) { } " +
-        //     "} " +
-        //     "self.onmessage = function(e) { " +
-        //     "  if (e.data.action === 'start' || e.data.action === 'resume') { " +
-        //     "    if (!interval) { fetchData(); interval = setInterval(fetchData, 1000); } " +
-        //     "  } else if (e.data.action === 'pause') { clearInterval(interval); interval = null; } " +
-        //     "};";
-        // WORKER CODE with Adaptive Polling (10s idle, 1s active)
+        /*
+        WEB WORKER (ADAPTIVE POLLING):
+           Offloads data fetching to a background thread to keep the main UI responsive.
+           - Active mode: Polls every 1s when cameras are detected.
+           - Idle mode: Polls every 10s when the system is empty to save resources.
+        */
         const workerCode = "let currentDelay = 1000; " +
         "let timeoutId = null; " +
         "async function fetchData() { " +
@@ -181,22 +170,21 @@
         const blob = new Blob([workerCode], { type: 'application/javascript' });
         const worker = new Worker(URL.createObjectURL(blob));
 
+        /* UI SYNC: Adds/Removes camera cards as the backend starts/stops streams */
         worker.onmessage = function(e) {
-            // console.log("Main UI received data:", e.data);
             const { activeIds, stats } = e.data;
             syncUI(activeIds);
             updateUIStats(stats);
         };
 
-        // 2. REFACTORED syncUI (No nested backticks)
         function syncUI(activeIds) {
-            // Remove dead cards
+            // Remove cards for cameras that are no longer active
             document.querySelectorAll('.camera-card').forEach(card => {
                 const id = card.id.replace('card-', '');
                 if (!activeIds.includes(id)) card.remove();
             });
 
-            // Add new cards using standard string concatenation
+            // Dynamically inject new camera cards into the grid
             activeIds.forEach(id => {
                 if (!document.getElementById('card-' + id)) {
                     const card = document.createElement('div');
@@ -225,11 +213,9 @@
             emptyMsg.style.display = grid.children.length === 0 ? 'block' : 'none';
         }
 
+        /* Updates text values for FPS/Stats without reloading the video container */
         function updateUIStats(stats) {
             for (const [id, data] of Object.entries(stats)) {
-                // Log the IDs to the console to verify they match exactly
-                // console.log(`Updating stats for: ${id}`);
-
                 const fpsEl = document.getElementById(`fps-${id}`);
                 const inputfpsEl = document.getElementById(`inputfps-${id}`);
                 const targetfpsEl = document.getElementById(`targetfps-${id}`);
@@ -254,12 +240,14 @@
             }
         }
 
-        // 3. TAB VISIBILITY
+        // TAB VISIBILITY
         refreshBtn.onclick = () => {
             refreshBtn.style.borderColor = "#00ffcc";
             worker.postMessage({ action: 'force' });
             setTimeout(() => refreshBtn.style.borderColor = "#444", 500);
         };
+
+        /* BANDWIDTH SAVING: Pauses polling when the dashboard tab is hidden */
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 worker.postMessage({ action: 'pause' });

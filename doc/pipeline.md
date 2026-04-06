@@ -1,4 +1,4 @@
-# Detection using Fine-Tuned YOLO Model
+# Detection using Fine-Tuned YOLO Model (WIP)
 
 This guide assumes a YOLO model or fine-tuned YOLO model is available for detection.
 
@@ -29,7 +29,42 @@ The current implementation of the Smart Filtering pipeline is optimized for the 
 Drones are typically small in the video frames so if your use-case of interest has different objects, it may be beneficial to test the pipeline results on an existing test video for your use-case.
 
 For this case, we provide [``]() which annotates bbs of objects identified by the Smart Filtering pipeline onto each frame of the video for visual inspection.
+
+For testing purposes, we will manually deploy the fastapi Dockerfile as it contains the same setup used in the application AND start the test script.
+Here we will build the container, if not available:
+```bash
+REPO_DIR=`pwd`
+
+# Build container
+cd fastapi
+docker build --build-arg DEVICE=GPU -f Dockerfile -t lcc_fastapi:stream .
+```
+
+The script for testing the pipeline is already in `fastapi/tests/` and your test video is expected to be in the same directory (i.e. `anduril_swarm_8K.mp4`).
+To deploy this test, run the following command but modify the name of the test_video.
+The annotated video will be saved as `<test_video>_annotated.mp4` in the same directory.
+```bash
+docker run --rm -it --ipc=host --gpus all \
+--name filtering_test \
+--env DEVICE=GPU \
+-v ${REPO_DIR}/inputs:/watch_dir \
+-v ${REPO_DIR}/fastapi/resources:/home/resources \
+-v ${REPO_DIR}/fastapi/tests:/home/tests \
+lcc_fastapi:stream /bin/bash -c "python /home/tests/filtering_test.py -v <test_video>.mp4"
+```
+
+
 If you are not satisfied with the results, feel free to modify/optimize the pipeline further.
+
+```bash
+docker run --rm -it --ipc=host --gpus all \
+--name filtering_test \
+--env DEVICE=GPU \
+-v ${REPO_DIR}/inputs:/watch_dir \
+-v ${REPO_DIR}/fastapi/resources:/home/resources \
+-v ${REPO_DIR}/fastapi/tests:/home/tests \
+lcc_fastapi:stream bash
+```
 
 IDENTIFY OPTIMIZATION POINTS FOR EACH COMPONENT
 
@@ -38,7 +73,7 @@ Once satisfied with annotated results, you can proceed with running the full pip
 
 ## Pipeline Deployment
 
-DEPLLOYMENT
+DEPLOYMENT
 ./stop.sh –p
 ./start_app.sh –e GPU –o –m <unique name>
 

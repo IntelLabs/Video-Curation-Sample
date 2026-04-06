@@ -56,6 +56,7 @@ AVAILABLE_MODELS = [  # Default model listed first
 ]
 
 YOLO_BATCH_SIZE = 1
+ENABLE_VDMS = os.getenv("ENABLE_VDMS", True)
 DBPORT = 55555
 DETECTION_THRESHOLD = 0.25
 DEVICE_OV = "AUTO"
@@ -128,7 +129,8 @@ class VDMSPool:
         self.pool.put(conn)
 
 
-VDMS_POOL = VDMSPool(DBHOST, DBPORT, size=10)
+if ENABLE_VDMS:  # == True:
+    VDMS_POOL = VDMSPool(DBHOST, DBPORT, size=10)
 
 LOCKTIMEOUT_RETRIES = 5
 ERR_KEYWORDS = [
@@ -540,19 +542,26 @@ def get_models(model_tag: str, model_dir=PROJECT_PATH / "models"):  # , _st_side
     return model, model_path, labels
 
 
-#
-def get_display_frame_in_bytes(foi, frame_width, display_size=(1280, 720), quality=50):
-    if frame_width > display_size[0]:
+def get_display_frame_in_bytes(
+    foi, display_size=(960, 540), quality=50, return_bytes=True, device="CPU"
+):
+    H, W = foi.shape[:2]
+    dH, dW = display_size
+    if H == dH and W == dW:
+        ret, buffer = cv2.imencode(
+            ".jpg", foi, [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+        )
+        # print(f"[get_display_frame_in_bytes] display_size: {foi.shape}", flush=True)
+    else:
         display_frame = cv2.resize(foi, display_size, interpolation=cv2.INTER_NEAREST)
         ret, buffer = cv2.imencode(
             ".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality]
         )
-    else:
-        ret, buffer = cv2.imencode(
-            ".jpg", foi, [int(cv2.IMWRITE_JPEG_QUALITY), quality]
-        )
-    if ret:
+        # print(f"[get_display_frame_in_bytes] display_size: {display_frame.shape}", flush=True)
+    if ret and return_bytes:
         frame_bytes = buffer.tobytes()
+    elif ret:
+        frame_bytes = buffer
     else:
         frame_bytes = None
 
@@ -861,90 +870,176 @@ def release_clip_and_reencode(clip_key, _out_vid, clip_filename, tmp_file, targe
     return _out_vid
 
 
+# def merge_boxes_limit(bbs_full_res, dist_threshold=50, size_limit=640):
+#     """
+#     boxes: list of [x1, y1, x2, y2]
+#     dist_threshold: max distance between boxes to consider them 'connected'
+#     size_limit: max width/height for a merged box
+#     """
+#     if len(bbs_full_res) == 0:
+#         return []
+
+#     rects = np.array(bbs_full_res)
+#     num_boxes = len(rects)
+#     parent = list(range(num_boxes))
+
+#     def find(i):
+#         if parent[i] == i:
+#             return i
+#         parent[i] = find(parent[i])
+#         return parent[i]
+
+#     def union(i, j):
+#         root_i, root_j = find(i), find(j)
+#         if root_i != root_j:
+#             # Check if merging exceeds size limit
+#             temp_x1 = min(rects[root_i][0], rects[root_j][0])
+#             temp_y1 = min(rects[root_i][1], rects[root_j][1])
+#             temp_x2 = max(rects[root_i][2], rects[root_j][2])
+#             temp_y2 = max(rects[root_i][3], rects[root_j][3])
+
+#             if (temp_x2 - temp_x1 <= size_limit) and (temp_y2 - temp_y1 <= size_limit):
+#                 parent[root_i] = root_j
+#                 # Update the root rectangle to the new merged bounds
+#                 rects[root_j] = [temp_x1, temp_y1, temp_x2, temp_y2]
+
+#     # 2. Compare boxes (Optimized: only check nearby ones if sorted by X)
+#     for i in range(num_boxes):
+#         for j in range(i + 1, num_boxes):
+#             # Proximity check (Manhattan distance or check if boxes are 'close')
+#             dx = max(0, max(rects[i][0], rects[j][0]) - min(rects[i][2], rects[j][2]))
+#             dy = max(0, max(rects[i][1], rects[j][1]) - min(rects[i][3], rects[j][3]))
+
+#             if dx < dist_threshold and dy < dist_threshold:
+#                 union(i, j)
+
+#     # 3. Extract unique merged boxes
+#     final_boxes = []
+#     unique_roots = set()
+#     for i in range(num_boxes):
+#         root = find(i)
+#         if root not in unique_roots:
+#             unique_roots.add(root)
+#             final_boxes.append(rects[root])
+
+#     return final_boxes
+
+
 def merge_boxes_limit(bbs_full_res, dist_threshold=50, size_limit=640):
-    """
-    boxes: list of [x1, y1, x2, y2]
-    dist_threshold: max distance between boxes to consider them 'connected'
-    size_limit: max width/height for a merged box
-    """
-    if len(bbs_full_res) == 0:
+    if not bbs_full_res:
         return []
 
-    rects = np.array(bbs_full_res)
-    num_boxes = len(rects)
-    parent = list(range(num_boxes))
+    # 🏎️ Optimization 1: Sort by X to allow early exit
+    bbs_full_res = sorted(bbs_full_res, key=lambda x: x[0])
+    num_boxes = len(bbs_full_res)
+    merged = []
+    used = [False] * num_boxes
 
-    def find(i):
-        if parent[i] == i:
-            return i
-        parent[i] = find(parent[i])
-        return parent[i]
-
-    def union(i, j):
-        root_i, root_j = find(i), find(j)
-        if root_i != root_j:
-            # Check if merging exceeds size limit
-            temp_x1 = min(rects[root_i][0], rects[root_j][0])
-            temp_y1 = min(rects[root_i][1], rects[root_j][1])
-            temp_x2 = max(rects[root_i][2], rects[root_j][2])
-            temp_y2 = max(rects[root_i][3], rects[root_j][3])
-
-            if (temp_x2 - temp_x1 <= size_limit) and (temp_y2 - temp_y1 <= size_limit):
-                parent[root_i] = root_j
-                # Update the root rectangle to the new merged bounds
-                rects[root_j] = [temp_x1, temp_y1, temp_x2, temp_y2]
-
-    # 2. Compare boxes (Optimized: only check nearby ones if sorted by X)
     for i in range(num_boxes):
+        if used[i]:
+            continue
+
+        curr = bbs_full_res[i]
+        used[i] = True
+
+        # Greedy merge with neighbors
         for j in range(i + 1, num_boxes):
-            # Proximity check (Manhattan distance or check if boxes are 'close')
-            dx = max(0, max(rects[i][0], rects[j][0]) - min(rects[i][2], rects[j][2]))
-            dy = max(0, max(rects[i][1], rects[j][1]) - min(rects[i][3], rects[j][3]))
+            if used[j]:
+                continue
 
-            if dx < dist_threshold and dy < dist_threshold:
-                union(i, j)
+            # 🏎️ Optimization 2: Early Exit
+            # If the next box starts further away than the threshold,
+            # no subsequent boxes can possibly merge.
+            if bbs_full_res[j][0] - curr[2] > dist_threshold:
+                break
 
-    # 3. Extract unique merged boxes
-    final_boxes = []
-    unique_roots = set()
-    for i in range(num_boxes):
-        root = find(i)
-        if root not in unique_roots:
-            unique_roots.add(root)
-            final_boxes.append(rects[root])
+            other = bbs_full_res[j]
+            # Check Y proximity
+            dy = max(0, max(curr[1], other[1]) - min(curr[3], other[3]))
 
-    return final_boxes
+            if dy < dist_threshold:
+                # Calculate potential merge
+                nx1, ny1 = min(curr[0], other[0]), min(curr[1], other[1])
+                nx2, ny2 = max(curr[2], other[2]), max(curr[3], other[3])
+
+                if (nx2 - nx1 <= size_limit) and (ny2 - ny1 <= size_limit):
+                    curr = [nx1, ny1, nx2, ny2]
+                    used[j] = True
+        merged.append(curr)
+    return merged
+
+
+# def filter_contained_boxes(boxes, containment_thresh=0.90):
+#     """
+#     Deletes redundant boxes that are mostly inside another larger box.
+#     """
+#     if not boxes:
+#         return []
+
+#     # 1. Sort by area (Largest boxes first)
+#     boxes = sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
+#     keep = []
+
+#     for child in boxes:
+#         is_contained = False
+#         for parent in keep:
+#             # Intersection coordinates
+#             ix1, iy1 = max(child[0], parent[0]), max(child[1], parent[1])
+#             ix2, iy2 = min(child[2], parent[2]), min(child[3], parent[3])
+
+#             if ix2 > ix1 and iy2 > iy1:
+#                 inter_area = (ix2 - ix1) * (iy2 - iy1)
+#                 child_area = (child[2] - child[0]) * (child[3] - child[1])
+
+#                 # If child is 90% inside a larger box, it's redundant
+#                 if inter_area / child_area >= containment_thresh:
+#                     is_contained = True
+#                     break
+
+#         if not is_contained:
+#             keep.append(child)
+
+#     return keep
 
 
 def filter_contained_boxes(boxes, containment_thresh=0.90):
-    """
-    Deletes redundant boxes that are mostly inside another larger box.
-    """
-    if not boxes:
-        return []
+    if len(boxes) < 2:
+        return boxes
 
-    # 1. Sort by area (Largest boxes first)
-    boxes = sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
+    # Convert to NumPy for vectorized math
+    objs = np.array(boxes)
+    areas = (objs[:, 2] - objs[:, 0]) * (objs[:, 3] - objs[:, 1])
+
+    # Sort by area descending
+    order = areas.argsort()[::-1]
+    objs = objs[order]
+    areas = areas[order]
+
     keep = []
+    idx_list = np.arange(len(objs))
 
-    for child in boxes:
-        is_contained = False
-        for parent in keep:
-            # Intersection coordinates
-            ix1, iy1 = max(child[0], parent[0]), max(child[1], parent[1])
-            ix2, iy2 = min(child[2], parent[2]), min(child[3], parent[3])
+    while len(idx_list) > 0:
+        i = idx_list[0]
+        keep.append(objs[i].tolist())
+        if len(idx_list) == 1:
+            break
 
-            if ix2 > ix1 and iy2 > iy1:
-                inter_area = (ix2 - ix1) * (iy2 - iy1)
-                child_area = (child[2] - child[0]) * (child[3] - child[1])
+        # Vectorized Intersection over Union (IoU) / Containment
+        others = objs[idx_list[1:]]
+        ix1 = np.maximum(objs[i, 0], others[:, 0])
+        iy1 = np.maximum(objs[i, 1], others[:, 1])
+        ix2 = np.minimum(objs[i, 2], others[:, 2])
+        iy2 = np.minimum(objs[i, 3], others[:, 3])
 
-                # If child is 90% inside a larger box, it's redundant
-                if inter_area / child_area >= containment_thresh:
-                    is_contained = True
-                    break
+        iw = np.maximum(0, ix2 - ix1)
+        ih = np.maximum(0, iy2 - iy1)
+        inter_area = iw * ih
 
-        if not is_contained:
-            keep.append(child)
+        # Calculate how much 'others' are contained within 'i'
+        containment = inter_area / areas[idx_list[1:]]
+
+        # Only keep boxes that are NOT mostly contained within the current box
+        idx_list = idx_list[1:][containment < containment_thresh]
 
     return keep
 
