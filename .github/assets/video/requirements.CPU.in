@@ -1,0 +1,11 @@
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+
+torch==2.10.0+cpu
+torchvision==0.25.0+cpu
+nncf>=2.19.0
+numpy>=1.26.4
+pip>=26.0.1
+
+pillow>=12.1.1
+pygments>=2.20.0

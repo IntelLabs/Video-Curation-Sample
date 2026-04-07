@@ -19,8 +19,7 @@ COPY requirements.* /home/
 ARG DEVICE="CPU"
 ENV DEVICE="${DEVICE}"
 
-RUN python -m pip install pip --upgrade  --no-cache-dir  && \
-    pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+RUN pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 RUN if [ "${DEVICE}" = "CPU" ]; then \
         pip3 install --no-cache-dir --require-hashes -r /home/requirements.${DEVICE}.txt --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple; \
     else \
