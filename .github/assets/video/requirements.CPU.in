@@ -6,6 +6,8 @@ torchvision==0.25.0+cpu
 nncf>=2.19.0
 numpy>=1.26.4
 pip>=26.0.1
+protobuf>=5.29.6,<6  # For VDMS
+vdms>=0.0.23
 
 pillow>=12.1.1
 pygments>=2.20.0
