@@ -1,6 +1,5 @@
 .venv*
 .vscode
-*.in
 *.log
 **/__pycache__/
 **/_*
