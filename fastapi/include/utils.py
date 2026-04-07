@@ -11,7 +11,6 @@ from math import ceil
 from pathlib import Path
 from random import randint
 
-import cupy
 import cv2
 import numpy as np
 from pydantic import BaseModel
@@ -91,9 +90,12 @@ UDF_HOST = os.getenv("UDF_HOST", "udf-service")
 UDF_PORT = 5011
 
 if DEVICE == "GPU":
+    import cupy
+
     EXPORT_BATCH_SIZE = int(os.environ.get("GPU_BATCH_SIZE", 1))
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     print("[!] USING GPU")
+
 else:
     EXPORT_BATCH_SIZE = int(os.environ.get("CPU_BATCH_SIZE", 1))  # 8
     print("[!] USING CPU")
@@ -148,75 +150,6 @@ MAX_DETECTIONS = 100
 # Plot variables
 THICKNESS_SCALE_FACTOR = 1e-3
 FONT_SCALE_FACTOR = 1e-3
-
-bbox_kernel = cupy.ElementwiseKernel(
-    "S label_image, int32 width",
-    "raw T bboxes",
-    """
-    if (label_image > 0) {
-        int label = (int)label_image;
-
-        int y = i / width;
-        int x = i % width;
-        // Atomic operations to find min/max coordinates
-        atomicMin(&bboxes[label * 4 + 0], y); // min_y
-        atomicMin(&bboxes[label * 4 + 1], x); // min_x
-        atomicMax(&bboxes[label * 4 + 2], y); // max_y
-        atomicMax(&bboxes[label * 4 + 3], x); // max_x
-    }
-    """,
-    "bbox_kernel",
-)
-
-bbox_area_kernel = cupy.ElementwiseKernel(
-    "S label_image, int32 width",
-    "raw T bboxes, raw T areas",
-    """
-    if (label_image > 0) {
-        int label = (int)label_image;
-        int y = i / width;
-        int x = i % width;
-
-        // 1. Update Bounding Box
-        atomicMin(&bboxes[label * 4 + 0], y); // min_y
-        atomicMin(&bboxes[label * 4 + 1], x); // min_x
-        atomicMax(&bboxes[label * 4 + 2], y); // max_y
-        atomicMax(&bboxes[label * 4 + 3], x); // max_x
-
-        // 2. Increment Area (Count pixels)
-        atomicAdd(&areas[label], 1);
-    }
-    """,
-    "bbox_area_kernel",
-)
-
-threshold_dilate_fused_kernel = cupy.ElementwiseKernel(
-    "T mask, int32 threshold, int32 width, int32 height",
-    "raw T morphed",
-    """
-    // 1. Threshold
-    bool is_active = mask > threshold;
-
-    // 2. Simple 3x3 Dilation (Fuse directly into output)
-    if (is_active) {
-        int y = i / width;
-        int x = i % width;
-
-        // 2. 3x3 Dilation Expansion
-        // Writes 255 to the neighbors of any pixel above threshold
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
-                int ny = y + dy;
-                int nx = x + dx;
-                if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-                    morphed[ny * width + nx] = 255;
-                }
-            }
-        }
-    }
-    """,
-    "threshold_dilate_fused",
-)
 
 
 YOLO_CLASS_NAMES = [
@@ -330,6 +263,115 @@ for h in PLOT_HEXS:
     DETECTION_COLORS.append(
         tuple(int(f"#{h}"[1 + i : 1 + i + 2], 16) for i in (0, 2, 4))
     )
+
+
+if DEVICE == "GPU":
+    bbox_kernel = cupy.ElementwiseKernel(
+        "S label_image, int32 width",
+        "raw T bboxes",
+        """
+        if (label_image > 0) {
+            int label = (int)label_image;
+
+            int y = i / width;
+            int x = i % width;
+            // Atomic operations to find min/max coordinates
+            atomicMin(&bboxes[label * 4 + 0], y); // min_y
+            atomicMin(&bboxes[label * 4 + 1], x); // min_x
+            atomicMax(&bboxes[label * 4 + 2], y); // max_y
+            atomicMax(&bboxes[label * 4 + 3], x); // max_x
+        }
+        """,
+        "bbox_kernel",
+    )
+
+    bbox_area_kernel = cupy.ElementwiseKernel(
+        "S label_image, int32 width",
+        "raw T bboxes, raw T areas",
+        """
+        if (label_image > 0) {
+            int label = (int)label_image;
+            int y = i / width;
+            int x = i % width;
+
+            // 1. Update Bounding Box
+            atomicMin(&bboxes[label * 4 + 0], y); // min_y
+            atomicMin(&bboxes[label * 4 + 1], x); // min_x
+            atomicMax(&bboxes[label * 4 + 2], y); // max_y
+            atomicMax(&bboxes[label * 4 + 3], x); // max_x
+
+            // 2. Increment Area (Count pixels)
+            atomicAdd(&areas[label], 1);
+        }
+        """,
+        "bbox_area_kernel",
+    )
+
+    threshold_dilate_fused_kernel = cupy.ElementwiseKernel(
+        "T mask, int32 threshold, int32 width, int32 height",
+        "raw T morphed",
+        """
+        // 1. Threshold
+        bool is_active = mask > threshold;
+
+        // 2. Simple 3x3 Dilation (Fuse directly into output)
+        if (is_active) {
+            int y = i / width;
+            int x = i % width;
+
+            // 2. 3x3 Dilation Expansion
+            // Writes 255 to the neighbors of any pixel above threshold
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    int ny = y + dy;
+                    int nx = x + dx;
+                    if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                        morphed[ny * width + nx] = 255;
+                    }
+                }
+            }
+        }
+        """,
+        "threshold_dilate_fused",
+    )
+
+    def gpumat2cupy(gpu_mat):
+        """Bridge OpenCV GpuMat to CuPy without copying data."""
+        # 1. Get properties from GpuMat
+        w, h = gpu_mat.size()
+        # Check if it's 3-channel (CV_8UC3) or 1-channel (CV_8UC1)
+        channels = 3 if gpu_mat.type() == cv2.CV_8UC3 else 1
+
+        if channels == 3:
+            shape = (h, w, 3)
+            # strides = (bytes_per_row, bytes_per_pixel, bytes_per_channel)
+            strides = (gpu_mat.step, 3, 1)
+        else:
+            shape = (h, w)
+            strides = (gpu_mat.step, 1)
+
+        # 2. Map OpenCV types to CuPy typestrs
+        # CV_8UC1 is 'u1' (unsigned 1-byte), etc.
+        # type_map = {cv2.CV_8U: "|u1", cv2.CV_32F: "<f4", cv2.CV_8UC1: "|u1"}
+
+        # 3. Create the __cuda_array_interface__ dictionary
+        # This tells CuPy where the data is and how it's shaped
+        if_dict = {
+            "version": 3,
+            "shape": shape,
+            "typestr": "|u1",
+            # "descr": [("", type_map.get(gpu_mat.type(), "|u1"))],
+            "data": (gpu_mat.cudaPtr(), False),  # (Pointer, Read-only)
+            "strides": strides,
+        }
+
+        # 4. Create a dummy object with the interface and wrap it in CuPy
+        class Holder:
+            pass
+
+        holder = Holder()
+        holder.__cuda_array_interface__ = if_dict
+        return cupy.asarray(holder)
 
 
 def get_detection_color(index, is_bgr=False):
@@ -566,45 +608,6 @@ def get_display_frame_in_bytes(
         frame_bytes = None
 
     return frame_bytes
-
-
-def gpumat2cupy(gpu_mat):
-    """Bridge OpenCV GpuMat to CuPy without copying data."""
-    # 1. Get properties from GpuMat
-    w, h = gpu_mat.size()
-    # Check if it's 3-channel (CV_8UC3) or 1-channel (CV_8UC1)
-    channels = 3 if gpu_mat.type() == cv2.CV_8UC3 else 1
-
-    if channels == 3:
-        shape = (h, w, 3)
-        # strides = (bytes_per_row, bytes_per_pixel, bytes_per_channel)
-        strides = (gpu_mat.step, 3, 1)
-    else:
-        shape = (h, w)
-        strides = (gpu_mat.step, 1)
-
-    # 2. Map OpenCV types to CuPy typestrs
-    # CV_8UC1 is 'u1' (unsigned 1-byte), etc.
-    # type_map = {cv2.CV_8U: "|u1", cv2.CV_32F: "<f4", cv2.CV_8UC1: "|u1"}
-
-    # 3. Create the __cuda_array_interface__ dictionary
-    # This tells CuPy where the data is and how it's shaped
-    if_dict = {
-        "version": 3,
-        "shape": shape,
-        "typestr": "|u1",
-        # "descr": [("", type_map.get(gpu_mat.type(), "|u1"))],
-        "data": (gpu_mat.cudaPtr(), False),  # (Pointer, Read-only)
-        "strides": strides,
-    }
-
-    # 4. Create a dummy object with the interface and wrap it in CuPy
-    class Holder:
-        pass
-
-    holder = Holder()
-    holder.__cuda_array_interface__ = if_dict
-    return cupy.asarray(holder)
 
 
 # Manual FPS calculation if OpenCV reports 0

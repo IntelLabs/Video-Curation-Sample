@@ -16,6 +16,7 @@ from datetime import datetime
 
 import cv2
 import numpy as np
+import torch
 
 # Force OpenCV to use a single thread for its operations.
 # This prevents internal OpenCV threads from "racing" against your AI logic.
@@ -105,8 +106,6 @@ else:
 if DEVICE == "GPU":
     model_path += ".engine"
     # 1. Force PyTorch to initialize the CUDA context
-    import torch
-
     if torch.cuda.is_available():
         torch.cuda.set_device(0)
         torch.cuda.empty_cache()

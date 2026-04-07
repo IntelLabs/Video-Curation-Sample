@@ -58,7 +58,7 @@ ENV PATH="$VIRTUAL_ENV/bin:/usr/local/cuda/bin:${PATH}"
 ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
 
 RUN pip3 install pip --no-cache-dir --upgrade && \
-    pip3 install --no-cache-dir "torch>=2.9.1" "torchvision>=0.24.1" "numpy<2.0"
+    pip3 install --no-cache-dir "torch==2.10.0" "torchvision==0.25.0" "numpy==1.26.4"
 
 
 ARG PYTHON_VERSION=3.10
@@ -135,20 +135,16 @@ RUN if [ "${DEVICE}" != "CPU" ]; then \
     fi
 
 COPY requirements.* /home/
-# RUN python -m pip install pip --upgrade  --no-cache-dir  && \
-#     pip3 install --no-cache-dir -r requirements.in && \
-#     if [ "${DEVICE}" = "CPU" ]; then \
-#         pip3 install --no-cache-dir -r requirements.CPU.in; \
+# RUN if [ "${DEVICE}" = "CPU" ]; then \
+#         pip3 install --no-cache-dir -r requirements.CPU.in --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple; \
 #     else \
 #         apt-get update; \
 #         apt-get install -y -q --no-install-recommends cuda-toolkit-12-4  libcudnn9-cuda-12  libnvinfer10 libnvonnxparsers10 ibnvinfer-plugin10; \
 #         rm -rf /var/lib/apt/lists/*; \
 #         pip3 install --no-cache-dir -r requirements.GPU.in; \
 #     fi;
-RUN python -m pip install pip --upgrade  --no-cache-dir  && \
-    pip3 install --no-cache-dir --require-hashes -r requirements.txt && \
-    if [ "${DEVICE}" = "CPU" ]; then \
-        pip3 install --no-cache-dir --require-hashes -r requirements.CPU.txt; \
+RUN if [ "${DEVICE}" = "CPU" ]; then \
+        pip3 install --no-cache-dir --require-hashes -r /home/requirements.CPU.txt --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple; \
     else \
         apt-get update; \
         apt-get install -y -q --no-install-recommends cuda-toolkit-12-4  libcudnn9-cuda-12  libnvinfer10 libnvonnxparsers10 ibnvinfer-plugin10; \
