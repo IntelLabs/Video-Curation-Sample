@@ -19,13 +19,12 @@ COPY requirements.* /home/
 ARG DEVICE="CPU"
 ENV DEVICE="${DEVICE}"
 
+RUN pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 RUN if [ "${DEVICE}" = "CPU" ]; then \
-        pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" --index-url https://download.pytorch.org/whl/cpu; \
+        pip3 install --no-cache-dir --require-hashes -r /home/requirements.${DEVICE}.txt --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple; \
     else \
-        pip3 install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" ; \
+        pip3 install --no-cache-dir --require-hashes -r /home/requirements.${DEVICE}.txt ; \
     fi;
-RUN pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt && \
-    pip3 install --no-cache-dir --require-hashes -r /home/requirements.${DEVICE}.txt
 
 RUN omz_downloader --list /home/resources/models/models.lst -o /home/resources/models --precisions FP16
 
