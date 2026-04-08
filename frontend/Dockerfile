@@ -10,8 +10,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 # fixes CVE-2023-4911 vulnerability on Ubuntu 22.04
-RUN apt-get update
-RUN apt-get install --only-upgrade libc-bin libc6  && \
+# hadolint ignore=DL3008
+RUN apt-get update && \
+    apt-get install -y --only-upgrade --no-install-recommends libc-bin libc6  && \
     apt-get install -y -q --no-install-recommends python3-pip && \
     rm -rf /var/lib/apt/lists/*
 

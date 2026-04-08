@@ -445,9 +445,6 @@ class BaseHandler:
             if len(self.active_streams) == 0:
                 self.warmup()
         else:
-            self.operation_device_map = PipelineMapping(
-                detection_device="cpu"
-            )  # No CUDA HERE
             self.prepare_cpu_pipeline()
 
         # Start dedicated inference thread and timers
@@ -514,7 +511,7 @@ class BaseHandler:
         self.mask_history = deque(maxlen=bkgd_mask_queue_size)
         self.mask_history.append(self.prev_bkgd)
 
-    def prepare_cpu_pipeline(self, method="knn"):
+    def prepare_cpu_pipeline(self, method="mog2"):
         self.operation_device_map = PipelineMapping()  # "full_cpu"
         self.device_input = self.operation_device_map.detection_device
 
@@ -1228,7 +1225,7 @@ class VideoStreamHandler_WIP(BaseHandler):
                         frame, frame_num, repeat_count=repeat_count
                     )
                 else:
-                    inf_data = self.test_full_cpu_detection_gpu(
+                    inf_data = self.test_full_cpu(
                         frame, frame_num, repeat_count=repeat_count
                     )
 
@@ -1348,7 +1345,7 @@ class VideoStreamHandler_WIP(BaseHandler):
             "repeat_count": repeat_count,
         }
 
-    def test_full_cpu_detection_gpu(self, frame, frameNum, repeat_count=1):
+    def test_full_cpu(self, frame, frameNum, repeat_count=1):
         """
         CPU-Based Motion Detection Pipeline (Producer).
 
@@ -1364,11 +1361,11 @@ class VideoStreamHandler_WIP(BaseHandler):
         """
         # Resize the 8K frame to a smaller 'model' size (e.g., 640x640)
         # Using INTER_NEAREST as it is the fastest CPU interpolation method.
-        H, W = self.resize_h, self.resize_w
+        # H, W = self.resize_h, self.resize_w
         self.cpu_resized_frame = cv2.resize(
-            frame, (W, H), interpolation=cv2.INTER_NEAREST
+            frame, (self.resize_w, self.resize_h), interpolation=cv2.INTER_NEAREST
         )
-        if ENABLE_QUERYING:
+        if ENABLE_QUERYING and self.video_writer:
             for _ in range(repeat_count):
                 self.video_writer.write(self.cpu_resized_frame)
 

@@ -7,15 +7,15 @@ nvidia-cudnn-cu12
 onnx>=1.21.0
 onnxruntime-gpu>=1.23.2
 onnxslim>=0.1.82
-openvino-dev>=2024.6.0
 pip>=26.0.1
+protobuf>=5.29.6,<6  # For VDMS
 requests>=2.33.0
 tensorrt_cu12==10.14.1.48.post1
 torch==2.10.0
 torchvision==0.25.0
 ultralytics>=8.4.8
 uvicorn>=0.42.0
-vdms>=0.0.22
+vdms>=0.0.23
 wheel>=0.46.3
 
 pillow>=12.1.1

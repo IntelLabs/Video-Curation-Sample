@@ -1,6 +1,6 @@
 # Fine-Tune YOLO Model
 
-This quide provides details on how to fine-tune a YOLO model using Ultralytics.
+This quide provides details on how to fine-tune a YOLO model using Ultralytics on GPU ONLY.
 For simplicity, the use-case for this guide is Drone Detection.
 Therefore, the goal is to finetune the YOLO11n model to detect only one class (`drone`).
 
@@ -59,6 +59,7 @@ Please see below for instructions for deploying container via `docker` and `dock
 - **Docker:** For this option, be sure to build container first.  You can start the container and finetune script via run command.
   ```bash
   REPO_DIR=`pwd`
+  LOCAL_DATA_DIR=/path/to/your/actual/data/directory
 
   # Build container
   cd finetune
@@ -69,7 +70,7 @@ Please see below for instructions for deploying container via `docker` and `dock
   --name finetune_container \
   -v ${REPO_DIR}/inputs:/watch_dir \
   -v ${REPO_DIR}/finetune/app:/home \
-  -v /data1/dataset:/datasets \
+  -v ${LOCAL_DATA_DIR}:/datasets \
   lcc_finetune:latest /bin/bash -c "python finetune.py"
   ```
 - **Docker Compose:** If different arguments are needed, please update `command:` in `finetune/docker-compose.yml` prior to deployment.
