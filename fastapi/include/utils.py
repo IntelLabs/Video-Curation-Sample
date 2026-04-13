@@ -66,8 +66,6 @@ IOU_THRESHOLD = 0.7
 MODEL_PRECISION = "FP16"
 MODEL_W, MODEL_H = (640, 640)
 NUM_USUABLE_CPUS = 2
-TARGET_FPS = 15
-FRAME_INTERVAL = 1.0 / TARGET_FPS  # ~0.0667 seconds
 WRITER_FOURCC = cv2.VideoWriter_fourcc(*"mp4v")  # avc1, mp4v
 
 CODE_DIR = os.getenv("CODE_DIR", "/home")
@@ -131,8 +129,7 @@ class VDMSPool:
         self.pool.put(conn)
 
 
-if ENABLE_VDMS:  # == True:
-    VDMS_POOL = VDMSPool(DBHOST, DBPORT, size=10)
+VDMS_POOL = None
 
 LOCKTIMEOUT_RETRIES = 5
 ERR_KEYWORDS = [
@@ -711,6 +708,11 @@ def metadata2vdms(
     width,
     height,
 ):
+    global VDMS_POOL
+
+    if VDMS_POOL is None:
+        VDMS_POOL = VDMSPool(DBHOST, DBPORT, size=10)
+
     if DEBUG == "1":
         print(
             f"[TIMING],start_clip_metadata,{clip_key},{time.time()}",
@@ -765,10 +767,43 @@ def metadata2vdms(
         VDMS_POOL.return_connection(db)
 
 
-# Extract metadata from object model results
-def extract_metadata_from_results(
-    stream_name, frameNum, results, img_size, fps=TARGET_FPS
+# method to send metadata to VDMS once clip is saved w/ retry mechanism
+def metadata2vdms_with_retry(
+    clip_key,
+    clip_filename,
+    clip_metadata,
+    width,
+    height,
+    max_retries=LOCKTIMEOUT_RETRIES,
 ):
+    """
+    Attempts to send metadata to VDMS with exponential backoff.
+    """
+    retry_count = 0
+    while retry_count < max_retries:
+        try:
+            # Attempt the actual upload (using your existing utility)
+            success = metadata2vdms(
+                clip_key, clip_filename, clip_metadata, width, height
+            )
+            if success:
+                print(f" [VDMS] Successfully uploaded {clip_key}")
+                return True
+        except Exception as e:
+            retry_count += 1
+            wait_time = 2**retry_count  # 2s, 4s, 8s, 16s...
+            print(
+                f" [RETRY] VDMS upload failed for {clip_key} (Attempt {retry_count}/{max_retries}). "
+                f"Retrying in {wait_time}s... Error: {e}"
+            )
+            time.sleep(wait_time)
+
+    print(f" [FAILED] Could not send {clip_key} to VDMS after {max_retries} attempts.")
+    return False
+
+
+# Extract metadata from object model results
+def extract_metadata_from_results(stream_name, frameNum, results, img_size):
     fW, fH = img_size
     metadata = dict()
     try:
@@ -873,136 +908,59 @@ def release_clip_and_reencode(clip_key, _out_vid, clip_filename, tmp_file, targe
     return _out_vid
 
 
-# def merge_boxes_limit(bbs_full_res, dist_threshold=50, size_limit=640):
-#     """
-#     boxes: list of [x1, y1, x2, y2]
-#     dist_threshold: max distance between boxes to consider them 'connected'
-#     size_limit: max width/height for a merged box
-#     """
-#     if len(bbs_full_res) == 0:
-#         return []
-
-#     rects = np.array(bbs_full_res)
-#     num_boxes = len(rects)
-#     parent = list(range(num_boxes))
-
-#     def find(i):
-#         if parent[i] == i:
-#             return i
-#         parent[i] = find(parent[i])
-#         return parent[i]
-
-#     def union(i, j):
-#         root_i, root_j = find(i), find(j)
-#         if root_i != root_j:
-#             # Check if merging exceeds size limit
-#             temp_x1 = min(rects[root_i][0], rects[root_j][0])
-#             temp_y1 = min(rects[root_i][1], rects[root_j][1])
-#             temp_x2 = max(rects[root_i][2], rects[root_j][2])
-#             temp_y2 = max(rects[root_i][3], rects[root_j][3])
-
-#             if (temp_x2 - temp_x1 <= size_limit) and (temp_y2 - temp_y1 <= size_limit):
-#                 parent[root_i] = root_j
-#                 # Update the root rectangle to the new merged bounds
-#                 rects[root_j] = [temp_x1, temp_y1, temp_x2, temp_y2]
-
-#     # 2. Compare boxes (Optimized: only check nearby ones if sorted by X)
-#     for i in range(num_boxes):
-#         for j in range(i + 1, num_boxes):
-#             # Proximity check (Manhattan distance or check if boxes are 'close')
-#             dx = max(0, max(rects[i][0], rects[j][0]) - min(rects[i][2], rects[j][2]))
-#             dy = max(0, max(rects[i][1], rects[j][1]) - min(rects[i][3], rects[j][3]))
-
-#             if dx < dist_threshold and dy < dist_threshold:
-#                 union(i, j)
-
-#     # 3. Extract unique merged boxes
-#     final_boxes = []
-#     unique_roots = set()
-#     for i in range(num_boxes):
-#         root = find(i)
-#         if root not in unique_roots:
-#             unique_roots.add(root)
-#             final_boxes.append(rects[root])
-
-#     return final_boxes
-
-
-def merge_boxes_limit(bbs_full_res, dist_threshold=50, size_limit=640):
-    if not bbs_full_res:
+def merge_boxes_limit(boxes, dist_threshold=25, min_area=32, max_size=640):
+    if not boxes:
         return []
 
-    # 🏎️ Optimization 1: Sort by X to allow early exit
-    bbs_full_res = sorted(bbs_full_res, key=lambda x: x[0])
-    num_boxes = len(bbs_full_res)
-    merged = []
-    used = [False] * num_boxes
+    # EARLY FILTER: Remove noise (dots/specks) immediately
+    # area = width * height
+    valid_boxes = []
+    for b in boxes:
+        w, h = b[2] - b[0], b[3] - b[1]
+        if (w * h) >= min_area:
+            valid_boxes.append(list(b))
 
-    for i in range(num_boxes):
-        if used[i]:
-            continue
+    boxes = valid_boxes
+    merged_any = True
 
-        curr = bbs_full_res[i]
-        used[i] = True
+    while merged_any:
+        merged_any = False
+        new_boxes = []
 
-        # Greedy merge with neighbors
-        for j in range(i + 1, num_boxes):
-            if used[j]:
-                continue
+        while boxes:
+            current = boxes.pop(0)
+            # has_merged = False
 
-            # 🏎️ Optimization 2: Early Exit
-            # If the next box starts further away than the threshold,
-            # no subsequent boxes can possibly merge.
-            if bbs_full_res[j][0] - curr[2] > dist_threshold:
-                break
+            for i, other in enumerate(boxes):
+                # Check Proximity: Are they close enough to consider?
+                # (Expanding 'current' by distance_threshold for the check)
+                if not (
+                    current[2] + dist_threshold < other[0]
+                    or other[2] + dist_threshold < current[0]
+                    or current[3] + dist_threshold < other[1]
+                    or other[3] + dist_threshold < current[1]
+                ):
+                    # Potential Dimensions: Calculate what the new box would be
+                    new_x1 = min(current[0], other[0])
+                    new_y1 = min(current[1], other[1])
+                    new_x2 = max(current[2], other[2])
+                    new_y2 = max(current[3], other[3])
 
-            other = bbs_full_res[j]
-            # Check Y proximity
-            dy = max(0, max(curr[1], other[1]) - min(curr[3], other[3]))
+                    new_w = new_x2 - new_x1
+                    new_h = new_y2 - new_y1
 
-            if dy < dist_threshold:
-                # Calculate potential merge
-                nx1, ny1 = min(curr[0], other[0]), min(curr[1], other[1])
-                nx2, ny2 = max(curr[2], other[2]), max(curr[3], other[3])
+                    # Size Constraint: Only merge if it doesn't exceed the limit
+                    if new_w <= max_size and new_h <= max_size:
+                        current = [new_x1, new_y1, new_x2, new_y2]
+                        boxes.pop(i)
+                        # has_merged = True
+                        merged_any = True
+                        break
 
-                if (nx2 - nx1 <= size_limit) and (ny2 - ny1 <= size_limit):
-                    curr = [nx1, ny1, nx2, ny2]
-                    used[j] = True
-        merged.append(curr)
-    return merged
+            new_boxes.append(current)
+        boxes = new_boxes
 
-
-# def filter_contained_boxes(boxes, containment_thresh=0.90):
-#     """
-#     Deletes redundant boxes that are mostly inside another larger box.
-#     """
-#     if not boxes:
-#         return []
-
-#     # 1. Sort by area (Largest boxes first)
-#     boxes = sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
-#     keep = []
-
-#     for child in boxes:
-#         is_contained = False
-#         for parent in keep:
-#             # Intersection coordinates
-#             ix1, iy1 = max(child[0], parent[0]), max(child[1], parent[1])
-#             ix2, iy2 = min(child[2], parent[2]), min(child[3], parent[3])
-
-#             if ix2 > ix1 and iy2 > iy1:
-#                 inter_area = (ix2 - ix1) * (iy2 - iy1)
-#                 child_area = (child[2] - child[0]) * (child[3] - child[1])
-
-#                 # If child is 90% inside a larger box, it's redundant
-#                 if inter_area / child_area >= containment_thresh:
-#                     is_contained = True
-#                     break
-
-#         if not is_contained:
-#             keep.append(child)
-
-#     return keep
+    return boxes
 
 
 def filter_contained_boxes(boxes, containment_thresh=0.90):

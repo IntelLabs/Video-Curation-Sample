@@ -79,7 +79,8 @@
 			display: block;
             /* Optimizes contrast for Chrome/Safari and crisp edges for Firefox */
 			image-rendering: -webkit-optimize-contrast;
-			image-rendering: crisp-edges;               /* Firefox */
+			/*image-rendering: crisp-edges; */              /* Firefox */
+            image-rendering: auto;                      /* Smoother for high-res 8K */
 			backface-visibility: hidden;               /* Prevents flickers during fast updates */
 			transform: translateZ(0);                  /* Forces Hardware Acceleration */
 		}
@@ -141,22 +142,24 @@
         "let timeoutId = null; " +
         "async function fetchData() { " +
         "  try { " +
-        "    const listRes = await fetch(self.location.origin + '/stream_list'); " +
-        "    if (listRes.ok) { " +
-        "      const activeIds = await listRes.json(); " +
+        // "    const listRes = await fetch(self.location.origin + '/stream_list'); " +
+        "    const response = await fetch(self.location.origin + '/dashboard_stats'); " +
+        "    if (response.ok) { " +
+        "      const stats = await response.json(); " +
+        "      const activeIds = Object.keys(stats); " +
         "      if (activeIds.length > 0) { " +
         "        /* ACTIVE: Poll fast (1s) */ " +
         "        currentDelay = 1000; " +
-        "        const statsRes = await fetch(self.location.origin + '/stream_stats'); " +
-        "        const stats = statsRes.ok ? await statsRes.json() : {}; " +
+        // "        const statsRes = await fetch(self.location.origin + '/stream_stats'); " +
+        // "        const stats = statsRes.ok ? await statsRes.json() : {}; " +
         "        self.postMessage({ activeIds, stats }); " +
         "      } else { " +
-        "        /* IDLE: Poll slow (10s) */ " +
-        "        currentDelay = 10000; " +
+        "        /* IDLE: Poll slow (5s) */ " +
+        "        currentDelay = 5000; " +
         "        self.postMessage({ activeIds: [], stats: {} }); " +
         "      } " +
         "    } " +
-        "  } catch (err) { } " +
+        "  } catch (err) { currentDelay = 5000; } " +
         "  timeoutId = setTimeout(fetchData, currentDelay); " +
         "} " +
         "self.onmessage = function(e) { " +
@@ -173,15 +176,19 @@
         /* UI SYNC: Adds/Removes camera cards as the backend starts/stops streams */
         worker.onmessage = function(e) {
             const { activeIds, stats } = e.data;
-            syncUI(activeIds);
+            syncUI(activeIds, stats);
             updateUIStats(stats);
         };
 
-        function syncUI(activeIds) {
+        function syncUI(activeIds, stats) {
             // Remove cards for cameras that are no longer active
             document.querySelectorAll('.camera-card').forEach(card => {
                 const id = card.id.replace('card-', '');
-                if (!activeIds.includes(id)) card.remove();
+                const streamStats = stats[id];
+                if (!activeIds.includes(id) || (streamStats && streamStats.is_streaming === false)) {
+                    console.log("Removing dead stream:", id);
+                    card.remove();
+                }
             });
 
             // Dynamically inject new camera cards into the grid

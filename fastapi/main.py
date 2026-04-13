@@ -6,26 +6,31 @@ warnings.filterwarnings("ignore", message="The value of the smallest subnormal f
 import asyncio
 import logging
 import os
+import shutil
 import sys
 import time
+from datetime import datetime
+
+import psutil
+from include.handlers import ENABLE_QUERYING, SHARED_MODEL, lifespan
+
+if ENABLE_QUERYING:
+    from include.handlers import (
+        all_metadata,
+        clip_completion_tracker,
+        send_metadata_queue,
+    )
+
 
 from include.handlers import VideoStreamHandler_WIP as VideoStreamHandler
-from include.handlers import lifespan
 from include.utils import DEBUG, StreamRequest
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-# from include.handlers import VideoStreamHandler, lifespan  # Choppy replay; up to 11 fps
-# from include.handlers import VideoStreamHandler1 as VideoStreamHandler, lifespan  # Choppy replay; up to 11 fps
-# from include.handlers import VideoStreamHandler2 as VideoStreamHandler, lifespan  # Really choppy replay w/ slight rewind; up to 15 fps
-# from include.handlers import VideoStreamHandler3 as VideoStreamHandler, lifespan  # Choppy replay likw 1; up to 10.5 fps
-# from include.handlers import VideoStreamHandler4 as VideoStreamHandler, lifespan  # Choppy; up to 11.4 fps
-# from include.handlers import VideoStreamHandler5 as VideoStreamHandler, lifespan
-# from include.handlers import VideoStreamHandler6 as VideoStreamHandler, lifespan
-
 # ----- LOGGING CONFIGURATION -----
+# Standardizes logs across the application and uvicorn server
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -37,16 +42,22 @@ uvicorn_logger.setLevel(logging.INFO)
 
 
 # ----- APPLICATION INITIALIZATION -----
-# The lifespan parameter handles startup (model loading) and shutdown (memory cleanup)
+# The lifespan parameter handles startup and shutdown
 app = FastAPI(lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
 
 
+# ----- APPLICATION ENDPOINTS -----
 @app.get("/")
 async def index(request: Request):
     """
     Renders the main monitoring dashboard.
     Passes current active stream IDs to the frontend for UI synchronization.
+    Args:
+        request (Request): The FastAPI request object.
+
+    Returns:
+        TemplateResponse: HTML page with the list of currently active camera IDs.
     """
     curr_keys = list(request.app.state.active_streams.keys())
     if DEBUG == "1":
@@ -60,20 +71,38 @@ async def index(request: Request):
 @app.post("/stream")
 async def stream_video(data: StreamRequest, request: Request):
     """
-    Initializes a new VideoStreamHandler for a specific source.
+    Initializes a new VideoStreamHandler for a specific source and starts background processing.
     If the stream is not already active, it starts a background processing thread.
+    Args:
+        data (StreamRequest): Pydantic model containing the source URL and unique name.
+        request (Request): The FastAPI request object to access global state.
+
+    Returns:
+        dict: Status message and the updated list of active stream keys.
     """
     url, name = data.url, data.name
     active_streams = request.app.state.active_streams
 
+    # Only initialize if the stream isn't already being processed
     if name not in active_streams:
         print(f"Starting background worker for {name}...")
-        handler = VideoStreamHandler(
-            url,
-            name,
-            active_streams,
-            model=app.state.model,
-        )
+
+        # Check if a global model instance should be passed to the handler
+        if SHARED_MODEL:
+            handler = VideoStreamHandler(
+                url,
+                name,
+                active_streams,
+                model=app.state.model,
+            )
+        else:
+            handler = VideoStreamHandler(
+                url,
+                name,
+                active_streams,
+            )
+
+        # Start the background thread (OpenCV capture + AI inference)
         handler.start()
 
         # Register the handler in the global state for cross-endpoint access
@@ -93,6 +122,12 @@ async def view_stream(name: str, request: Request):
     """
     High-bandwidth MJPEG streaming gateway.
     Uses an asynchronous generator to pipe processed JPEG frames to the browser.
+    Args:
+        name (str): The unique identifier of the camera stream.
+        request (Request): The FastAPI request object.
+
+    Returns:
+        StreamingResponse: A multipart/x-mixed-replace stream of JPEG images.
     """
     active_streams = request.app.state.active_streams
 
@@ -120,7 +155,7 @@ async def view_stream(name: str, request: Request):
                 await streamer.frame_ready_event.wait()
                 streamer.frame_ready_event.clear()  # Reset for the next frame
 
-                # Sequence check: skip if the frame is older than what we just sent
+                # Frame Synchronization: ensure we don't send duplicate or out-of-order frames
                 if streamer.last_frame_id > last_sent_id:
                     if streamer.latest_processed_frame:
                         frame_bytes = streamer.latest_processed_frame
@@ -132,9 +167,9 @@ async def view_stream(name: str, request: Request):
                             b"Content-Type: image/jpeg\r\n"
                             b"Content-Length: "
                             + str(len(frame_bytes)).encode()
-                            + b"\r\n\r\n"  # <--- Two \r\n
+                            + b"\r\n\r\n"
                             + frame_bytes
-                            + b"\r\n"  # <--- One \r\n
+                            + b"\r\n"
                         )
                         last_sent_id = streamer.last_frame_id
 
@@ -178,29 +213,37 @@ async def dashboard_stats(request: Request):
     """
     stats = {}
     active_streams = request.app.state.active_streams
+
     for name, streamer in active_streams.items():
+        # AI Backlog: Tasks waiting in the ThreadPool
+        ai_backlog = streamer.get_executor_backlog()
+
+        # Video Backlog: Frames waiting for Disk I/O
+        video_backlog = streamer.write_queue.qsize() if ENABLE_QUERYING else 0
+
+        # IO Backlog: Frames queued for disk storage (if enabled)
+        io_backlog = (
+            streamer.io_executor._work_queue.qsize()
+            if hasattr(streamer, "io_executor")
+            else 0
+        )
+
+        # Calculate Shared Memory (/dev/shm) usage - critical for Docker/Linux deployments
+        shm_usage = shutil.disk_usage("/dev/shm")
+        shm_percent = (shm_usage.used / shm_usage.total) * 100
+
         stats[name] = {
-            "current_fps": round(streamer.stat_fps, 2),
-            "reencode_backlog": streamer.get_executor_backlog(),
+            "fps": round(streamer.stat_fps, 1),
+            "inputfps": round(streamer.input_fps, 1),
+            "targetfps": round(streamer.target_fps, 1),
+            "is_streaming": streamer.active,
+            "ai_backlog": ai_backlog,
+            "video_backlog": video_backlog,
+            "io_backlog": io_backlog,
+            "querying_active": ENABLE_QUERYING,
             "total_frames": streamer.stat_frame_count,
+            "shm_usage": f"{shm_percent:0.1f}%",
         }
-
-        # is_alive = getattr(streamer, "process_thread", None) and streamer.process_thread.is_alive()
-
-        # Safely get the buffer size under lock to avoid race conditions
-        # with streamer.buffer_lock:
-        #     buffer_backlog = len(streamer.frame_buffer)
-
-        # stats[name] = {
-        #     "status": "Active" if streamer.active else "Inactive",
-        #     "thread_alive": is_alive,
-        #     "fps": round(streamer.stat_fps, 2),
-        #     "total_frames": streamer.stat_frame_count,
-        #     "ai_backlog": streamer.get_executor_backlog(), # Tasks in ThreadPool
-        #     "display_buffer_size": buffer_backlog,        # Frames waiting for sequence
-        #     "next_expected_frame": streamer.next_display_id,
-        #     "last_heartbeat": round(time.time() - streamer.last_heartbeat, 2)
-        # }
     return stats
 
 
@@ -220,22 +263,21 @@ async def stop_stream(name: str, request: Request):
     Gracefully stops a single stream and releases its hardware/VRAM resources.
     The blocking cleanup logic is offloaded to a separate thread to prevent API hang.
     """
-    streamer = request.app.state.active_streams.get(name)
+    # Immediately remove from the global state so polling/UI syncs instantly
+    streamer = request.app.state.active_streams.pop(name, None)
 
-    if not streamer:
-        raise HTTPException(status_code=404, detail=f"Stream '{name}' not found.")
+    if streamer:
+        streamer.active = False
 
-    # Execute the heavy hardware/thread cleanup off the main event loop
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, streamer.stop)
+        # BACKGROUND CLEANUP: Fire-and-forget the heavy hardware teardown
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, streamer.stop)
 
-    # Remove reference from global state to allow Garbage Collection
-    app.state.active_streams.pop(name, None)
+        if DEBUG == "1":
+            print(f"--- CLEANUP | Stream '{name}' stopped and removed. ---")
+        return {"status": "stopped", "camera": name}
 
-    if DEBUG == "1":
-        print(f"--- CLEANUP | Stream '{name}' stopped and removed. ---")
-
-    return {"status": "stopped", "camera": name}
+    return {"status": "not found"}
 
 
 @app.post("/stop_all")
@@ -252,11 +294,6 @@ async def stop_all_streams(request: Request):
         if not active_names:
             return {"status": "success", "message": "No active streams to stop"}
 
-        # for name in active_names:
-        #     streamer = active_streams.get(name)
-        #     if streamer:
-        #         streamer.stop()
-        #         app.state.active_streams.pop(name, None)
         for name in active_names:
             streamer = active_streams.pop(name, None)
             if streamer:
@@ -269,6 +306,52 @@ async def stop_all_streams(request: Request):
         "stopped_count": len(active_names),
         "cleared_streams": active_names,
     }
+
+
+@app.get("/health")
+async def health_check(request: Request):
+    """
+    Diagnostic endpoint for monitoring system stability.
+    Returns:
+        dict: Hardware metrics, stream backlogs, and executor status.
+    """
+    # 1. Hardware Metrics
+    ram = psutil.virtual_memory()
+    # Check RAM disk usage (critical for 8K MJPEG/MP4 buffers)
+    shm = shutil.disk_usage("/dev/shm")
+
+    health_data = {
+        "status": "online",
+        "system_time": datetime.now().isoformat(),
+        "hardware": {
+            "ram_used_percent": ram.percent,
+            "shm_used_percent": round((shm.used / shm.total) * 100, 1),
+            "cpu_count": psutil.cpu_count(),
+        },
+        "active_streams": len(request.app.state.active_streams),
+        "stream_details": {},
+    }
+
+    # 2. Pipeline Backlogs (Identify bottlenecks)
+    for name, streamer in request.app.state.active_streams.items():
+        health_data["stream_details"][name] = {
+            "ai_backlog": streamer.get_executor_backlog(),
+            "io_backlog": streamer.write_queue.qsize()
+            if hasattr(streamer, "write_queue")
+            else 0,
+            "fps_live": streamer.stat_fps,
+            "uptime_sec": round(time.perf_counter() - streamer.stat_start_time, 1),
+        }
+
+    # 3. Global Sync Health
+    if ENABLE_QUERYING:
+        health_data["sync_engine"] = {
+            "pending_completions": len(clip_completion_tracker),
+            "metadata_buffer_size": len(all_metadata),
+            "vdms_queue_depth": send_metadata_queue.qsize(),
+        }
+
+    return health_data
 
 
 if __name__ == "__main__":

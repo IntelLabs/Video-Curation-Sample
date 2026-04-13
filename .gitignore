@@ -7,7 +7,7 @@
 build/*
 fastapi/resources/models/intel
 fastapi/resources/models/ultralytics
+fastapi/tests/*_test_imgs
+fastapi/tests/*.mp4
 finetune/.env
 finetune/app/*-Results
-fastapi/tests/*.mp4
-fastapi/tests/*_test_imgs

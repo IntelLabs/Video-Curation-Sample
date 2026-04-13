@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import queue
@@ -13,52 +14,24 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
-
-# Force OpenCV to use a single thread for its operations.
-# This prevents internal OpenCV threads from "racing" against your AI logic.
-cv2.setNumThreads(1)
-from ultralytics import YOLO
-from ultralytics.utils.checks import check_imgsz
-
-from fastapi import FastAPI
-
-# Global lock for thread-safe access to the shared YOLO model
-model_lock = threading.Lock()
-
-# Create a global lock for stream management
-# stream_lock = asyncio.Lock()
-
-# os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-#     # "rtsp_transport;tcp|hwaccel;cuda|threads;2|probesize;32|analyzeduration;0"
-#     # "rtsp_transport;tcp|hwaccel;cuda|threads;4|probesize;5000000|analyzeduration;5000000"
-#      "rtsp_transport;udp|hwaccel;cuda|threads;8"
-#     "|stimeout;5000000|listen_timeout;5000" # Add timeouts to prevent hanging
-# )
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-    "rtsp_transport;tcp|hwaccel;cuda|threads;auto|low_delay;1|probesize;5000000"
-    # "rtsp_transport;tcp|hwaccel;cuda|threads;1|probesize;32|analyzeduration;0"
-    # "rtsp_transport;tcp|hwaccel;cuda|threads;2|probesize;32|analyzeduration;0"
-)
-
-
-# from process_stream import extract_metadata_from_results, release_clip_and_reencode, retry_query
 from include.utils import (
+    # MODEL_H,
+    # MODEL_PRECISION,
+    # MODEL_W,
     CODE_DIR,
     CUSTOM_MODEL_FLAG,
     DEBUG,
     DEBUG_FLAG,
     DETECTION_THRESHOLD,
     DEVICE,
-    # MODEL_H,
     MODEL_NAME,
-    # MODEL_PRECISION,
-    # MODEL_W,
     OMIT_DETECTIONS_FLAG,
-    TARGET_FPS,
+    SHARED_OUTPUT,
     YOLO_CLASS_NAMES,
     PipelineMapping,
     draw_label,
@@ -67,8 +40,12 @@ from include.utils import (
     get_display_frame_in_bytes,
     manual_fps_calculation,
     merge_boxes_limit,
-    metadata2vdms,
+    metadata2vdms_with_retry,
 )
+from ultralytics import YOLO
+from ultralytics.utils.checks import check_imgsz
+
+from fastapi import FastAPI
 
 # ----- SETUP LOGGING -----
 logging.basicConfig(
@@ -79,23 +56,75 @@ logging.basicConfig(
 main_app_logger = logging.getLogger()
 
 
-# ----- SPECIAL VARIABLES -----
-MODEL_MAX_BATCH_SIZE = 64
+# ----- PIPELINE CONFIGURATION -----
+# Force OpenCV to use a single thread for its operations.
+# This prevents internal OpenCV threads from "racing" against AI logic.
+cv2.setNumThreads(1)
+
+# Model expected imgsz and size to resize images
+MODEL_W, MODEL_H = (640, 640)  # (1280, 1280)
 MODEL_PRECISION = "FP16"
-MODEL_W, MODEL_H = (640, 640)
-# MODEL_W, MODEL_H = (1280, 1280)
-CLIP_DURATION = 10  # seconds
-KERNEL_RATIO = 0.05  # 0.03 # .05  # .025
+SHARED_MODEL = False
+
+# Maximum allowed batch sixe for inference ("GPU": tensorRT)
+MODEL_MAX_BATCH_SIZE = 64
+
+# Maximum detections returned from model
+MAX_DETECTIONS = 100
+
+# Framerate for metadata extraction and videos used for querying
+TARGET_FPS = os.getenv("TARGET_FPS", 15)
+
+# Duration of video clips in seconds which are used for querying
+CLIP_DURATION = os.getenv("CLIP_DURATION", 10)
+
+# Bounding boxes returned from pipeline
+# object (includes yolo), motion (includes bbs no yolo)
+DETECTION_TYPE = "object"
+
+# Frame size and quality for displaying frames in browser
+DISPLAY_FRAME_QUALITY = 50  # 80
+DISPLAY_FRAME_SIZE = (960, 540)  # (640, 360)
+RETURN_BYTES = True  # True, False
+THICKNESS = 2
+
+# Flag for enabling querying
+# False: Detection only
+# True: Include saving video clips, sending metadata to VDMS
+ENABLE_QUERYING = False  # True, False
+
+# Values used for OpenCV thresholding
 MASK_MAX_VALUE = 255
 MASK_THRESHOLD_VALUE = 127
-MAX_DETECTIONS = 100
+
+
+# Pixels added to each dimension of bounding boxes in full resolution image
+RAW_BB_FULL_RES_PADDING = 10  # 64
+
+# Contour Cleaning: Maximum size of merged boxes
+MERGE_SIZE_LIMIT = MODEL_W  # MODEL_W ,960
+
+# Number workers used for ThreadPoolExecutor
 MAX_WORKERS = 4
-# DISPLAY_FRAME_SIZE = (640, 360)
-# DISPLAY_FRAME_QUALITY = 80
-DISPLAY_FRAME_SIZE = (960, 540)
-DISPLAY_FRAME_QUALITY = 50
-ENABLE_QUERYING = False
-return_bytes = True  # True, False
+
+# Optimizes RTSP ingestion with hardware acceleration and low-delay flags
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+    "rtsp_transport;tcp|hwaccel;cuda|threads;auto|low_delay;1|probesize;5000000"
+    # "rtsp_transport;tcp|hwaccel;cuda|threads;1|probesize;32|analyzeduration;0"
+    # "rtsp_transport;tcp|hwaccel;cuda|threads;2|probesize;32|analyzeduration;0"
+    # "rtsp_transport;tcp|hwaccel;cuda|threads;2|probesize;32|analyzeduration;0"
+    # "rtsp_transport;tcp|hwaccel;cuda|threads;4|probesize;5000000|analyzeduration;5000000"
+    #  "rtsp_transport;udp|hwaccel;cuda|threads;8|stimeout;5000000|listen_timeout;5000"
+)
+
+
+# ----- VARIABLE ADJUSTMENTS -----
+CLIP_DURATION = None if CLIP_DURATION == "None" else CLIP_DURATION
+
+if DETECTION_TYPE == "motion" and ENABLE_QUERYING:
+    ENABLE_QUERYING = False
+    DISPLAY_FRAME_QUALITY = 100
+    THICKNESS = 10
 
 if CUSTOM_MODEL_FLAG:
     model_path = f"{CODE_DIR}/resources/models/ultralytics/custom_models/{MODEL_NAME}"
@@ -105,7 +134,7 @@ else:
 
 if DEVICE == "GPU":
     model_path += ".engine"
-    # 1. Force PyTorch to initialize the CUDA context
+    # Force PyTorch to initialize the CUDA context
     if torch.cuda.is_available():
         torch.cuda.set_device(0)
         torch.cuda.empty_cache()
@@ -113,114 +142,45 @@ if DEVICE == "GPU":
 else:
     model_path += "_openvino_model/"
 
+
 # ----- GLOBAL VARIABLES -----
-manager = None  # Manager()
-local_processes = {}
-all_metadata = {}  # manager.dict()
-send_metadata_queue = queue.Queue()  # manager.Queue()
+if ENABLE_QUERYING:
+    # Tracks all metadata
+    all_metadata = {}
+
+    # Tracks clip_filename once video re-encoded
+    # video_ready_list = {}
+
+    # Queue for metadata being sent to vdms
+    send_metadata_queue = queue.Queue()
+
+    # Tracks if both components are finished:
+    #   {"clip_name": {"video": bool, "meta": bool}}
+    clip_completion_tracker = {}
 
 
-# ----- INGESTION FUNCTIONS -----
-# method to create clips (read frame write to file; add name to list)
-def send_metadata():
-    global all_metadata
-    clip_filename = ""
-    clip_key = ""
-    width = 0
-    height = 0
-    while True:
-        try:
-            queue_details = send_metadata_queue.get()
-            if queue_details is None:
-                break
-
-            (clip_key, clip_filename, width, height) = queue_details
-
-            metadata2vdms(
-                clip_key,
-                clip_filename,
-                all_metadata[clip_key],
-                width,
-                height,
-            )
-            del all_metadata[clip_key]
-
-        except queue.Empty:
-            pass
-
-
-def handle_done(future):
-    try:
-        future.result()
-    except Exception as e:
-        print(f"Task error: {e}")
-
-
-def save_and_finalize_clip(
-    clip_key,
-    _out_vid,
-    clip_filename,
-    tmp_file,
-    target_fps,
-    frame_width,
-    frame_height,
-):
-    if DEBUG == "1":
-        print(
-            f"[TIMING],start_release_clip,{clip_key},{time.time()}",
-            flush=True,
-        )
-    _out_vid.release()
-    if DEBUG == "1":
-        print(
-            f"[TIMING],end_release_clip,{clip_key},{time.time()}",
-            flush=True,
-        )
-
-    # Re-encode video in order to seek via ffmpeg later
-    GENERAL_OPTS = "-flags -global_header -hide_banner -loglevel error -nostats -tune zerolatency -flush_packets 0"  #  -filter:v fps={target_fps}
-    CONVERSION = f"-c:v libx264 -preset ultrafast -filter:v fps=fps={target_fps}"  # "-c:v libx264 -preset medium"
-    reencode_cmd = f"ffmpeg -y -i {tmp_file} {GENERAL_OPTS} {CONVERSION} -crf 23 -c:a copy {clip_filename}"
-    cmd_list = shlex.split(reencode_cmd)
-    if DEBUG == "1":
-        print(
-            f"[TIMING],start_reencode,{clip_key},{time.time()}",
-            flush=True,
-        )
-    subprocess.run(cmd_list, check=True)
-    end_time = time.time()
-    # filename = str(Path(clip_filename).name)
-    if DEBUG == "1":
-        print(
-            f"[TIMING],end_reencode,{clip_key},{end_time}",
-            flush=True,
-        )
-        print(f"[TIMING],Save clip,{clip_key},{end_time}", flush=True)
-    os.remove(tmp_file)
-
-    send_metadata_queue.put(
-        (
-            clip_key,
-            clip_filename,
-            frame_width,
-            frame_height,
-        )
-    )
-
-
+# ----- FASTAPI APPLICATION STARTUP/SHUTDOWN -----
+# The lifespan parameter handles startup and shutdown
 async def auto_cleanup_janitor(app):
     while True:
         await asyncio.sleep(10)
         now = time.time()
 
+        # --- Stream Monitoring ---
         async with app.state.stream_lock:
             # Iterating over a list of keys to avoid "dictionary changed size" error
-            for name in list(app.state.active_streams.keys()):
-                streamer = app.state.active_streams.get(name)
+            for name, streamer in list(app.state.active_streams.items()):
+                # streamer = app.state.active_streams.get(name)
                 if not streamer:
                     continue
 
-                backlog = streamer.get_executor_backlog()
+                ai_backlog = streamer.get_executor_backlog()
+                video_backlog = streamer.write_queue.qsize() if ENABLE_QUERYING else 0
+                io_backlog = (
+                    streamer.io_executor._work_queue.qsize()
+                    if hasattr(streamer, "io_executor")
+                    else 0
+                )
 
                 # Check if the stream is marked inactive OR timed out
                 # streamer.active should be False when the video source ends
@@ -228,9 +188,13 @@ async def auto_cleanup_janitor(app):
 
                 should_remove = False
 
-                if not streamer.active and backlog == 0:
+                if not streamer.active and (
+                    ai_backlog == 0 and video_backlog == 0 and io_backlog == 0
+                ):
                     should_remove = True  # Video ended naturally
-                elif is_stale and backlog == 0:
+                elif is_stale and (
+                    ai_backlog == 0 and video_backlog == 0 and io_backlog == 0
+                ):
                     should_remove = True  # Browser tab closed/Network lost
                 elif now - streamer.last_heartbeat > 90:
                     should_remove = True  # Hard timeout for hung processes
@@ -242,21 +206,35 @@ async def auto_cleanup_janitor(app):
                         streamer.stop()
                         app.state.active_streams.pop(name, None)
 
+        # --- Synchronization Data Purge ---
+        if ENABLE_QUERYING:
+            # Remove trackers older than 5 minutes (300s)
+            stale_keys = [
+                k
+                for k, v in clip_completion_tracker.items()
+                if (now - v.get("start", now)) > 300
+            ]
+            for k in stale_keys:
+                clip_completion_tracker.pop(k, None)
+                all_metadata.pop(k, None)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- STARTUP ---
     if not hasattr(app.state, "active_streams"):
         app.state.active_streams = {}
-        app.state.status = "Ready"
+
+    app.state.status = "Ready"
+    app.state.stream_lock = asyncio.Lock()
+    if SHARED_MODEL:
         app.state.model = YOLO(model_path, verbose=False, task="detect")
-        # app.state.model_lock = threading.Lock()
-        app.state.stream_lock = asyncio.Lock()
-    device_input = "cuda" if DEVICE == "GPU" else "cpu"
-    print("Starting shared model warmup...")
-    dummy_input = torch.zeros((1, 3, MODEL_H, MODEL_W)).to(device_input)
-    for _ in range(20):
-        _ = app.state.model(dummy_input, verbose=False)
+
+        device_input = "cuda" if DEVICE == "GPU" else "cpu"
+        print("Starting shared model warmup...")
+        dummy_input = torch.zeros((1, 3, MODEL_H, MODEL_W)).to(device_input)
+        for _ in range(20):
+            _ = app.state.model(dummy_input, verbose=False)
 
     janitor_task = asyncio.create_task(auto_cleanup_janitor(app))
 
@@ -267,10 +245,6 @@ async def lifespan(app: FastAPI):
 
     # --- CLEANUP ---
     janitor_task.cancel()
-
-    # for s in app.state.active_streams.values():
-    #     s.stop()
-
     async with app.state.stream_lock:
         for name, streamer in list(app.state.active_streams.items()):
             print(f"Shutting down stream: {name}")
@@ -279,6 +253,181 @@ async def lifespan(app: FastAPI):
     app.state.status = "Stopped"
 
 
+# ----- INGESTION FUNCTIONS -----
+def save_and_finalize_clip(
+    clip_key,
+    _out_vid,
+    clip_filename,
+    tmp_file,
+    target_fps,
+    frame_width,
+    frame_height,
+    clip_metadata,
+    frame_in_clip_count,
+):
+    # global video_ready_list
+    if DEBUG == "1":
+        print(
+            f"[TIMING],start_release_clip,{clip_key},{time.time()}",
+            flush=True,
+        )
+
+    if _out_vid is not None:
+        _out_vid.release()
+
+    if DEBUG == "1":
+        print(
+            f"[TIMING],end_release_clip,{clip_key},{time.time()}",
+            flush=True,
+        )
+
+    # Re-encode video in order to seek via ffmpeg later
+    GENERAL_OPTS = "-flags -global_header -hide_banner -loglevel error -nostats -tune zerolatency -flush_packets 0"  #  -filter:v fps={target_fps}
+    CONVERSION = f"-c:v libx264 -preset ultrafast -filter:v fps=fps={target_fps}"  # "-c:v libx264 -preset medium"
+    reencode_cmd = f"ffmpeg -y -i {tmp_file} {GENERAL_OPTS} {CONVERSION} -crf 23 -c:a copy {clip_filename}"
+
+    # Re-encode command with background-friendly flags
+    # 1. nice -n 19: Lowers CPU priority to avoid stutters in the main app
+    # 2. -threads 2: Limits core usage
+    # 3. -preset ultrafast: Fastest possible h264 encoding
+    # 4. -crf 28: Slightly higher than default (23) for even less CPU work
+    # reencode_cmd = (
+    #     f"nice -n 19 ffmpeg -y -i {tmp_file} "
+    #     f"-threads 2 -c:v libx264 -preset ultrafast -crf 28 "
+    #     f"-filter:v fps=fps={target_fps} -c:a copy -tune zerolatency "
+    #     f"-hide_banner -loglevel error {clip_filename}"
+    # )
+
+    try:
+        cmd_list = shlex.split(reencode_cmd)
+
+        if DEBUG == "1":
+            print(
+                f"[TIMING],start_reencode,{clip_key},{time.time()}",
+                flush=True,
+            )
+
+        subprocess.run(cmd_list, check=True)
+        end_time = time.time()
+
+        if DEBUG == "1":
+            print(
+                f"[TIMING],end_reencode,{clip_key},{end_time}",
+                flush=True,
+            )
+            print(f"[TIMING],Save clip,{clip_key},{end_time}", flush=True)
+
+        # Mark video as ready
+        # video_ready_list[clip_filename] = frame_in_clip_count
+
+        # Signal tracker
+        check_and_dispatch_to_vdms(
+            clip_filename, frame_width, frame_height, component="video"
+        )
+
+        # Cleanup the temporary RAM-disk file immediately
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+    except Exception as e:
+        print(f" [ERROR] Clip finalization failed for {clip_key}: {e}")
+
+
+def send_metadata():
+    """
+    Consumer thread that sends metadata to VDMS.
+    If retries fail, it saves the data to a local JSON 'dead-letter' file.
+    """
+    global all_metadata
+    clip_filename = ""
+    clip_key = ""
+    width = 0
+    height = 0
+    while True:
+        try:
+            queue_details = send_metadata_queue.get()
+            if queue_details is None:
+                break
+
+            # # (clip_key, clip_filename, width, height, clip_metadata) = queue_details
+            (clip_filename, width, height) = queue_details
+            clip_key = Path(clip_filename).name
+            clip_metadata = all_metadata.pop(clip_key, None)
+
+            if clip_metadata:
+                success = metadata2vdms_with_retry(
+                    clip_key,
+                    clip_filename,
+                    clip_metadata,
+                    width,
+                    height,
+                )
+
+                # CUSTOM ERROR HANDLER: Final Failure Fallback
+                if not success:
+                    error_path = f"{CODE_DIR}/failed_metadata/{clip_key}.json"
+                    os.makedirs(os.path.dirname(error_path), exist_ok=True)
+
+                    with open(error_path, "w") as f:
+                        json.dump(
+                            {
+                                "clip_filename": clip_filename,
+                                "width": width,
+                                "height": height,
+                                "metadata": clip_metadata,
+                                "failed_at": datetime.now().isoformat(),
+                            },
+                            f,
+                        )
+
+                    main_app_logger.error(
+                        f" [CRITICAL] Permanent VDMS failure. Data saved to: {error_path}"
+                    )
+
+                send_metadata_queue.task_done()
+            else:
+                main_app_logger.error(
+                    f" [MISSING] Metadata for {clip_key} was lost before upload!"
+                )
+
+        except Exception as e:
+            # pass
+            print(f"Exception occurred in send_metadata: {e}")
+
+
+def check_and_dispatch_to_vdms(clip_filename, width, height, component):
+    """
+    Synchronizes AI and Video threads. Logs which component finished first.
+    """
+    clip_key = Path(clip_filename).name
+
+    # Initialize tracker if first time seeing this clip
+    if clip_key not in clip_completion_tracker:
+        clip_completion_tracker[clip_key] = {
+            "video": False,
+            "meta": False,
+            "start": time.time(),
+        }
+
+    tracker = clip_completion_tracker[clip_key]
+    tracker[component] = True
+
+    # Identify the bottleneck
+    if tracker["video"] and tracker["meta"]:
+        total_wait = time.time() - tracker["start"]
+        main_app_logger.info(
+            f" [SYNC] {clip_key} Fully Ready. Total processing time: {total_wait:.2f}s"
+        )
+        send_metadata_queue.put((clip_filename, width, height))
+        clip_completion_tracker.pop(clip_key, None)
+    else:
+        other_component = "meta" if component == "video" else "video"
+        main_app_logger.info(
+            f" [WAIT] {clip_key}: {component} finished. Waiting for {other_component}..."
+        )
+
+
+# ----- PIPELINE CLASSES -----
 class HybridReader:
     """
     Decouples frame acquisition from processing.
@@ -286,16 +435,19 @@ class HybridReader:
     preventing OpenCV buffer lag.
     """
 
-    def __init__(self, source, target_fps=TARGET_FPS):
+    def __init__(self, source, target_fps=TARGET_FPS, clip_duration=CLIP_DURATION):
         self.source = str(source)
-        self.cap = self._create_capture()
+        self.cap = self._create_capture(target_fps, clip_duration)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Force low latency
+        self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
 
-        self.frame_queue = deque(maxlen=5)  # Keep queue small to stay "real-time"
+        # self.frame_queue = deque(maxlen=5)  # Keep queue small to stay "real-time"
+        self.frame_queue = queue.Queue(maxsize=5)
         self.stopped = False
-        self.target_fps = target_fps
-        self.frame_interval = 1.0 / target_fps
         self.device = DEVICE  # Global from include.utils
+        self.frame_idx = 0
+        self.target_frame_idx = 0
+        # self.frame_queue = queue.Queue(maxsize=30)
 
     def start(self):
         threading.Thread(target=self.update, daemon=True).start()
@@ -306,74 +458,144 @@ class HybridReader:
         self.stopped = True
         if self.cap.isOpened():
             self.cap.release()
-        self.frame_queue.clear()
+
+        # self.frame_queue.clear()
         # Optionally join if want to ensure the thread is dead
         # self.thread.join(timeout=1.0)
 
-    def _create_capture(self):
+    def _create_capture(self, target_fps, clip_duration):
         """Creates a VideoCapture with stable RTSP options."""
-        return cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
+        cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
+        self.get_fps_and_framecnt(cap, target_fps, clip_duration)
+        return cap
+
+    def get_fps_and_framecnt(self, cap, target_fps, clip_duration):
+        self.input_fps = int(cap.get(cv2.CAP_PROP_FPS))  # hardware fps
+        # print(f"in fps: {sself.input_fps} target fps: {target_fps}")
+        if self.input_fps == 0:  # Case when FPS isn't available
+            self.input_fps = manual_fps_calculation(self.source, num_frames=10)
+            print(f"new in fps: {self.input_fps}")
+
+        self.target_fps = (
+            target_fps
+            if target_fps not in [None, 0] and self.input_fps > target_fps
+            else self.input_fps
+        )
+
+        self.frame_skip = int(self.input_fps / self.target_fps)
+        if self.frame_skip < 1:
+            self.frame_skip = 1
+        # self.skip_count = self.frame_skip - 1
+
+        if clip_duration is None:
+            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            clip_duration = frame_count / self.input_fps
+        self.max_frames_per_clip = int(self.target_fps * float(clip_duration))
+        self.frame_interval = 1.0 / self.target_fps  # 0.0666s
+        print(
+            f"in fps: {self.input_fps} self.target fps: {self.target_fps} self.frame_skip: {self.frame_skip}"
+        )
+
+    # def update(self):
+    #     """
+    #     Continuously grabs frames. Throttles local files to maintain
+    #     the target FPS and manages RTSP reconnections.
+    #     """
+    #     retry_attempt = 0
+    #     max_retries = 10
+    #     is_network_stream = "://" in self.source  # Detect if it's RTSP
+    #     last_frame_time = time.perf_counter()
+
+    #     while not self.stopped:
+    #         # Grab frame from buffer
+    #         if not self.cap.grab():
+    #             if not is_network_stream:
+    #                 self.stopped = True
+    #                 break
+
+    #             # --- RECONNECTION LOGIC ---
+    #             retry_attempt += 1
+    #             if retry_attempt > max_retries:
+    #                 print(f"❌ [RTSP] Max retries reached for {self.source}. Stopping.")
+    #                 self.stopped = True
+    #                 break
+
+    #             # Exponential Backoff: Wait 2s, 4s, 8s... up to 30s
+    #             wait_time = min(2**retry_attempt, 30)
+    #             # print(f"⚠️ [RTSP] Connection lost. Retry {retry_attempt}/{max_retries} in {wait_time}s...")
+
+    #             self.cap.release()
+    #             time.sleep(wait_time)
+    #             self.cap = self._create_capture()
+    #             continue
+
+    #         # Throttle ingestion for local files to match real-time cadence
+    #         elapsed = time.perf_counter() - last_frame_time
+    #         if elapsed < self.frame_interval:
+    #             time.sleep(self.frame_interval - elapsed)
+
+    #         last_frame_time = time.perf_counter()
+    #         success, frame = self.cap.retrieve()
+
+    #         if success:
+    #             retry_attempt = 0  # Reset retries on successful frame
+    #             # self.frame_queue.append(frame)
+    #             self.frame_queue.put(frame)
+
+    #             # CPU/GPU Specific Handling
+    #             # if self.device == "GPU":
+    #             #     # Keep as-is for DMA upload
+    #             #     self.frame_queue.append(frame)
+    #             # else:
+    #             #     # For CPU: Downscale immediately to save AI thread work
+    #             #     # This is the BIGGEST FPS gain for CPU mode
+    #             #     # small_frame = cv2.resize(frame, (MODEL_W, MODEL_H), interpolation=cv2.INTER_NEAREST)
+    #             #     # self.frame_queue.append(small_frame)
+    #             #     self.frame_queue.append(frame)
+
+    #             # last_frame_time = time.time()
 
     def update(self):
         """
         Continuously grabs frames. Throttles local files to maintain
         the target FPS and manages RTSP reconnections.
         """
-        retry_attempt = 0
-        max_retries = 10
-        is_network_stream = "://" in self.source  # Detect if it's RTSP
-        last_frame_time = time.perf_counter()
+        # retry_attempt = 0
+        # max_retries = 10
+        # is_network_stream = "://" in self.source  # Detect if it's RTSP
+        # last_frame_time = time.perf_counter()
 
         while not self.stopped:
-            # Grab frame from buffer
-            if not self.cap.grab():
-                if not is_network_stream:
+            # Determine if current frame_idx should be "KEPT" or "SKIPPED"
+            # to match the target cadence
+            should_keep = int(self.frame_idx * self.target_fps / self.input_fps) > int(
+                (self.frame_idx - 1) * self.target_fps / self.input_fps
+            )
+
+            if should_keep:
+                # Fully decode this frame
+                ret, frame = self.cap.read()
+                if not ret:
                     self.stopped = True
                     break
+                self.frame_queue.put(frame)
+                # self.target_frame_idx += 1
+                # print(f"Target Frame {self.target_frame_idx} in queue\n", flush=True)
+            else:
+                # Fast-forward the pointer without decoding (minimal CPU)
+                self.cap.grab()
 
-                # --- RECONNECTION LOGIC ---
-                retry_attempt += 1
-                if retry_attempt > max_retries:
-                    print(f"❌ [RTSP] Max retries reached for {self.source}. Stopping.")
-                    self.stopped = True
-                    break
-
-                # Exponential Backoff: Wait 2s, 4s, 8s... up to 30s
-                wait_time = min(2**retry_attempt, 30)
-                # print(f"⚠️ [RTSP] Connection lost. Retry {retry_attempt}/{max_retries} in {wait_time}s...")
-
-                self.cap.release()
-                time.sleep(wait_time)
-                self.cap = self._create_capture()
-                continue
-
-            # Throttle ingestion for local files to match real-time cadence
-            elapsed = time.perf_counter() - last_frame_time
-            if elapsed < self.frame_interval:
-                time.sleep(self.frame_interval - elapsed)
-
-            last_frame_time = time.perf_counter()
-            success, frame = self.cap.retrieve()
-
-            if success:
-                retry_attempt = 0  # Reset retries on successful frame
-                self.frame_queue.append(frame)
-
-                # CPU/GPU Specific Handling
-                # if self.device == "GPU":
-                #     # Keep as-is for DMA upload
-                #     self.frame_queue.append(frame)
-                # else:
-                #     # For CPU: Downscale immediately to save AI thread work
-                #     # This is the BIGGEST FPS gain for CPU mode
-                #     # small_frame = cv2.resize(frame, (MODEL_W, MODEL_H), interpolation=cv2.INTER_NEAREST)
-                #     # self.frame_queue.append(small_frame)
-                #     self.frame_queue.append(frame)
-
-                # last_frame_time = time.time()
+            self.frame_idx += 1
 
     def read(self):
-        return self.frame_queue.popleft() if self.frame_queue else None
+        # return self.frame_queue.popleft() if self.frame_queue else None
+        try:
+            # If the reader is stopped, don't wait a full second;
+            # check immediately to speed up the "Draining" phase.
+            wait_time = 0.1 if self.stopped else 1.0
+            return self.frame_queue.get(timeout=wait_time)
+        except queue.Empty:
+            return None
 
 
 class BaseHandler:
@@ -383,24 +605,34 @@ class BaseHandler:
     """
 
     def __init__(self, source, name, active_streams, **kwargs):
-        target_fps = kwargs.get("target_fps", TARGET_FPS)
-        self.model = kwargs.get("model")
-
-        if not self.model:
-            self.model = YOLO(model_path, verbose=False, task="detect")
-            self.model_warmup()
-
-        if hasattr(self.model, "names"):
-            self.label_source = []
-            for k, v in self.model.names.items():
-                self.label_source.append(v)
-        else:
-            self.label_source = YOLO_CLASS_NAMES
-
         self.name = name
         self.source = source
         self.active = True
         self.active_streams = active_streams
+        self.device_input = "cuda" if DEVICE == "GPU" else "cpu"
+        self.disp_w, self.disp_h = DISPLAY_FRAME_SIZE
+
+        target_fps = int(kwargs.get("target_fps", TARGET_FPS))
+        clip_duration = kwargs.get("clip_duration", CLIP_DURATION)
+        provided_model = kwargs.get("model")
+        self.resize_h, self.resize_w = [MODEL_H, MODEL_W]
+
+        if isinstance(provided_model, str) or provided_model is None:
+            self.model = YOLO(model_path, verbose=False, task="detect")
+            self.model_warmup()
+        else:
+            self.model = provided_model
+
+        try:
+            if hasattr(self.model, "names"):
+                self.label_source = []
+                for k, v in self.model.names.items():
+                    self.label_source.append(v)
+            else:
+                self.label_source = YOLO_CLASS_NAMES
+        except Exception:
+            self.label_source = YOLO_CLASS_NAMES
+
         self.frame_ready_event = asyncio.Event()
         self.loop = asyncio.get_event_loop()
         self._is_stopped = False  # 🛡️ Shutdown guard
@@ -409,7 +641,7 @@ class BaseHandler:
         # Initialize hardware capture and determine stream properties
         self.get_valid_video_capture()
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce latency
-        self.get_fps_and_framecnt(target_fps)
+        self.get_fps_and_framecnt(target_fps, clip_duration)
         self.get_frameWH()
 
         # Determine minimum contour size relative to frame resolution
@@ -434,12 +666,26 @@ class BaseHandler:
         self.clip_filename = ""
         self.clip_key = ""
         self.tmp_file = ""
+        self.frame_in_clip_count = 0
+
+        # Initialize Reader
+        self.reader = HybridReader(source=self.source, target_fps=self.target_fps)
+
+        if ENABLE_QUERYING:
+            # Thread-safe queue for the resized frames (640x640)
+            # maxlen=300 allows for a 20-second buffer in case of extreme disk lag
+            # Non-blocking queue for frames and control signals
+            self.write_queue = queue.Queue(maxsize=300)
+            self.writer_done = False
 
         # Default Kernels
         self.dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        self.dilate_kernel_for_enhanced_mask = np.ones((21, 21), np.uint8)
+        self.dilate_kernel_for_enhanced_mask = np.ones((5, 5), np.uint8)  # (21, 21)
 
         # Device based setup
+        if not SHARED_MODEL:
+            self.model_warmup()
+
         if DEVICE == "GPU":
             self.prepare_gpu_pipeline()
             if len(self.active_streams) == 0:
@@ -487,13 +733,153 @@ class BaseHandler:
             return  # Exit early to prevent downstream FPS 0.0 crashes
 
     def setup_threads(self):
+        # Executor for Async YOLO tasks and FFmpeg re-encoding
         self.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+
+        # Producer: Handles acquisition and AI metadata logs
         self.process_thread = threading.Thread(
             target=self.run_realtime_inference, daemon=True
         )
 
+        if ENABLE_QUERYING:
+            # NEW: Dedicated I/O pool for Disk/GPU transfers (Higher worker count for 8K)
+            self.io_executor = ThreadPoolExecutor(max_workers=8)
+
+            # Dedicated FFmpeg pool so re-encoding doesn't slow down live AI
+            self.ffmpeg_executor = ThreadPoolExecutor(max_workers=2)
+
+            # Sends metadata to VDMS
+            self.metadata_thread = threading.Thread(target=send_metadata, daemon=True)
+
+            # Consumer: Handles GPU-to-CPU download and Disk I/O (Writing resized frames to RAM disk)
+            self.writer_thread = threading.Thread(
+                target=self._video_writer, daemon=True
+            )
+
     def start(self):
-        self.process_thread.start()
+        """
+        Starts the decoupled ingestion and inference threads in the correct order.
+        """
+        # Start the hardware-decoupled reader first
+        self.reader.start()
+
+        if ENABLE_QUERYING:
+            self._initialize_writer()
+
+        # Small delay to allow the reader's deque to populate
+        time.sleep(0.1)
+
+        # Start the producer and consumer threads
+        if not self.process_thread.is_alive():
+            self.process_thread.start()
+
+        if ENABLE_QUERYING and not self.metadata_thread.is_alive():
+            self.metadata_thread.start()
+
+        if ENABLE_QUERYING and not self.writer_thread.is_alive():
+            self.writer_thread.start()
+
+        return self
+
+    def stop(self):
+        """
+        Comprehensive resource release. Stops threads, shuts down the pool,
+        and purges VRAM to prevent leaks in concurrent 8K environments.
+        """
+        # global video_ready_list
+        with self._stop_lock:
+            if self._is_stopped:
+                return  # Already stopped by another thread
+
+        # Signal threads to stop
+        self.active = False
+        main_app_logger.info(f" [STOP] Initiating shutdown for {self.name}")
+
+        # Force the final clip to rotate even if under 10 seconds
+        if ENABLE_QUERYING and self.video_writer:
+            main_app_logger.info(f" [STOP] Forcing final clip rotation for {self.name}")
+            # self.finalize_clip(
+            #     self.clip_key,
+            #     self.tmp_file,
+            #     self.clip_filename,
+            #     self.video_writer
+            # )
+
+            # Manually trigger metadata completion for the final (forced) clip
+            if self.clip_key in all_metadata:
+                tracker = clip_completion_tracker.setdefault(
+                    self.clip_key, {"video": False, "meta": False}
+                )
+                tracker["meta"] = True
+                check_and_dispatch_to_vdms(
+                    self.clip_filename, self.resize_w, self.resize_h, component="meta"
+                )
+
+            clip_metadata = all_metadata.get(self.clip_key, {"object": {}, "face": {}})
+
+            self.ffmpeg_executor.submit(
+                save_and_finalize_clip,
+                self.clip_key,
+                self.video_writer,
+                self.clip_filename,
+                self.tmp_file,
+                self.target_fps,
+                self.resize_w,
+                self.resize_h,
+                clip_metadata,
+                self.frame_in_clip_count,
+            )
+            self.video_writer = None
+
+        # Close the OpenCV capture
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+
+        # Stop reader thread
+        if hasattr(self, "reader"):
+            self.reader.stop()
+
+        if ENABLE_QUERYING:
+            if hasattr(self, "write_queue"):
+                # Signal the writer queue to unblock the worker thread
+                self.write_queue.put(None)
+
+                # Wait for the _video_writer thread to finish writing remaining frames
+                timeout = 10
+                start_wait = time.time()
+                while not self.writer_done and (time.time() - start_wait < timeout):
+                    time.sleep(0.1)
+
+        # Shutdown the executor to stop background JPEG encoding
+        # wait=True ensures no 'zombie' threads are left accessing GpuMats
+        if hasattr(self, "executor"):
+            self.executor.shutdown(wait=True)
+
+        # Make sure all frames are flushed to RAM
+        if hasattr(self, "io_executor"):
+            self.io_executor.shutdown(wait=True)
+
+        # Shutdown ffmpeg once disc files are ready
+        if hasattr(self, "ffmpeg_executor"):
+            self.ffmpeg_executor.shutdown(wait=True)
+
+        # This ensures the next /dashboard_stats call won't see this stream
+        if self.name in self.active_streams:
+            self.active_streams.pop(self.name, None)
+
+        # Unblock any waiting FastAPI generators
+        self.frame_ready_event.set()
+
+        # Purge HW Buffers
+        self._is_stopped = True
+        if DEVICE == "GPU":
+            self.cleanup_gpu()
+        else:
+            self.cleanup_cpu()
+
+        self._check_shm_safety(threshold_percent=0)  # Forced cleanup of current tmp
+        main_app_logger.info(f" [STOP] {self.name} resources fully released.")
 
     def allocate_cpu(self, bkgd_mask_queue_size=3):
         # pass
@@ -523,7 +909,7 @@ class BaseHandler:
             background_thresh = 350
             NSamples = 10
             kNNSamples = 2
-            self.lr = -1  # .01  #-1  # 0.001  #1 / (5 * self.target_fps)  # -1  # 0.01  # 1 / history
+            self.lr = 1 / history
 
             self.backSub = cv2.createBackgroundSubtractorKNN(
                 history=history,  # default 500
@@ -535,7 +921,7 @@ class BaseHandler:
         elif method == "mog2":
             history = int(2 * self.target_fps)
             background_thresh = 10
-            self.lr = 0.001
+            self.lr = 1 / history
 
             self.backSub = cv2.createBackgroundSubtractorMOG2(
                 history=history,  # default 500
@@ -554,15 +940,11 @@ class BaseHandler:
         self.reader = None
         self.latest_processed_frame = None
 
-        # 1. Clear the Ping-Pong buffers (up to 200MB of RAM)
-        if hasattr(self, "encode_buffers"):
-            self.encode_buffers.clear()
+        # Clear the Ping-Pong buffers (up to 200MB of RAM)
+        # if hasattr(self, "encode_buffers"):
+        #     self.encode_buffers.clear()
 
-        # 2. Clear the 10s video clip buffer
-        if hasattr(self, "frame_buffer"):
-            self.frame_buffer.clear()
-
-        # 3. Explicitly nullify large arrays to trigger Garbage Collection
+        # Explicitly nullify large arrays to trigger Garbage Collection
         self.resized_frame = None
         self.fgMask = None
         self.prev_bkgd = None
@@ -607,6 +989,19 @@ class BaseHandler:
             self.resize_h, self.resize_w, cv2.CV_8UC1, self.gpu_morphed_frame
         )
 
+        # This prevents the AI thread from overwriting the encoder's data.
+        self.gpu_encoder_8k_buf = cv2.cuda.createContinuous(
+            self.frame_height, self.frame_width, cv2.CV_8UC3
+        )
+
+        # Continuous allocation prevents stride/padding artifacts
+        self.gpu_display_frame = cv2.cuda.createContinuous(
+            self.disp_h, self.disp_w, cv2.CV_8UC3
+        )
+
+        # Create a dedicated background stream for encoding tasks
+        self.encode_stream = cv2.cuda.Stream()
+
         # self.fgMask = cv2.cuda.GpuMat(
         #     self.resize_h, self.resize_w, cv2.CV_8UC1
         # )  # For resize
@@ -649,7 +1044,7 @@ class BaseHandler:
 
         # Subtraction
         history = int(2 * self.target_fps)  # 300  # int(5 * self.target_fps)
-        self.lr = 0.001
+        self.lr = 1 / history
         background_thresh = 10  # 350
         # self.lr = (
         #     -1
@@ -708,8 +1103,8 @@ class BaseHandler:
         self.pinned_downloaded_frame_np = None
 
         # 3. Handle specific buffers (like your Ping-Pong lists)
-        if hasattr(self, "encode_buffers"):
-            self.encode_buffers.clear()
+        # if hasattr(self, "encode_buffers"):
+        #     self.encode_buffers.clear()
 
         # 4. Clear the BGS history
         if hasattr(self, "mask_history"):
@@ -773,14 +1168,14 @@ class BaseHandler:
         """Run warmup in a separate thread to prevent FastAPI lockup."""
 
         def _warmup(iterations=5):
-            with model_lock:  # Use the global lock
-                print(f"Starting warmup for {self.name}...")
-                dummy_input = torch.zeros((1, 3, self.resize_h, self.resize_w)).to(
-                    self.device_input
-                )
-                for _ in range(iterations):
-                    _ = self.model(dummy_input, verbose=False)
-                print(f"Warmup complete for {self.name}")
+            # with model_lock:  # Use the global lock
+            print(f"Starting warmup for {self.name}...")
+            dummy_input = torch.zeros((1, 3, self.resize_h, self.resize_w)).to(
+                self.device_input
+            )
+            for _ in range(iterations):
+                _ = self.model(dummy_input, verbose=False)
+            print(f"Warmup complete for {self.name}")
 
         # Run in the background so the dashboard loads instantly
         threading.Thread(target=_warmup, daemon=True).start()
@@ -790,42 +1185,7 @@ class BaseHandler:
         # access the internal queue of the executor
         return self.executor._work_queue.qsize()
 
-    def stop(self):
-        """Safely stop the handler and prevent FFmpeg async_lock crashes."""
-        with self._stop_lock:
-            if self._is_stopped:
-                return  # Already stopped by another thread
-
-            self.active = False  # Signals the while loops to exit
-            self._is_stopped = True  # Mark as stopped immediately
-
-        # Release the VideoWriter if it exists
-        # if ENABLE_QUERYING and self.video_writer:
-        #     # self.release_clip_and_reencode()
-        #     self.save_and_finalize_clip(
-        #         self.clip_key,
-        #         self.video_writer,
-        #         self.clip_filename,
-        #         self.tmp_file,
-        #         self.target_fps,
-        #         MODEL_W,
-        #         MODEL_H,
-        #     )
-
-        # Close the OpenCV capture
-        if self.cap:
-            self.cap.release()
-
-        # Join threads if you want to be 100% sure they are closed
-        # self.update_thread.join(timeout=1.0)
-        # self.process_thread.join(timeout=1.0)
-
-        # Unblock any waiting FastAPI generators
-        self.frame_ready_event.set()
-
-    def apply_background_subtraction_cpu(
-        self, include_history=True, method="and", stream=None
-    ):
+    def apply_background_subtraction_cpu(self, include_history=True, method="and"):
         self.fgMask = self.backSub.apply(
             self.cpu_resized_frame, learningRate=float(self.lr)
         )
@@ -904,7 +1264,7 @@ class BaseHandler:
             return False
 
     # Gets video fps and framecount
-    def get_fps_and_framecnt(self, target_fps):
+    def get_fps_and_framecnt(self, target_fps, clip_duration):
         self.input_fps = int(self.cap.get(cv2.CAP_PROP_FPS))  # hardware fps
         # print(f"in fps: {sself.input_fps} target fps: {target_fps}")
         if self.input_fps == 0:  # Case when FPS isn't available
@@ -921,9 +1281,12 @@ class BaseHandler:
         self.frame_skip = int(self.input_fps / self.target_fps)
         if self.frame_skip < 1:
             self.frame_skip = 1
-        self.skip_count = self.frame_skip - 1
+        # self.skip_count = self.frame_skip - 1
 
-        self.MAX_FRAMES_PER_CLIP = int(self.target_fps * CLIP_DURATION)
+        if clip_duration is None:
+            frame_count = self.cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            clip_duration = frame_count / self.input_fps
+        self.max_frames_per_clip = int(self.target_fps * clip_duration)
         self.target_interval = 1.0 / self.target_fps  # 0.0666s
 
         if DEBUG == "1":
@@ -962,10 +1325,12 @@ class BaseHandler:
         if elapsed > 0.5:
             self.stat_fps = round(self.stat_frame_count / elapsed, 1)
 
-    def run_model(self, frame, batch=1, device_input="cuda", stream=True):
+    def run_model(
+        self, frame, imgsz=(MODEL_H, MODEL_W), batch=1, device_input="cuda", stream=True
+    ):
         results = self.model.predict(
             frame,
-            imgsz=(self.resize_h, self.resize_w),
+            imgsz=imgsz,
             batch=batch,
             device=device_input,
             verbose=False,
@@ -978,174 +1343,174 @@ class BaseHandler:
     def run_realtime_inference(self):
         pass
 
+    def _initialize_writer(self):
+        """Sets up a new VideoWriter on a RAM disk for near-zero latency."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # clip_filename has a unique name indicating clip # and timestamp
+        # if "://" not in str(self.source):
+        self.clip_filename = (
+            f"{SHARED_OUTPUT}/{self.name}_{self.clip_id}_{timestamp}_{os.getpid()}.mp4"
+        )
+        # else:
+        # self.clip_filename = f"{SHARED_OUTPUT}/{self.name}_{timestamp}.mp4"
+
+        # Key used by all_metadata
+        self.clip_key = Path(self.clip_filename).name
+
+        # Temporary filename before re-encoding via ffmpeg
+        self.tmp_file = f"/dev/shm/{self.clip_key}"
+
+        # Initialize Video Writer
+        self.video_writer = cv2.VideoWriter(
+            self.tmp_file, self.fourcc, self.target_fps, (self.resize_w, self.resize_h)
+        )
+        if not self.video_writer.isOpened():
+            print(f" [CRITICAL] VideoWriter failed to open for {self.tmp_file}!")
+
+    def finalize_clip(self, clip_key, tmp_file, final_filename, video_writer):
+        """Signals the worker to finalize; does NOT release the writer here."""
+        if video_writer:
+            writer_to_finalize = video_writer
+            self.video_writer = None  # Producer will create new writer on next frame
+
+            # Send a rotation signal that includes the writer object to be closed
+            self.write_queue.put(
+                {
+                    "control": "ROTATE",
+                    "old_key": clip_key,
+                    "old_tmp": tmp_file,
+                    "old_final": final_filename,
+                    "writer_to_finalize": writer_to_finalize,
+                }
+            )
+
+    def _write_video_frame(self, active_writer, frame_payload):
+        # 1. Download from GPU if necessary
+        # frame = (
+        #     frame_payload.download()
+        #     if hasattr(frame_payload, "download")
+        #     else frame_payload
+        # )
+        # 1. Non-blocking download if using GPU
+        if hasattr(frame_payload, "download"):
+            # Use the dedicated encode_stream to prevent blocking the AI stream
+            frame = frame_payload.download(self.encode_stream)
+            # self.encode_stream.waitForCompletion()
+        else:
+            frame = frame_payload
+        frame = np.ascontiguousarray(frame, dtype=np.uint8)
+
+        # 2. FORCE RESIZE to match (resize_w, resize_h) exactly
+        # This prevents the silent 0KB failure if dimensions are off by 1px
+        h, w = frame.shape[:2]
+        if w != int(self.resize_w) or h != int(self.resize_h):
+            frame = cv2.resize(
+                frame,
+                (int(self.resize_w), int(self.resize_h)),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        active_writer.write(frame)
+
+    def _video_writer(self):
+        """
+        Consumer: Writes frames to RAM disk and rotates files.
+        Ensures all frames are flushed before FFmpeg starts re-encoding.
+        """
+        global all_metadata
+        # Use a small separate pool for Disk I/O to avoid blocking the GIL
+        while self.active or not self.write_queue.empty():
+            try:
+                data = self.write_queue.get(timeout=1)
+                if data is None:
+                    break
+
+                # if data.get("control") == "ROTATE":
+                #     self.finalize_clip(data["old_key"], data["old_tmp"], data["old_final"], data.get("writer_to_finalize"))
+                #     continue
+                if data.get("control") == "ROTATE":
+                    # 1. Release the writer only AFTER all frames in queue are written
+                    writer_to_close = data.get("writer_to_finalize")
+                    # if writer_to_close:
+                    #     # writer_to_close.release()
+                    #     # Finalize in background so we can immediately start the next clip
+                    #     self.io_executor.submit(writer_to_close.release)
+
+                    # clip_metadata = all_metadata.pop(data["old_key"], {"object": {}, "face": {}})
+
+                    # # 2. Submit the background re-encode task
+                    # self.ffmpeg_executor.submit(
+                    #     save_and_finalize_clip,
+                    #     data["old_key"],
+                    #     None,
+                    #     data["old_final"],
+                    #     data["old_tmp"],
+                    #     self.target_fps,
+                    #     self.resize_w,
+                    #     self.resize_h,
+                    #     clip_metadata
+                    # )
+                    # if writer_to_close:
+                    clip_metadata = all_metadata.pop(
+                        data["old_key"], {"object": {}, "face": {}}
+                    )
+
+                    def finalize_and_then_reencode(writer, info, meta):
+                        try:
+                            # First, force the OpenCV writer to close and flush to /dev/shm
+                            if writer:
+                                writer.release()
+
+                            if (
+                                os.path.exists(info["old_tmp"])
+                                and os.path.getsize(info["old_tmp"]) > 0
+                            ):
+                                self.ffmpeg_executor.submit(
+                                    save_and_finalize_clip,
+                                    info["old_key"],
+                                    None,
+                                    info["old_final"],
+                                    info["old_tmp"],
+                                    self.target_fps,
+                                    self.resize_w,
+                                    self.resize_h,
+                                    meta,
+                                    info["frame_in_clip_count"],
+                                )
+                            else:
+                                print(
+                                    f" [ERROR] {info['old_key']} is empty. Skipping re-encode."
+                                )
+                        except Exception as e:
+                            print(f" [CRITICAL] Clip finalization failed: {e}")
+
+                    self.io_executor.submit(
+                        finalize_and_then_reencode,
+                        writer_to_close,
+                        data,
+                        clip_metadata,
+                    )
+                    self.write_queue.task_done()
+                    continue
+
+                frame_payload = data.get("frame")
+                active_writer = data.get("writer_to_finalize")
+                if frame_payload is not None and active_writer:
+                    # Use a sequential write to prevent frames from overlapping during rotation
+                    self._write_video_frame(active_writer, frame_payload)
+
+                self.write_queue.task_done()
+            except queue.Empty:
+                continue
+        self.writer_done = True
+
 
 class VideoStreamHandler_WIP(BaseHandler):
     """
-    Advanced handler optimized for 8K resolution at 15FPS.
+    Advanced handler optimized for 8K resolution at 15FPS (Target FPS).
     Implements Ping-Pong buffering and background JPEG encoding to bypass the GIL.
+    Decouples AI logs from Disk I/O to maintain 15FPS and accurate clip indexing.
     """
-
-    def __init__(self, source, name, active_streams, **kwargs):
-        """
-        Initializes the 8K pipeline and pre-allocates isolated memory buffers.
-
-        Args:
-            source (str): The RTSP URL or local file path.
-            name (str): Unique identifier for the stream.
-            active_streams (dict): Global dictionary tracking all running handlers.
-        """
-        # Initialize BaseHandler to set up cap, frame dimensions, and model
-        super().__init__(source, name, active_streams, **kwargs)
-        self.reader = HybridReader(source=self.source, target_fps=self.target_fps)
-
-        # Isolated memory buffers to prevent the Producer loop from overwriting
-        # frames currently being encoded by the background worker.
-        self.encode_buffers = [
-            np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8),
-            np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8),
-        ]
-        self.buf_idx = 0
-
-        # 3. Enhanced synchronization for 8K/15FPS
-        self.frame_buffer = deque(
-            maxlen=self.MAX_FRAMES_PER_CLIP
-        )  # 10s buffer for video clips
-        self.buffer_lock = threading.Lock()
-        self.disp_w, self.disp_h = DISPLAY_FRAME_SIZE
-
-        if DEVICE == "GPU":
-            # This prevents the AI thread from overwriting the encoder's data.
-            self.gpu_encoder_8k_buf = cv2.cuda.createContinuous(
-                self.frame_height, self.frame_width, cv2.CV_8UC3
-            )
-
-            # Continuous allocation prevents stride/padding artifacts
-            self.gpu_display_frame = cv2.cuda.createContinuous(
-                self.disp_h, self.disp_w, cv2.CV_8UC3
-            )
-
-            # Create a dedicated background stream for encoding tasks
-            self.encode_stream = cv2.cuda.Stream()
-
-    def setup_threads(self):
-        self.executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)  # 1)
-        self.process_thread = threading.Thread(
-            target=self.run_realtime_inference, daemon=True
-        )
-
-    def start(self):
-        """
-        Starts the decoupled ingestion and inference threads in the correct order.
-        """
-        # 1. Start the hardware-decoupled reader first
-        self.reader.start()
-
-        # 2. Small delay to allow the reader's deque to populate
-        time.sleep(0.1)
-
-        # 3. Start the main inference producer loop
-        if not self.process_thread.is_alive():
-            self.process_thread.start()
-
-        return self
-
-    def stop(self):
-        """
-        Comprehensive resource release. Stops threads, shuts down the pool,
-        and purges VRAM to prevent leaks in concurrent 8K environments.
-        """
-        with self._stop_lock:
-            if self._is_stopped:
-                return  # Already stopped by another thread
-
-            # Signal threads to stop
-            self.active = False
-            self._is_stopped = True  # Mark as stopped immediately
-
-        # Stop reader thread first
-        if hasattr(self, "reader"):
-            self.reader.stop()
-
-        # if self.process_thread.is_alive():
-        #     self.process_thread.join(timeout=1.0)
-
-        # Shutdown the executor to stop background JPEG encoding
-        # wait=True ensures no 'zombie' threads are left accessing GpuMats
-        if hasattr(self, "executor"):
-            self.executor.shutdown(wait=True)
-
-        if self.cap:
-            self.cap.release()
-            self.cap = None
-
-        # Purge HW Buffers
-        if DEVICE == "GPU":
-            self.cleanup_gpu()
-        else:
-            self.cleanup_cpu()
-
-        # Final Reset of the FastAPI event
-        self.frame_ready_event.set()  # Unblock any generators waiting on this stream
-
-    def async_yolo_task(self, data):
-        """
-        Orchestrates the AI pipeline for a single frame.
-
-        Steps:
-        1. (if GPU) Synchronizes CUDA stream and downloads the mask.
-        2. Executes contour-based YOLO detection.
-        3. Handoffs the frame to the background JPEG encoder.
-        """
-        # return_bytes=False
-        try:
-            frameNum = data["frameNum"]
-
-            # Use pre-allocated pinned memory from BaseHandler for 8K mask download
-            if self.device_input == "cuda":
-                self.stream.waitForCompletion()
-                # Ensure the download uses the instance-specific CUDA stream
-                self.pinned_downloaded_frame_np = data["mask"].download(self.stream)
-                # data["mask"].download(self.stream, self.pinned_downloaded_frame_np)
-
-            # Run contour-based YOLO logic and draw overlays
-            frame_bytes = self.contour2predictions(
-                frameNum,
-                self.pinned_downloaded_frame_np
-                if self.device_input == "cuda"
-                else data["mask"],
-                data["full_frame"],
-                device_input=self.device_input,
-                repeat_count=data["repeat_count"],
-                return_bytes=return_bytes,
-            )
-
-            # Thread-safe update of the latest frame for FastAPI StreamingResponse
-            if return_bytes and frameNum > self.last_delivered_frame_id:
-                if frame_bytes:
-                    self.latest_processed_frame = frame_bytes
-                    self.last_delivered_frame_id = frameNum
-                self.last_frame_id = frameNum
-                self.last_heartbeat = time.time()
-                # Signal the FastAPI generator that a new frame is ready
-                self.loop.call_soon_threadsafe(self.frame_ready_event.set)
-
-            # Offload JPEG encoding to a background worker to release the GIL
-            if not return_bytes:
-                # Rotate between buffers so the encoder has a 'locked' memory space
-                self.buf_idx = (self.buf_idx + 1) % 2
-                target_buf = self.encode_buffers[self.buf_idx]
-
-                # Perform a deep memory copy into the isolated buffer
-                # np.copyto(target_buf, data["full_frame"])
-                # np.copyto(target_buf, data["full_frame"], casting='unsafe')
-                # target_buf[:] = data["full_frame"]
-                target_buf[:] = np.ascontiguousarray(data["full_frame"])
-
-                # Submit to background worker to bypass the GIL
-                self.executor.submit(self._encode_and_signal, target_buf, frameNum)
-
-        except Exception:
-            logging.error(f"Async YOLO Error in {self.name}: {traceback.format_exc()}")
 
     def _encode_and_signal(self, pixels, frame_num):
         """Worker task for JPEG encoding to bypass GIL during stream delivery."""
@@ -1197,13 +1562,19 @@ class VideoStreamHandler_WIP(BaseHandler):
         self.loop.call_soon_threadsafe(self.frame_ready_event.set)
 
     def update_ui_fallback(self, frame, frame_num):
+        # If backlog is very high, drop JPEG quality to 25 to clear the 'pause' faster
+        backlog = self.get_executor_backlog()
+        adaptive_quality = (
+            20 if backlog > (self.dynamic_limit * 2) else DISPLAY_FRAME_QUALITY
+        )
+
         # FALLBACK: If AI is busy, worker thread encodes raw frame for the UI.
         # This offloads the 40ms CPU cost from the main Producer loop.
         display_frame = cv2.resize(
             frame, (self.disp_w, self.disp_h), interpolation=cv2.INTER_LINEAR
         )
         _, buffer = cv2.imencode(
-            ".jpg", display_frame, [cv2.IMWRITE_JPEG_QUALITY, DISPLAY_FRAME_QUALITY]
+            ".jpg", display_frame, [cv2.IMWRITE_JPEG_QUALITY, adaptive_quality]
         )
 
         # print(f"DEFAULT DISP frameNum/last_frame_id {frame_num} self.last_delivered_frame_id: {self.last_delivered_frame_id}", flush=True)  #\n\tframe_bytes: {frame_bytes}", flush=True)
@@ -1214,73 +1585,179 @@ class VideoStreamHandler_WIP(BaseHandler):
         # Signal the FastAPI generator that a new frame is ready
         self.loop.call_soon_threadsafe(self.frame_ready_event.set)
 
-    def process_frame_async(self, frame, frame_num, repeat_count=1):
-        """Worker task: Handles BGS, YOLO, or Raw Fallback."""
+    def _check_shm_safety(self, threshold_percent=90):
+        """
+        Scans /dev/shm and deletes the oldest .mp4 files if usage exceeds threshold.
+        This prevents the 8K stream from crashing the entire container.
+        """
+        import shutil
+        from pathlib import Path
+
+        # 1. Check current usage of the RAM disk
+        usage = shutil.disk_usage("/dev/shm")
+        percent_used = (usage.used / usage.total) * 100
+
+        if percent_used > threshold_percent:
+            print(
+                f" [CRITICAL] /dev/shm usage at {percent_used:.1f}%. Purging old clips..."
+            )
+
+            # 2. Get all .mp4 files in /dev/shm sorted by oldest first
+            shm_path = Path("/dev/shm")
+            clips = sorted(shm_path.glob("*.mp4"), key=lambda x: x.stat().st_mtime)
+
+            # 3. Delete files until we are under 70% usage or run out of files
+            for clip in clips:
+                try:
+                    # Don't delete the file the current writer is actively using!
+                    if str(clip) == self.tmp_file:
+                        continue
+
+                    clip.unlink()
+                    print(f" [PURGE] Deleted {clip.name} to free RAM.")
+
+                    # Re-check usage after each deletion
+                    usage = shutil.disk_usage("/dev/shm")
+                    if (usage.used / usage.total) * 100 < 70:
+                        break
+                except Exception as e:
+                    print(f" [ERROR] Could not purge {clip}: {e}")
+
+    # ----- FRAME PROCESSING -----
+    def process_frame_async(self, clip_filename, frame, frame_num, skip_ai=False):
         try:
-            # Check if we should run AI or just provide a raw preview to keep 15 FPS
-            # Use a backlog of 2 to allow for slight GPU jitter
-            if self.get_executor_backlog() < 5:  # 2:
+            # 1. FORCE ORDER: Metadata must always be processed if querying is ON.
+            # If querying is OFF, we can skip the heavy YOLO call, but we MUST
+            # stay in this thread to keep the timeline consistent.
+            inf_data = None
+            if ENABLE_QUERYING or not skip_ai:
                 if self.device_input == "cuda":
-                    inf_data = self.test_rbtdc_detection_gpu_optimized3(
-                        frame, frame_num, repeat_count=repeat_count
-                    )
+                    inf_data = self.test_rbtd_detection_gpu(frame)  # , frame_num)
                 else:
-                    inf_data = self.test_full_cpu(
-                        frame, frame_num, repeat_count=repeat_count
+                    inf_data = self.test_full_cpu(frame)  # , frame_num)
+
+            # 2. UNIFIED SIGNALING:
+            # Every 3rd frame (for 5 FPS display) must be encoded and signaled here.
+            # This ensures AI frames and Raw frames never "jump" over each other.
+            if inf_data:
+                if ENABLE_QUERYING:
+                    frame_2_write = (
+                        self.resized_frame.clone()
+                        if DEVICE == "GPU"
+                        else self.cpu_resized_frame.copy()
+                    )
+                    # Video writing logic (already in your code)
+                    self.write_queue.put(
+                        {
+                            "frame": frame_2_write,
+                            "writer_to_finalize": self.video_writer,
+                        }
                     )
 
-                if inf_data:
-                    self.async_yolo_task(inf_data)
-                    return  # Exit after successful AI update
+                # If we are skipping AI for display fluidity, tell the task
+                # to skip drawing boxes, but still process the metadata.
+                inf_data["is_display_frame"] = frame_num % 3 == 0
+                inf_data["suppress_boxes"] = skip_ai
+                inf_data["frameNum"] = frame_num
+                self.async_yolo_task(clip_filename, inf_data, RETURN_BYTES)
 
-            # else:
-            #     # FAST FALLBACK PATH: Update UI with raw frame to keep 15 FPS
-            #     self.update_ui_fallback(frame, frame_num)
+            elif frame_num % 3 == 0:
+                # NO MOTION DETECTED FALLBACK:
+                # We call update_ui_fallback from INSIDE this worker thread.
+                # This preserves the exact queue order.
+                self.update_ui_fallback(frame, frame_num)
 
         except Exception:
             logging.error(f"Pipeline failure for {self.name}: {traceback.format_exc()}")
 
     def run_realtime_inference(self):
-        """
-        Main producer loop. Fetches frames from the reader and
-        dispatches them to the AI pipeline.
-        """
+        """Producer: Maintains the target FPS and updates clip IDs."""
+        last_frame_time = time.perf_counter()
         while self.active:
-            # Get frame from the reader's deque
             frame = self.reader.read()
-
             if frame is not None:
                 self.frame_count += 1
 
-                # Re-allocate only if needed, otherwise pass pointer
-                with self.buffer_lock:
-                    self.frame_buffer.append(frame.copy())
+                # Calculate a dynamic limit: tolerate 0.5 seconds of lag.
+                # If target_fps is 15, the limit is 7. If target_fps is 30, the limit is 15.
+                self.dynamic_limit = max(2, int(0.5 * self.target_fps))
 
-                # Offload to AI or Fallback
-                self.executor.submit(self.process_frame_async, frame, self.frame_count)
+                # Determine if this frame should be AI or Raw based on backlog
+                # But ALWAYS submit to the executor to maintain frame order.
+                backlog = self.get_executor_backlog()
+
+                # Use a "Skip AI" flag instead of a "continue" skip
+                skip_ai = backlog > self.dynamic_limit
+
+                self.frame_in_clip_count += 1
+
+                # 1. Immediate Rotation (Ensures logs match the new key instantly)
+                if (
+                    ENABLE_QUERYING
+                    and self.frame_in_clip_count > self.max_frames_per_clip
+                ):
+                    # Perform safety check BEFORE starting the next 185MB clip
+                    # self._check_shm_safety(threshold_percent=90)
+
+                    # Pass old state to consumer before updating
+                    old_writer = self.video_writer
+                    old_key, old_tmp, old_final, old_frame_in_clip_count = (
+                        self.clip_key,
+                        self.tmp_file,
+                        self.clip_filename,
+                        self.frame_in_clip_count,
+                    )
+
+                    self.write_queue.put(
+                        {
+                            "control": "ROTATE",
+                            "old_key": old_key,
+                            "old_tmp": old_tmp,
+                            "old_final": old_final,
+                            "frame_in_clip_count": old_frame_in_clip_count,
+                            "writer_to_finalize": old_writer,
+                        }
+                    )
+
+                    self.clip_id += 1
+                    self.frame_in_clip_count = 1
+                    # self.video_writer = None # Nullify on main thread
+                    self._initialize_writer()
+                    # self.clip_id += 1
+                    # self.frame_in_clip_count = 1
+                    # self.video_writer = None # Nullify on main thread
+                    # self._initialize_writer()
+                    self._check_shm_safety(threshold_percent=90)
+
+                # 2. Handoff to AI and Writer
+                self.executor.submit(
+                    self.process_frame_async,
+                    self.clip_filename,
+                    frame,
+                    self.frame_count,
+                    skip_ai,
+                )
+
+                # --- PRECISE CLOCK SYNC ---
+                # This prevents the producer from "lapping" the consumer
+                # and building that jumpy backlog in the first place.
+                elapsed = time.perf_counter() - last_frame_time
+                if elapsed < self.target_interval:
+                    time.sleep(self.target_interval - elapsed)
+                last_frame_time = time.perf_counter()
+
                 self.update_frame()
                 self.last_heartbeat = time.time()
 
-                # Only submit to AI if the executor is not overwhelmed.
-                # 8K frames are ~100MB each; a backlog of 5 = 500MB RAM usage.
-                # if self.get_executor_backlog() < 5:
-                #     self.executor.submit(
-                #         self.process_frame_async,
-                #         frame,
-                #         self.frame_count
-                #     )
-                # else:
-                #     # 🏎️ FALLBACK: AI is busy. Push raw frame to UI immediately.
-                #     # This ensures the 'Live' view stays at 15 FPS.
-                #     self.update_ui_fallback(frame, self.frame_count)
-
-                # self.update_frame()
+            elif self.reader.stopped:
+                self.active = False
+                break
             else:
-                # Prevent CPU pinning if camera is slow
-                time.sleep(0.001)
+                time.sleep(0.01)
         self.stop()
 
-    def test_rbtdc_detection_gpu_optimized3(self, frame, frameNum, repeat_count=1):
+    # ----- DEVICE-SPECIFIC PIPELINES -----
+    def test_rbtd_detection_gpu(self, frame):  # , frameNum):
         """
         GPU-Accelerated Motion Detection Pipeline (Producer).
 
@@ -1313,12 +1790,11 @@ class VideoStreamHandler_WIP(BaseHandler):
             interpolation=cv2.INTER_NEAREST,
         )
 
-        if ENABLE_QUERYING and self.video_writer:  # and not self.video_queue.full():
-            self.pinned_downloaded_resizedframe_np = self.resized_frame.download(stream)
-            # self.resized_frame.download(self.stream, self.pinned_downloaded_resizedframe_np)
-            for _ in range(repeat_count):
-                # self.video_queue.put((self.video_writer, self.pinned_downloaded_resizedframe_np.copy()))
-                self.video_writer.write(self.pinned_downloaded_resizedframe_np)
+        # if ENABLE_QUERYING and self.video_writer:  # and not self.video_queue.full():
+        #     self.pinned_downloaded_resizedframe_np = self.resized_frame.download(stream)
+        #     # self.resized_frame.download(self.stream, self.pinned_downloaded_resizedframe_np)
+        #     #     self.video_writer.write(self.pinned_downloaded_resizedframe_np)
+        #     self.write_queue.put(self.pinned_downloaded_resizedframe_np.copy())
 
         # Apply Background Subtraction on GPU
         self.apply_background_subtraction_gpu(
@@ -1339,13 +1815,12 @@ class VideoStreamHandler_WIP(BaseHandler):
         )
 
         return {
-            "frameNum": frameNum,
+            # "frameNum": frameNum,  # overall frame
             "mask": self.gpu_morphed_frame,  # GpuMat pointer to cleaned mask
             "full_frame": frame,  # Kept for high-res cropping
-            "repeat_count": repeat_count,
         }
 
-    def test_full_cpu(self, frame, frameNum, repeat_count=1):
+    def test_full_cpu(self, frame):  # , frameNum):
         """
         CPU-Based Motion Detection Pipeline (Producer).
 
@@ -1365,9 +1840,8 @@ class VideoStreamHandler_WIP(BaseHandler):
         self.cpu_resized_frame = cv2.resize(
             frame, (self.resize_w, self.resize_h), interpolation=cv2.INTER_NEAREST
         )
-        if ENABLE_QUERYING and self.video_writer:
-            for _ in range(repeat_count):
-                self.video_writer.write(self.cpu_resized_frame)
+        # if ENABLE_QUERYING and self.video_writer:
+        #     self.write_queue.put(self.cpu_resized_frame.copy())
 
         # Apply Background Subtraction on CPU
         self.apply_background_subtraction_cpu(include_history=True, method="and")
@@ -1379,18 +1853,34 @@ class VideoStreamHandler_WIP(BaseHandler):
         mask = cv2.dilate(mask, self.dilate_kernel, iterations=1)
 
         return {
-            "frameNum": frameNum,
+            # "frameNum": frameNum,  # overall frame
             "mask": mask,
             "full_frame": frame,  # Kept for high-res cropping
-            "repeat_count": repeat_count,
         }
+
+    # ----- ROI RELATED -----
+    def filter_rois(self, raw_bbs, dist_thresh=25, containment_thresh=0.9):
+        bbs_full_res = sorted(
+            [pair[1] for pair in raw_bbs],
+            key=lambda x: x[0],
+            # reverse=True,
+        )
+
+        merged = merge_boxes_limit(
+            bbs_full_res,
+            dist_threshold=dist_thresh,
+            min_area=self.min_contour_area,
+            max_size=MERGE_SIZE_LIMIT,
+        )
+        merged = filter_contained_boxes(merged, containment_thresh=containment_thresh)
+        return merged
 
     def get_detections_for_contours_bbs(
         self,
         frameNum,
         foi,
         contours,
-        thickness=2,
+        thickness=THICKNESS,
         device_input="cuda",
         return_bytes=True,
     ):
@@ -1407,77 +1897,71 @@ class VideoStreamHandler_WIP(BaseHandler):
             foi (np.ndarray): 'Frame of Interest' (the 8K raw frame).
             contours (list): Contours extracted from the motion mask.
         """
-        # global active_streams
-        # source = self.source
         stream_name = self.name
         num_objs = 0
-        # predictions = []
         metadata = dict()
-        # frame_bytes = 'b'
         cropped_imgs, cropped_coords = [], []
         H, W = foi.shape[:2]  # Unpack once
-        bbs_full_res = []
 
         if not contours:
-            # if return_bytes:
+            adaptive_quality = 30 if ENABLE_QUERYING else DISPLAY_FRAME_QUALITY
             frame_bytes = get_display_frame_in_bytes(
                 foi,
                 display_size=DISPLAY_FRAME_SIZE,
-                quality=DISPLAY_FRAME_QUALITY,
+                quality=adaptive_quality,
                 return_bytes=return_bytes,
             )
             return metadata, frame_bytes  # num_objs, predictions
 
         # Filter small noise and convert contours to 8K-space bounding boxes
         raw_bbs = []
-        padding = 64
         for c in contours:
             area = cv2.contourArea(c)
             if area > self.min_contour_area:
                 x1, y1, w, h = cv2.boundingRect(c)
 
                 # Scale coordinates from 640p BGS-space to 8K-space
-                xx1 = max(0, int((x1 * self.scale_x)) - padding)
-                yy1 = max(0, int((y1 * self.scale_y)) - padding)
-                xx2 = min(W, int(((x1 + w) * self.scale_x)) + padding)
-                yy2 = min(H, int(((y1 + h) * self.scale_y)) + padding)
+                xx1 = max(0, int((x1 * self.scale_x)) - RAW_BB_FULL_RES_PADDING)
+                yy1 = max(0, int((y1 * self.scale_y)) - RAW_BB_FULL_RES_PADDING)
+                xx2 = min(W, int(((x1 + w) * self.scale_x)) + RAW_BB_FULL_RES_PADDING)
+                yy2 = min(H, int(((y1 + h) * self.scale_y)) + RAW_BB_FULL_RES_PADDING)
                 raw_bbs.append([area, [xx1, yy1, xx2, yy2]])
 
-        # Merge overlapping boxes into batches (Capped at 64 for TensorRT stability)
-        bbs_full_res = sorted(
-            [pair[1] for pair in raw_bbs],
-            key=lambda x: x[0],
-            reverse=True,
-        )  # [:MAX_DETECTIONS]
-
         dist_thresh = min(0.05 * W, 0.05 * H)
-        merged = merge_boxes_limit(
-            bbs_full_res, dist_threshold=dist_thresh, size_limit=MODEL_W
-        )
-        merged = filter_contained_boxes(merged, containment_thresh=0.9)
+        merged = self.filter_rois(raw_bbs, dist_thresh=dist_thresh)
 
         # Extract crops at full-resolution
+        crop_cnt = 0
         for x1, y1, x2, y2 in merged:
             if (
-                x2 > x1
-                and y2 > y1
+                (x2 - x1) > 31
+                and (y2 - y1) > 31
                 and (x2 - x1) < self.frame_width
                 and (y2 - y1) < self.frame_height
             ):
-                crop = foi[y1:y2, x1:x2]
-                if crop.size > 0 and crop.shape[0] > 31 and crop.shape[1] > 31:
+                crop_cnt += 1
+                if DETECTION_TYPE == "motion":
+                    foi = cv2.rectangle(
+                        foi,
+                        (x1, y1),
+                        (x2, y2),
+                        (0, 0, 255),
+                        thickness,
+                    )
+                else:
+                    crop = foi[y1:y2, x1:x2]
                     cropped_imgs.append(crop)
                     cropped_coords.append((x1, y1))
 
-            if len(cropped_imgs) == MODEL_MAX_BATCH_SIZE:
-                # logging.warning(
-                #     f"⚠️ [LIMIT] {self.name} found {len(cropped_imgs)} contours. Capping to 64 for TensorRT."
-                # )
-                # cropped_imgs = cropped_imgs[:MODEL_MAX_BATCH_SIZE]
-                # cropped_coords = cropped_coords[:MODEL_MAX_BATCH_SIZE]
-                break
+                if crop_cnt == MODEL_MAX_BATCH_SIZE:
+                    # logging.warning(
+                    #     f"⚠️ [LIMIT] {self.name} found {len(cropped_imgs)} contours. Capping to 64 for TensorRT."
+                    # )
+                    # cropped_imgs = cropped_imgs[:MODEL_MAX_BATCH_SIZE]
+                    # cropped_coords = cropped_coords[:MODEL_MAX_BATCH_SIZE]
+                    break
 
-        if not cropped_imgs:
+        if not cropped_imgs or DETECTION_TYPE == "motion":
             frame_bytes = get_display_frame_in_bytes(
                 foi,
                 display_size=DISPLAY_FRAME_SIZE,
@@ -1494,21 +1978,15 @@ class VideoStreamHandler_WIP(BaseHandler):
         #     cropped_coords = cropped_coords[:MODEL_MAX_BATCH_SIZE]
 
         # Run Inference (Keep stream=False as it is stable)
-        with model_lock:  # Use the global lock
-            results = self.model.predict(
+        results = list(
+            self.run_model(
                 cropped_imgs,
-                imgsz=MODEL_W,
+                imgsz=(self.resize_h, self.resize_w),
                 batch=len(cropped_imgs),
-                device=device_input,
-                verbose=False,
+                device_input=device_input,
                 stream=True,
-                max_det=MAX_DETECTIONS,
-                # classes=[0],  # only "person",
-                # conf=0.45,
             )
-            # Convert generator to list while still inside the lock
-            # to ensure results aren't overwritten by another thread.
-            results = list(results)
+        )
 
         # Process results and draw 8K-space overlays
         for ridx, r in enumerate(results):
@@ -1612,13 +2090,29 @@ class VideoStreamHandler_WIP(BaseHandler):
 
         return metadata, frame_bytes
 
+    def get_reduced_contour(self, mask, contours):
+        foi = np.zeros_like(mask)
+        for c in contours:
+            area = cv2.contourArea(c)
+            x1, y1, w, h = cv2.boundingRect(c)
+            if (
+                area > self.min_contour_area and w < self.resize_w and h < self.resize_h
+            ):  # and area / (w*h) >=0.3:  # and 0.5 < (w / h) < 2.0: # w/ solidity & aspect
+                x2 = x1 + w
+                y2 = y1 + h
+                foi = cv2.rectangle(foi, (x1, y1), (x2, y2), 255, -1)  # BGR- CYAN
+        reduced_contours, _ = cv2.findContours(
+            foi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        return reduced_contours, foi
+
     def contour2predictions(
         self,
-        frameNum,
+        clip_filename,
+        frameNum,  # Frame used in metadata
         mask,
         frame,
         device_input="cpu",
-        repeat_count=1,
         return_bytes=True,
     ):
         """
@@ -1628,36 +2122,105 @@ class VideoStreamHandler_WIP(BaseHandler):
             mask (GpuMat/np.ndarray): The motion mask (from BGS).
             frame (np.ndarray): The original 8K frame.
         """
+        global all_metadata, video_ready_list
+        clip_key = Path(self.clip_filename).name
         # Extract contours from the motion mask
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, mask = self.get_reduced_contour(mask, contours)
 
         # Write frame
         # self.video_writer.write(frame)
-        # if self.video_writer:
-        #     for _ in range(repeat_count):
         # self.video_writer.write(self.cpu_resized_frame)
 
         # Pass contours to the YOLO detection logic
         metadata = dict()
         metadata, frame_bytes = self.get_detections_for_contours_bbs(
-            frameNum,
+            frameNum,  # Frame used in metadata
             frame,
             contours,
-            thickness=2,
+            thickness=THICKNESS,
             device_input=device_input,
             return_bytes=return_bytes,
         )
 
         # Update global metadata for storage (Database/JSON)
-        if metadata:
+        if metadata and ENABLE_QUERYING:
             all_metadata.setdefault(
-                self.clip_key,
+                clip_key,
                 {
                     "object": {},
                     "face": {},
                 },
             )
-            all_metadata[self.clip_key]["object"].update(metadata)
+            all_metadata[clip_key]["object"].update(metadata)
+            # print(f"self.clip_key: {self.clip_key} objs: {list(metadata.keys())}")
+
+        is_last_frame = (frameNum % self.max_frames_per_clip) == 0
+        if is_last_frame and ENABLE_QUERYING:
+            # Update the tracker that AI work for this clip is done
+            check_and_dispatch_to_vdms(
+                clip_filename, self.resize_w, self.resize_h, component="meta"
+            )
 
         # frame_bytes returned even if no metadata available
         return frame_bytes
+
+    def async_yolo_task(self, clip_filename, data, return_bytes=True):
+        """
+        Orchestrates the AI pipeline for a single frame.
+
+        Steps:
+        1. (if GPU) Synchronizes CUDA stream and downloads the mask.
+        2. Executes contour-based YOLO detection.
+        3. Handoffs the frame to the background JPEG encoder.
+        """
+        try:
+            frameNum = data["frameNum"]  # overall frame
+
+            # Use pre-allocated pinned memory from BaseHandler for 8K mask download
+            if self.device_input == "cuda":
+                self.stream.waitForCompletion()
+                # Ensure the download uses the instance-specific CUDA stream
+                self.pinned_downloaded_frame_np = data["mask"].download(self.stream)
+                # data["mask"].download(self.stream, self.pinned_downloaded_frame_np)
+
+            # Run contour-based YOLO logic and draw overlays
+            frame_bytes = self.contour2predictions(
+                clip_filename,
+                ((frameNum - 1) % self.max_frames_per_clip)
+                + 1,  # Frame used in metadata; index 1
+                self.pinned_downloaded_frame_np
+                if self.device_input == "cuda"
+                else data["mask"],
+                data["full_frame"],
+                device_input=self.device_input,
+                return_bytes=return_bytes,
+            )
+
+            # Thread-safe update of the latest frame for FastAPI StreamingResponse
+            if return_bytes and frameNum > self.last_delivered_frame_id:
+                if frame_bytes:
+                    self.latest_processed_frame = frame_bytes
+                    self.last_delivered_frame_id = frameNum
+                self.last_frame_id = frameNum
+                self.last_heartbeat = time.time()
+                # Signal the FastAPI generator that a new frame is ready
+                self.loop.call_soon_threadsafe(self.frame_ready_event.set)
+
+            # Offload JPEG encoding to a background worker to release the GIL
+            # if not return_bytes:
+            #     # Rotate between buffers so the encoder has a 'locked' memory space
+            #     self.buf_idx = (self.buf_idx + 1) % 2
+            #     target_buf = self.encode_buffers[self.buf_idx]
+
+            #     # Perform a deep memory copy into the isolated buffer
+            #     # np.copyto(target_buf, data["full_frame"])
+            #     # np.copyto(target_buf, data["full_frame"], casting='unsafe')
+            #     # target_buf[:] = data["full_frame"]
+            #     target_buf[:] = np.ascontiguousarray(data["full_frame"])
+
+            #     # Submit to background worker to bypass the GIL
+            #     self.executor.submit(self._encode_and_signal, target_buf, frameNum)
+
+        except Exception:
+            logging.error(f"Async YOLO Error in {self.name}: {traceback.format_exc()}")
