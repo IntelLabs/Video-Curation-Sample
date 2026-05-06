@@ -5,7 +5,7 @@ define(`PROFILE_GPU', `runtime: nvidia
                 reservations:
                     devices:
                         - driver: nvidia
-                          capabilities: [gpu]')
+                          capabilities: [`gpu,video,compute,utility']')
     video-service:
         image: defn(`REGISTRY_PREFIX')lcc_video:stream
         environment:
@@ -104,4 +104,4 @@ define(`PROFILE_GPU', `runtime: nvidia
         depends_on:
             - udf-service
             - vdms-service
-        ifdef(`GPU', PROFILE_GPU, PROFILE_DEFAULT)
+        ifelse(ifdef(`GPU', `yes'), `yes', PROFILE_GPU, PROFILE_DEFAULT)

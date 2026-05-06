@@ -2,9 +2,9 @@ import warnings
 
 warnings.filterwarnings("ignore", message="The value of the smallest subnormal for")
 
-
 import asyncio
 import logging
+import multiprocessing as mp
 import os
 import shutil
 import sys
@@ -12,22 +12,47 @@ import time
 from datetime import datetime
 
 import psutil
-from include.handlers import ENABLE_QUERYING, SHARED_MODEL, lifespan
+from include.handlers import lifespan
+from include.utils import PipelineConfig, StreamRequest, str2bool
 
-if ENABLE_QUERYING:
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from fastapi.templating import Jinja2Templates
+
+RUN_CONFIG = PipelineConfig(
+    CODE_DIR=os.getenv("CODE_DIR", "/home"),
+    CUSTOM_MODEL_FLAG=str2bool(os.getenv("CUSTOM_MODEL_FLAG", False)),
+    DBHOST=os.getenv("DBHOST", "vdms-service"),
+    DEBUG=os.getenv("DEBUG", "0"),
+    DEVICE=os.getenv("DEVICE", "CPU"),
+    ENABLE_QUERYING=False,  # os.getenv("ENABLE_QUERYING", False),
+    INGESTION=os.getenv("INGESTION", "object"),
+    MODEL_NAME=os.getenv("MODEL_NAME", "yolo11n"),
+    OMIT_DETECTIONS_FLAG=str2bool(os.getenv("OMIT_DETECTIONS_FLAG", False)),
+    # RESIZE_FLAG=str2bool(os.getenv("RESIZE_FLAG", False)),
+    SHARED_MODEL=os.getenv("SHARED_MODEL", False),
+    SHARED_OUTPUT=os.getenv("SHARED_OUTPUT", "/var/www/mp4"),
+    TEST_MODE=str2bool(os.getenv("TEST_MODE", False)),
+    TMP_LOCATION=os.getenv("TMP_LOCATION", "/var/www/cache"),
+    UDF_HOST=os.getenv("UDF_HOST", "udf-service"),
+    UDF_PORT=5011,
+)
+if RUN_CONFIG.DEVICE == "GPU":
+    from include.handlers import GPUStreamHandler
+
+    VideoStreamHandler = GPUStreamHandler
+else:
+    from include.handlers import CPUStreamHandler
+
+    VideoStreamHandler = CPUStreamHandler
+
+
+if RUN_CONFIG.ENABLE_QUERYING:
     from include.handlers import (
         all_metadata,
         clip_completion_tracker,
         send_metadata_queue,
     )
-
-
-from include.handlers import VideoStreamHandler_WIP as VideoStreamHandler
-from include.utils import DEBUG, StreamRequest
-
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
-from fastapi.templating import Jinja2Templates
 
 # ----- LOGGING CONFIGURATION -----
 # Standardizes logs across the application and uvicorn server
@@ -60,7 +85,7 @@ async def index(request: Request):
         TemplateResponse: HTML page with the list of currently active camera IDs.
     """
     curr_keys = list(request.app.state.active_streams.keys())
-    if DEBUG == "1":
+    if RUN_CONFIG.DEBUG_FLAG:
         print(f"Active Streams: {curr_keys}")
 
     return templates.TemplateResponse(
@@ -88,11 +113,12 @@ async def stream_video(data: StreamRequest, request: Request):
         print(f"Starting background worker for {name}...")
 
         # Check if a global model instance should be passed to the handler
-        if SHARED_MODEL:
+        if RUN_CONFIG.SHARED_MODEL:
             handler = VideoStreamHandler(
                 url,
                 name,
                 active_streams,
+                config=RUN_CONFIG,
                 model=app.state.model,
             )
         else:
@@ -100,6 +126,7 @@ async def stream_video(data: StreamRequest, request: Request):
                 url,
                 name,
                 active_streams,
+                config=RUN_CONFIG,
             )
 
         # Start the background thread (OpenCV capture + AI inference)
@@ -109,7 +136,7 @@ async def stream_video(data: StreamRequest, request: Request):
         app.state.active_streams[name] = handler
 
     curr_keys = list(app.state.active_streams.keys())
-    if DEBUG == "1":
+    if RUN_CONFIG.DEBUG_FLAG:
         print(
             f"stream DEBUG VIEW | PID: {os.getpid()} | Looking for: {name} | Found Keys: {curr_keys}"
         )
@@ -143,6 +170,8 @@ async def view_stream(name: str, request: Request):
         Yields frames only when the background worker signals a new frame is ready.
         Ensures strict chronological order using frame IDs.
         """
+        shm_names = streamer.shared_details["shm_names"]
+        reader_shms = [mp.shared_memory.SharedMemory(name=n) for n in shm_names]
         last_sent_id = -1
         try:
             while streamer.active:
@@ -155,11 +184,30 @@ async def view_stream(name: str, request: Request):
                 await streamer.frame_ready_event.wait()
                 streamer.frame_ready_event.clear()  # Reset for the next frame
 
+                # streamer.reader_busy.value = True
+                # target_idx = streamer.ready_buffer_idx.value
+
+                # streamer.reader_active_idx.value = target_idx
+
                 # Frame Synchronization: ensure we don't send duplicate or out-of-order frames
-                if streamer.last_frame_id > last_sent_id:
-                    if streamer.latest_processed_frame:
-                        frame_bytes = streamer.latest_processed_frame
+                current_id = streamer.shared_details.get("last_id", -1)
+                if current_id > last_sent_id:
+                    ready_idx = streamer.ready_buffer_idx.value
+                    streamer.reader_active_idx.value = ready_idx
+                    frame_len = streamer.shm_frame_lengths[ready_idx]
+
+                    if frame_len > 0:
+                        # shm_name = streamer.shared_details["shm_name"]
+                        # shm_name = shm_names[ready_idx]
+                        # print(f"DEBUG: Displaying SHM {shm_name}")
+                        # frame_bytes = streamer.latest_processed_frame
+                        try:
+                            frame_bytes = bytes(reader_shms[ready_idx].buf[:frame_len])
+                        finally:
+                            streamer.reader_active_idx.value = -1
+                        last_sent_id = current_id
                         streamer.last_heartbeat = time.time()
+                        # streamer.reader_busy.value = False
 
                         # Multipart JPEG delivery with explicit Content-Length for stability
                         yield (
@@ -168,19 +216,24 @@ async def view_stream(name: str, request: Request):
                             b"Content-Length: "
                             + str(len(frame_bytes)).encode()
                             + b"\r\n\r\n"
+                            # b"Content-Length: "
+                            # + str(len(frame_bytes)).encode()
+                            # + b"\r\n\r\n"
                             + frame_bytes
                             + b"\r\n"
                         )
-                        last_sent_id = streamer.last_frame_id
+                        # last_sent_id = current_id
 
                 # Yield control to the event loop to prevent blocking
                 await asyncio.sleep(0.001)
         except Exception as e:
             main_app_logger.error(f"Generator Error: {e}")
+        # finally:
+        #     streamer.reader_busy.value = False # Safety unlock
 
     return StreamingResponse(
         frame_generator(streamer, request),
-        media_type="multipart/x-mixed-replace;boundary=frame",
+        media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
 
@@ -219,7 +272,9 @@ async def dashboard_stats(request: Request):
         ai_backlog = streamer.get_executor_backlog()
 
         # Video Backlog: Frames waiting for Disk I/O
-        video_backlog = streamer.write_queue.qsize() if ENABLE_QUERYING else 0
+        video_backlog = (
+            streamer.write_queue.qsize() if streamer.config.ENABLE_QUERYING else 0
+        )
 
         # IO Backlog: Frames queued for disk storage (if enabled)
         io_backlog = (
@@ -240,7 +295,7 @@ async def dashboard_stats(request: Request):
             "ai_backlog": ai_backlog,
             "video_backlog": video_backlog,
             "io_backlog": io_backlog,
-            "querying_active": ENABLE_QUERYING,
+            "querying_active": streamer.config.ENABLE_QUERYING,
             "total_frames": streamer.stat_frame_count,
             "shm_usage": f"{shm_percent:0.1f}%",
         }
@@ -273,7 +328,7 @@ async def stop_stream(name: str, request: Request):
         loop = asyncio.get_event_loop()
         loop.run_in_executor(None, streamer.stop)
 
-        if DEBUG == "1":
+        if streamer.config.DEBUG_FLAG:
             print(f"--- CLEANUP | Stream '{name}' stopped and removed. ---")
         return {"status": "stopped", "camera": name}
 
@@ -315,7 +370,7 @@ async def health_check(request: Request):
     Returns:
         dict: Hardware metrics, stream backlogs, and executor status.
     """
-    # 1. Hardware Metrics
+    # Hardware Metrics
     ram = psutil.virtual_memory()
     # Check RAM disk usage (critical for 8K MJPEG/MP4 buffers)
     shm = shutil.disk_usage("/dev/shm")
@@ -332,7 +387,7 @@ async def health_check(request: Request):
         "stream_details": {},
     }
 
-    # 2. Pipeline Backlogs (Identify bottlenecks)
+    # Pipeline Backlogs (Identify bottlenecks)
     for name, streamer in request.app.state.active_streams.items():
         health_data["stream_details"][name] = {
             "ai_backlog": streamer.get_executor_backlog(),
@@ -343,8 +398,8 @@ async def health_check(request: Request):
             "uptime_sec": round(time.perf_counter() - streamer.stat_start_time, 1),
         }
 
-    # 3. Global Sync Health
-    if ENABLE_QUERYING:
+    # Global Sync Health
+    if RUN_CONFIG.ENABLE_QUERYING:
         health_data["sync_engine"] = {
             "pending_completions": len(clip_completion_tracker),
             "metadata_buffer_size": len(all_metadata),

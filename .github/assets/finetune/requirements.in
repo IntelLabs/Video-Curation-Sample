@@ -2,7 +2,7 @@ cucim>=23.10.0
 cupy-cuda12x>=13.6.0
 numpy>=1.26.4
 nvidia-cuda-runtime-cu12>=12.8.90
-nvidia-cudnn-cu12
+nvidia-cudnn-cu12>=9.10.2.21
 onnx>=1.21.0
 onnxruntime-gpu>=1.23.2
 onnxslim>=0.1.82

@@ -1,28 +1,167 @@
 # Copyright (C) 2025 Intel Corporation
 
 import os
-import shlex
+import queue
 import subprocess
 import time
 import traceback
 from dataclasses import dataclass
-from datetime import datetime
 from math import ceil
 from pathlib import Path
 from random import randint
 
+import cupy
+import cupyx.scipy
+import cupyx.scipy.ndimage
 import cv2
 import numpy as np
+import torch
+from include.default_configs import (
+    BKGD_SUB_INCLUDE_HISTORY,
+    BKGD_SUB_INCLUDE_HISTORY_DILATE_KERNEL_SIZE,
+    BKGD_SUB_INCLUDE_HISTORY_METHOD,
+    BKGD_SUB_INCLUDE_HISTORY_TEMPORAL_SIZE,
+    BKGD_SUB_MOG2_DETECTSHADOWS,
+    BKGD_SUB_MOG2_HISTORY,
+    BKGD_SUB_MOG2_LR,
+    BKGD_SUB_MOG2_VARTHRESHOLD,
+    CLIP_DURATION_DEFAULT,
+    CODE_DIR_DEFAULT,
+    CUSTOM_MODEL_FLAG_DEFAULT,
+    DBHOST_DEFAULT,
+    DBPORT_DEFAULT,
+    DEBUG_DEFAULT,
+    DETECTION_THRESHOLD_DEFAULT,
+    DETECTION_TYPE_DEFAULT,
+    DEVICE_DEFAULT,
+    DILATE_KERNEL_SIZE,
+    DISPLAY_FRAME_QUALITY,
+    DISPLAY_FRAME_SIZE,
+    INGESTION_DEFAULT,
+    MAX_DETECTIONS,
+    MAX_WORKERS,
+    MODEL_H,
+    MODEL_MAX_BATCH_SIZE,
+    MODEL_NAME_DEFAULT,
+    MODEL_PRECISION,
+    MODEL_W,
+    OMIT_DETECTIONS_FLAG_DEFAULT,
+    RESIZE_FLAG_DEFAULT,
+    ROI_BB_FULL_RES_PADDING,
+    ROI_CONTAINMENT_THRESH,
+    ROI_DISTANCE_THRESH_RATIO,
+    ROI_MAX_RELATIVE_SIZE_RATIO,
+    ROI_MERGE_SIZE_LIMIT,
+    ROI_MIN_AREA_RATIO,
+    SHARED_OUTPUT_DEFAULT,
+    SMART_FILTERING_ENABLED,
+    SMART_FILTERING_PIXEL_CONSTRAINT,
+    TARGET_FPS,
+    TEST_MODE_DEFAULT,
+    THICKNESS,
+    THRESHOLD_MAX_VALUE,
+    THRESHOLD_VALUE,
+    TMP_LOCATION_DEFAULT,
+    UDF_HOST_DEFAULT,
+    UDF_PORT_DEFAULT,
+)
 from pydantic import BaseModel
 
 # import streamlit as st
-from ultralytics import YOLO
-
 import vdms
 
 """
 GENERAL DEFINITIONS/FUNCTIONS
 """
+
+
+def merge_boxes_gpu(raw_boxes, gap_limit=10):
+    device_input = "cuda"
+    x1, y1, x2, y2 = raw_boxes.unbind(1)
+
+    # Calculate pairwise gaps [N, N] using broadcasted subtraction
+    h_gaps = torch.max(
+        torch.zeros(1, device=device_input),
+        torch.max(x1.unsqueeze(0) - x2.unsqueeze(1), x1.unsqueeze(1) - x2.unsqueeze(0)),
+    )
+    v_gaps = torch.max(
+        torch.zeros(1, device=device_input),
+        torch.max(y1.unsqueeze(0) - y2.unsqueeze(1), y1.unsqueeze(1) - y2.unsqueeze(0)),
+    )
+
+    adj = (h_gaps < gap_limit) & (v_gaps < gap_limit)
+
+    # Parallel Connected Components (Iterative grouping)
+    components = torch.arange(raw_boxes.shape[0], device=device_input)
+    for _ in range(3):  # Reduced iterations for lower latency
+        components = torch.max(adj * components, dim=1)[0]
+
+    # Fused Cluster Extraction
+    unique_ids = components.unique()
+    raw_boxes = torch.stack(
+        [
+            torch.cat(
+                [
+                    raw_boxes[components == i, :2].min(0)[0],
+                    raw_boxes[components == i, 2:].max(0)[0],
+                ]
+            )
+            for i in unique_ids
+        ]
+    )
+    return raw_boxes
+
+
+def merge_boxes_cpu(boxes, gap_limit=10):
+    """
+    Greedy merge in 640x640 space to consolidate swarm fragments.
+    Input: List of [x1, y1, x2, y2] within [0, 640]
+    """
+    if not boxes:
+        return []
+
+    # O(N log N) sort by X for early exit optimization
+    boxes = sorted(boxes, key=lambda x: x[0])
+    merged = []
+
+    while boxes:
+        curr = boxes.pop(0)
+        i = 0
+        while i < len(boxes):
+            test = boxes[i]
+            # Early exit: horizontal gap exceeds limit
+            if test[0] - curr[2] > gap_limit:
+                break
+
+            # Check vertical gap
+            y_dist = max(0, test[1] - curr[3], curr[3] - test[1])
+            if y_dist <= gap_limit:
+                # Expand curr box to include test
+                curr = [
+                    min(curr[0], test[0]),
+                    min(curr[1], test[1]),
+                    max(curr[2], test[2]),
+                    max(curr[3], test[3]),
+                ]
+                boxes.pop(i)
+                i = 0  # Re-check boundaries
+            else:
+                i += 1
+        merged.append(curr)
+    return merged
+
+
+def get_freest_gpu():
+    # Queries free memory from nvidia-smi
+    command = "nvidia-smi --query-gpu=memory.free --format=csv,nounits,noheader"
+    memory_free = [
+        int(x)
+        for x in subprocess.check_output(command.split()).decode("ascii").split("\n")
+        if x
+    ]
+
+    # Return index of GPU with maximum free memory
+    return memory_free.index(max(memory_free))
 
 
 def safely_join_path(base_dir, add_path):
@@ -47,61 +186,135 @@ def str2bool(in_val):
 
 
 PROJECT_PATH = Path(__file__).parent.parent
-CONDITION_OPTIONS = ["", ">", ">=", "<", "<=", "==", "!="]
 
-AVAILABLE_MODELS = [  # Default model listed first
-    "Ultralytics-yolo11n-ov-FP16",
-    "Ultralytics-yolo11n-pt-FP16",
-]
+DEBUG_FLAG_DEFAULT = True if DEBUG_DEFAULT == "1" else False
 
-YOLO_BATCH_SIZE = 1
-ENABLE_VDMS = os.getenv("ENABLE_VDMS", True)
-DBPORT = 55555
-DETECTION_THRESHOLD = 0.25
-DEVICE_OV = "AUTO"
-DYNAMIC_FLAG = True
-FILETYPES = ["mp4", "avi"]
-HALF_FLAG = True
-IOU_THRESHOLD = 0.7
-MODEL_PRECISION = "FP16"
-MODEL_W, MODEL_H = (640, 640)
-NUM_USUABLE_CPUS = 2
-WRITER_FOURCC = cv2.VideoWriter_fourcc(*"mp4v")  # avc1, mp4v
+LOCKTIMEOUT_RETRIES = 5
 
-CODE_DIR = os.getenv("CODE_DIR", "/home")
-CUSTOM_MODEL_FLAG = str2bool(os.getenv("CUSTOM_MODEL_FLAG", False))
-DBHOST = os.getenv("DBHOST", "vdms-service")
-DEBUG = os.getenv("DEBUG", "0")
-DEBUG_FLAG = True if DEBUG == "1" else False
-# DEVICE = os.environ.get("DEVICE", "CPU")
-DEVICE = os.getenv("DEVICE", "CPU")
-device_input = DEVICE.lower() if DEVICE == "CPU" else "cuda"
-INGESTION = os.getenv("INGESTION", "object,face")
-MODEL_NAME = os.getenv("MODEL_NAME", "yolo11n")
-OMIT_DETECTIONS_FLAG = str2bool(os.getenv("OMIT_DETECTIONS_FLAG", False))
-RESIZE_FLAG = str2bool(os.getenv("RESIZE_FLAG", False))
-SHARED_OUTPUT = os.getenv("SHARED_OUTPUT", "/var/www/mp4")
-Path(SHARED_OUTPUT).mkdir(parents=True, exist_ok=True)
-TEST_MODE = str2bool(os.getenv("TEST_FLAG", False))
-TMP_LOCATION = os.getenv("TMP_LOCATION", "/var/www/cache")
-UDF_HOST = os.getenv("UDF_HOST", "udf-service")
-UDF_PORT = 5011
 
-if DEVICE == "GPU":
-    import cupy
+class PipelineConfig:
+    def __init__(self, **kwargs):
+        # Fallback to env var if not explicitly passed
 
-    EXPORT_BATCH_SIZE = int(os.environ.get("GPU_BATCH_SIZE", 1))
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    print("[!] USING GPU")
+        # GENERAL
+        self.CODE_DIR = kwargs.get("CODE_DIR", CODE_DIR_DEFAULT)
+        self.CUSTOM_MODEL_FLAG = str2bool(
+            kwargs.get("CUSTOM_MODEL_FLAG", CUSTOM_MODEL_FLAG_DEFAULT)
+        )
+        self.DEBUG = kwargs.get("DEBUG", DEBUG_DEFAULT)
+        self.DEBUG_FRAME_LIMIT = int(kwargs.get("DEBUG_FRAME_LIMIT", 100))
+        self.DEVICE = kwargs.get("DEVICE", DEVICE_DEFAULT)
+        self.MAX_WORKERS = int(kwargs.get("MAX_WORKERS", MAX_WORKERS))
+        self.OMIT_DETECTIONS_FLAG = str2bool(
+            kwargs.get("OMIT_DETECTIONS_FLAG", OMIT_DETECTIONS_FLAG_DEFAULT)
+        )
+        self.SHARED_OUTPUT = kwargs.get("SHARED_OUTPUT", SHARED_OUTPUT_DEFAULT)
+        self.TEST_MODE = str2bool(kwargs.get("TEST_MODE", TEST_MODE_DEFAULT))
+        self.TMP_LOCATION = kwargs.get("TMP_LOCATION", TMP_LOCATION_DEFAULT)
 
-else:
-    EXPORT_BATCH_SIZE = int(os.environ.get("CPU_BATCH_SIZE", 1))  # 8
-    print("[!] USING CPU")
+        # VIDEO WRITER
+        CLIP_DURATION = kwargs.get("CLIP_DURATION", CLIP_DURATION_DEFAULT)
+        target_fps = kwargs.get("TARGET_FPS", TARGET_FPS)
+        self.CLIP_DURATION = (
+            None if CLIP_DURATION in ["None", None] else float(CLIP_DURATION)
+        )
+        self.TARGET_FPS = None if target_fps in [None, "None"] else float(target_fps)
 
-# if not TEST_MODE:
-#     db = vdms.vdms()
-#     db.connect(DBHOST, DBPORT)
-import queue
+        # VDMS
+        self.DBHOST = kwargs.get("DBHOST", DBHOST_DEFAULT)
+        self.DBPORT = int(kwargs.get("DBPORT", DBPORT_DEFAULT))
+        self.ENABLE_QUERYING = str2bool(kwargs.get("ENABLE_QUERYING", False))
+        self.INGESTION = kwargs.get("INGESTION", INGESTION_DEFAULT)
+        self.UDF_HOST = kwargs.get("UDF_HOST", UDF_HOST_DEFAULT)
+        self.UDF_PORT = int(kwargs.get("UDF_PORT", UDF_PORT_DEFAULT))
+
+        # MODEL
+        self.DETECTION_THRESHOLD = float(
+            kwargs.get("DETECTION_THRESHOLD", DETECTION_THRESHOLD_DEFAULT)
+        )
+        self.MAX_DETECTIONS = int(kwargs.get("MAX_DETECTIONS", MAX_DETECTIONS))
+        self.MODEL_H = int(kwargs.get("MODEL_H", MODEL_H))
+        self.MODEL_W = int(kwargs.get("MODEL_W", MODEL_W))
+        self.MODEL_MAX_BATCH_SIZE = int(
+            kwargs.get("MODEL_MAX_BATCH_SIZE", MODEL_MAX_BATCH_SIZE)
+        )
+        self.MODEL_NAME = kwargs.get("MODEL_NAME", MODEL_NAME_DEFAULT)
+        self.MODEL_PRECISION = kwargs.get("MODEL_PRECISION", MODEL_PRECISION)
+        self.SHARED_MODEL = kwargs.get("SHARED_MODEL", False)
+
+        # PIPELINE
+        self.SMART_FILTERING_PIXEL_CONSTRAINT = SMART_FILTERING_PIXEL_CONSTRAINT
+        self.BKGD_SUB_INCLUDE_HISTORY = BKGD_SUB_INCLUDE_HISTORY
+        self.BKGD_SUB_INCLUDE_HISTORY_DILATE_KERNEL_SIZE = (
+            BKGD_SUB_INCLUDE_HISTORY_DILATE_KERNEL_SIZE
+        )
+        self.BKGD_SUB_INCLUDE_HISTORY_METHOD = BKGD_SUB_INCLUDE_HISTORY_METHOD
+        self.BKGD_SUB_MOG2_DETECTSHADOWS = BKGD_SUB_MOG2_DETECTSHADOWS
+        self.BKGD_SUB_MOG2_HISTORY = BKGD_SUB_MOG2_HISTORY
+        self.BKGD_SUB_INCLUDE_HISTORY_TEMPORAL_SIZE = (
+            BKGD_SUB_INCLUDE_HISTORY_TEMPORAL_SIZE
+        )
+        self.BKGD_SUB_MOG2_LR = BKGD_SUB_MOG2_LR
+        self.BKGD_SUB_MOG2_VARTHRESHOLD = BKGD_SUB_MOG2_VARTHRESHOLD
+        self.DILATE_KERNEL_SIZE = DILATE_KERNEL_SIZE
+        self.RESIZE_FLAG = str2bool(kwargs.get("RESIZE_FLAG", RESIZE_FLAG_DEFAULT))
+        self.ROI_BB_FULL_RES_PADDING = int(
+            kwargs.get("ROI_BB_FULL_RES_PADDING", ROI_BB_FULL_RES_PADDING)
+        )
+        self.ROI_MAX_RELATIVE_SIZE_RATIO = float(
+            kwargs.get("ROI_MAX_RELATIVE_SIZE_RATIO", ROI_MAX_RELATIVE_SIZE_RATIO)
+        )
+        self.ROI_MERGE_SIZE_LIMIT = int(
+            kwargs.get("ROI_MERGE_SIZE_LIMIT", ROI_MERGE_SIZE_LIMIT)
+        )
+        self.ROI_MIN_AREA_RATIO = ROI_MIN_AREA_RATIO
+        self.ROI_DISTANCE_THRESH_RATIO = ROI_DISTANCE_THRESH_RATIO
+        self.ROI_CONTAINMENT_THRESH = ROI_CONTAINMENT_THRESH
+        self.ROI_RETURN_BYTES = str2bool(kwargs.get("ROI_RETURN_BYTES", True))
+        self.THRESHOLD_MAX_VALUE = int(
+            kwargs.get("THRESHOLD_MAX_VALUE", THRESHOLD_MAX_VALUE)
+        )
+        self.THRESHOLD_VALUE = int(kwargs.get("THRESHOLD_VALUE", THRESHOLD_VALUE))
+
+        # VISUALIZATION
+        self.DETECTION_TYPE = kwargs.get("DETECTION_TYPE", DETECTION_TYPE_DEFAULT)
+        self.DISPLAY_FRAME_QUALITY = int(
+            kwargs.get("DISPLAY_FRAME_QUALITY", DISPLAY_FRAME_QUALITY)
+        )
+        self.DISPLAY_FRAME_SIZE = kwargs.get("DISPLAY_FRAME_SIZE", DISPLAY_FRAME_SIZE)
+        self.THICKNESS = int(kwargs.get("THICKNESS", THICKNESS))
+
+        # VARS WITH DEPENDENCIES
+        Path(self.SHARED_OUTPUT).mkdir(parents=True, exist_ok=True)
+        self.device_input = self.DEVICE.lower() if self.DEVICE == "CPU" else "cuda"
+        self.DEBUG_FLAG = True if self.DEBUG == "1" else False
+
+        if self.DETECTION_TYPE == "motion" and self.ENABLE_QUERYING:
+            self.ENABLE_QUERYING = False
+            self.DISPLAY_FRAME_QUALITY = 100
+            self.THICKNESS = 10
+
+        self.sf_enabled = kwargs.get("SMART_FILTERING_ENABLED", SMART_FILTERING_ENABLED)
+        if self.CUSTOM_MODEL_FLAG:
+            self.model_path = f"{self.CODE_DIR}/resources/models/ultralytics/custom_models/{self.MODEL_NAME}"
+        else:
+            self.model_path = f"{self.CODE_DIR}/resources/models/ultralytics/{self.MODEL_NAME}/{self.MODEL_PRECISION}/{self.MODEL_NAME}"
+
+        if not self.sf_enabled:
+            self.model_path += "_noSF"
+
+        if self.DEVICE == "GPU":
+            self.model_path += ".engine"
+
+            # Force PyTorch to initialize the CUDA context
+            if torch.cuda.is_available():
+                best_gpu_index = get_freest_gpu()
+                os.environ["CUDA_VISIBLE_DEVICES"] = str(best_gpu_index)
+                torch.cuda.set_device(0)
+                torch.cuda.empty_cache()
+                print(f"Using GPU: {torch.cuda.get_device_name(0)}", flush=True)
+        else:
+            self.model_path += "_openvino_model/"
 
 
 class VDMSPool:
@@ -110,9 +323,11 @@ class VDMSPool:
         self.port = port
         self.size = size
         self.pool = queue.Queue(maxsize=size)
+        self.populate()
 
+    def populate(self):
         # Pre-populate the pool with authenticated connections
-        for _ in range(size):
+        for _ in range(self.size):
             self.pool.put(self._create_connection())
 
     def _create_connection(self):
@@ -129,9 +344,11 @@ class VDMSPool:
         self.pool.put(conn)
 
 
-VDMS_POOL = None
+# device_input_DEFAULT = DEVICE_DEFAULT.lower() if DEVICE_DEFAULT == "CPU" else "cuda"
+# Path(SHARED_OUTPUT_DEFAULT).mkdir(parents=True, exist_ok=True)
 
-LOCKTIMEOUT_RETRIES = 5
+# VDMS_POOL = None
+
 ERR_KEYWORDS = [
     "timeout",
     "null search iterator",
@@ -139,10 +356,6 @@ ERR_KEYWORDS = [
     "internal server",
 ]
 
-
-MASK_THRESHOLD_VALUE = 127
-MASK_MAX_VALUE = 255
-MAX_DETECTIONS = 100
 
 # Plot variables
 THICKNESS_SCALE_FACTOR = 1e-3
@@ -262,113 +475,377 @@ for h in PLOT_HEXS:
     )
 
 
-if DEVICE == "GPU":
-    bbox_kernel = cupy.ElementwiseKernel(
-        "S label_image, int32 width",
-        "raw T bboxes",
-        """
-        if (label_image > 0) {
-            int label = (int)label_image;
+# if DEVICE == "GPU":
+bbox_kernel = cupy.ElementwiseKernel(
+    "S label_image, int32 width",
+    "raw T bboxes",
+    """
+    if (label_image > 0) {
+        int label = (int)label_image;
 
-            int y = i / width;
-            int x = i % width;
-            // Atomic operations to find min/max coordinates
-            atomicMin(&bboxes[label * 4 + 0], y); // min_y
-            atomicMin(&bboxes[label * 4 + 1], x); // min_x
-            atomicMax(&bboxes[label * 4 + 2], y); // max_y
-            atomicMax(&bboxes[label * 4 + 3], x); // max_x
-        }
-        """,
-        "bbox_kernel",
-    )
+        int y = i / width;
+        int x = i % width;
+        // Atomic operations to find min/max coordinates
+        atomicMin(&bboxes[label * 4 + 0], y); // min_y
+        atomicMin(&bboxes[label * 4 + 1], x); // min_x
+        atomicMax(&bboxes[label * 4 + 2], y); // max_y
+        atomicMax(&bboxes[label * 4 + 3], x); // max_x
+    }
+    """,
+    "bbox_kernel",
+)
 
-    bbox_area_kernel = cupy.ElementwiseKernel(
-        "S label_image, int32 width",
-        "raw T bboxes, raw T areas",
-        """
-        if (label_image > 0) {
-            int label = (int)label_image;
-            int y = i / width;
-            int x = i % width;
+bbox_area_kernel = cupy.ElementwiseKernel(
+    "S label_image, int32 width",
+    "raw T bboxes, raw T areas",
+    """
+    if (label_image > 0) {
+        int label = (int)label_image;
+        int y = i / width;
+        int x = i % width;
 
-            // 1. Update Bounding Box
-            atomicMin(&bboxes[label * 4 + 0], y); // min_y
-            atomicMin(&bboxes[label * 4 + 1], x); // min_x
-            atomicMax(&bboxes[label * 4 + 2], y); // max_y
-            atomicMax(&bboxes[label * 4 + 3], x); // max_x
+        // 1. Update Bounding Box
+        atomicMin(&bboxes[label * 4 + 0], y); // min_y
+        atomicMin(&bboxes[label * 4 + 1], x); // min_x
+        atomicMax(&bboxes[label * 4 + 2], y); // max_y
+        atomicMax(&bboxes[label * 4 + 3], x); // max_x
 
-            // 2. Increment Area (Count pixels)
-            atomicAdd(&areas[label], 1);
-        }
-        """,
-        "bbox_area_kernel",
-    )
+        // 2. Increment Area (Count pixels)
+        atomicAdd(&areas[label], 1);
+    }
+    """,
+    "bbox_area_kernel",
+)
 
-    threshold_dilate_fused_kernel = cupy.ElementwiseKernel(
-        "T mask, int32 threshold, int32 width, int32 height",
-        "raw T morphed",
-        """
-        // 1. Threshold
-        bool is_active = mask > threshold;
+threshold_dilate_fused_kernel = cupy.ElementwiseKernel(
+    "T mask, int32 threshold, int32 width, int32 height",
+    "raw T morphed",
+    """
+    // 1. Threshold
+    bool is_active = mask > threshold;
 
-        // 2. Simple 3x3 Dilation (Fuse directly into output)
-        if (is_active) {
-            int y = i / width;
-            int x = i % width;
+    // 2. Simple 3x3 Dilation (Fuse directly into output)
+    if (is_active) {
+        int y = i / width;
+        int x = i % width;
 
-            // 2. 3x3 Dilation Expansion
-            // Writes 255 to the neighbors of any pixel above threshold
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dx = -1; dx <= 1; dx++) {
-                    int ny = y + dy;
-                    int nx = x + dx;
-                    if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
-                        morphed[ny * width + nx] = 255;
-                    }
+        // 2. 3x3 Dilation Expansion
+        // Writes 255 to the neighbors of any pixel above threshold
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int ny = y + dy;
+                int nx = x + dx;
+                if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                    morphed[ny * width + nx] = 255;
                 }
             }
         }
-        """,
-        "threshold_dilate_fused",
+    }
+    """,
+    "threshold_dilate_fused",
+)
+
+# This CUDA C++ code finds min/max for all labels in ONE pass over the mask
+DETECTION_ACCEL_KERNEL = cupy.RawKernel(
+    r"""
+    extern "C" __global__
+    void fast_detect(const unsigned char* bgs_mask, unsigned char* out_mask, int pitch, int w, int h, float thresh) {
+        int x = blockIdx.x * blockDim.x + threadIdx.x;
+        int y = blockIdx.y * blockDim.y + threadIdx.y;
+        if (x > 0 && x < w-1 && y > 0 && y < h-1) {
+            unsigned char val = bgs_mask[y * pitch + x];
+            unsigned char res = (val > thresh) ? 255 : 0;
+            if (res == 0) {
+                if (bgs_mask[(y-1)*pitch + x] > thresh || bgs_mask[(y+1)*pitch + x] > thresh ||
+                    bgs_mask[y*pitch + (x-1)] > thresh || bgs_mask[y*pitch + (x+1)] > thresh) {
+                    res = 255;
+                }
+            }
+            out_mask[y * pitch + x] = res;
+        }
+    }
+    """,
+    "fast_detect",
+)
+# DETECTION_ACCEL_KERNEL = cupy.RawKernel(
+#     r"""
+# extern "C" __global__
+# void fast_detect(const unsigned char* bgs_mask, unsigned char* out_mask, int pitch, int w, int h, float thresh) {
+#     int x = blockIdx.x * blockDim.x + threadIdx.x;
+#     int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+#     if (x >= 2 && x < w-2 && y >= 2 && y < h-2) {
+#         unsigned char val = bgs_mask[y * pitch + x];
+#         unsigned char res = (val > thresh) ? 255 : 0;
+
+#         if (res == 0) {
+#             bool found = false;
+#             for (int dy = -2; dy <= 2; dy++) {
+#                 for (int dx = -2; dx <= 2; dx++) {
+#                     // CIRCULAR CHECK: Skip the far corners of the 5x5 square
+#                     // This mimics cv2.MORPH_ELLIPSE and prevents over-merging
+#                     if (abs(dx) == 2 && abs(dy) == 2) continue;
+
+#                     if (bgs_mask[(y + dy) * pitch + (x + dx)] > thresh) {
+#                         found = true;
+#                         break;
+#                     }
+#                 }
+#                 if (found) break;
+#             }
+#             if (found) res = 255;
+#         }
+#         out_mask[y * pitch + x] = res;
+#     }
+# }
+# """,
+#     "fast_detect",
+# )
+
+# Fused Kernel: Single-pass Bounding Box Extraction with Stride Support
+BOUNDS_KERNEL = cupy.RawKernel(
+    r"""
+extern "C" __global__
+void find_bounds(const unsigned char* labeled_ptr, int step, int width, int height, int num_labels, int* x1, int* y1, int* x2, int* y2) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x < width && y < height) {
+        const int* row = (const int*)(labeled_ptr + y * step);
+        int label = row[x];
+        if (label > 0 && label <= num_labels) {
+            atomicMin(&x1[label], x);
+            atomicMin(&y1[label], y);
+            atomicMax(&x2[label], x);
+            atomicMax(&y2[label], y);
+        }
+    }
+}
+""",
+    "find_bounds",
+)
+
+
+# def tensor2opencv(frame_raw, device_input, is_bgr=True):
+#     # GPU Path (Always RGB -> needs swap to BGR)
+#     if device_input == "cuda":
+#         if hasattr(frame_raw, "permute"):
+#             # [C, H, W] -> [H, W, C]
+#             frame_cpu = (
+#                 frame_raw.permute(1, 2, 0).detach().cpu().numpy().astype(np.uint8)
+#             )
+#         else:
+#             frame_cpu = np.ascontiguousarray(frame_raw, dtype=np.uint8)
+
+#         if not is_bgr:
+#             # GPU reader outputs RGB, so we MUST swap to BGR for VideoWriter
+#             frame_cpu = cv2.cvtColor(frame_cpu, cv2.COLOR_RGB2BGR)
+
+#     # Handle CPU Path (Check if swap is needed)
+#     else:
+#         frame_cpu = np.ascontiguousarray(frame_raw, dtype=np.uint8)
+#         if frame_cpu.shape[0] == 3:
+#             frame_cpu = frame_cpu.transpose(1, 2, 0)
+
+#         if not is_bgr:
+#             frame_cpu = cv2.cvtColor(frame_cpu, cv2.COLOR_RGB2BGR)
+#     return frame_cpu
+
+
+def tensor2opencv(frame_source, device_input, is_bgr=True, resize_h=640, resize_w=640):
+    if torch.is_tensor(frame_source):
+        # .contiguous() is CRITICAL here to fix the "shredded" look
+        temp = frame_source.squeeze(0) if frame_source.ndim == 4 else frame_source
+        img_cpu = temp.permute(1, 2, 0).contiguous().cpu().numpy()
+    elif hasattr(frame_source, "download"):
+        img_cpu = frame_source.download()
+    else:
+        img_cpu = np.ascontiguousarray(frame_source)
+
+    #  Fix Shape: restore spatial grid if flattened
+    if img_cpu.ndim == 3 and img_cpu.shape[0] == 1:
+        img_cpu = img_cpu.reshape((resize_h, resize_w, 3))
+
+    #  Fix Visibility: ONLY multiply if it's actually floating point
+    # If uint8 is multiplied by 255, it wraps around and creates "neon" colors
+    if img_cpu.dtype != np.uint8:
+        if img_cpu.max() <= 1.0:
+            img_cpu = (img_cpu * 255).clip(0, 255).astype(np.uint8)
+        else:
+            img_cpu = img_cpu.astype(np.uint8)
+
+    # Color Space: Standardize to BGR for imwrite
+    if not is_bgr:
+        if len(img_cpu.shape) == 3:
+            # Swap RGB (Torch/Decoder) -> BGR (OpenCV)
+            # img_cpu = cv2.cvtColor(img_cpu, cv2.COLOR_RGB2BGR)
+            # Only swap if the source is RGB (GPU Path)
+            # CPU path is already BGR from OpenCV reader
+            if device_input == "cuda":
+                img_cpu = cv2.cvtColor(img_cpu, cv2.COLOR_RGB2BGR)
+            else:
+                # Ensure it's contiguous for saving
+                img_cpu = np.ascontiguousarray(img_cpu)
+        else:
+            img_cpu = cv2.cvtColor(img_cpu, cv2.COLOR_GRAY2BGR)
+
+    return img_cpu
+
+
+def gpumat2cupy(gpu_mat):
+    """Bridge OpenCV GpuMat to CuPy without copying data."""
+    # Get properties from GpuMat
+    w, h = gpu_mat.size()
+    # Check if it's 3-channel (CV_8UC3) or 1-channel (CV_8UC1)
+    channels = 3 if gpu_mat.type() == cv2.CV_8UC3 else 1
+
+    if channels == 3:
+        shape = (h, w, 3)
+        # strides = (bytes_per_row, bytes_per_pixel, bytes_per_channel)
+        strides = (gpu_mat.step, 3, 1)
+    else:
+        shape = (h, w)
+        strides = (gpu_mat.step, 1)
+
+    # Map OpenCV types to CuPy typestrs
+    # CV_8UC1 is 'u1' (unsigned 1-byte), etc.
+    # type_map = {cv2.CV_8U: "|u1", cv2.CV_32F: "<f4", cv2.CV_8UC1: "|u1"}
+
+    # Create the __cuda_array_interface__ dictionary
+    # This tells CuPy where the data is and how it's shaped
+    if_dict = {
+        "version": 3,
+        "shape": shape,
+        "typestr": "|u1",
+        # "descr": [("", type_map.get(gpu_mat.type(), "|u1"))],
+        "data": (gpu_mat.cudaPtr(), False),  # (Pointer, Read-only)
+        "strides": strides,
+    }
+
+    # Create a dummy object with the interface and wrap it in CuPy
+    class Holder:
+        pass
+
+    holder = Holder()
+    holder.__cuda_array_interface__ = if_dict
+    return cupy.asarray(holder)
+
+
+def torch2gpumat(tensor):
+    """
+    Creates an OpenCV GpuMat pointing to the same memory as a PyTorch tensor.
+    ZERO-COPY: No data is moved; only the memory address is shared.
+    """
+    # Ensure tensor is [H, W, C] and contiguous for OpenCV
+    if tensor.shape[0] == 3:
+        tensor = tensor.permute(1, 2, 0).contiguous()
+
+    # Bridge to CuPy (Zero-Copy)
+    cp_arr = cupy.asanyarray(tensor)
+
+    # Wrap in GpuMat
+    # cv2.CV_8UC3 for uint8, CV_32FC3 for float
+    dtype = cv2.CV_8UC3 if tensor.dtype == torch.uint8 else cv2.CV_32FC3
+
+    gpumat = cv2.cuda_GpuMat(
+        tensor.shape[1],  # Width
+        tensor.shape[0],  # Height
+        dtype,
+        cp_arr.data.ptr,
+    )
+    return gpumat
+
+
+# This kernel calculates the [x1, y1, x2, y2] for every detected object label
+BOUNDS_KERNEL_CODE = r"""
+extern "C" __global__
+void get_bounds(const int* labeled, int pitch, int w, int h, int num_labels,
+                int* x1, int* y1, int* x2, int* y2) {
+    // Calculate the unique 2D pixel coordinates (x, y) for this specific thread
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Boundary Check: Ensure the thread isn't trying to read outside the image dimensions
+    if (x < w && y < h) {
+        // Use the pitch to correctly calculate the memory offset
+        int label = labeled[y * pitch + x];
+
+        if (label > 0 && label <= num_labels) {
+            // Atomically update the bounding box for this specific label
+            atomicMin(&x1[label], x);
+            atomicMin(&y1[label], y);
+            // +1 ensures the box captures the full pixel and matches OpenCV ROI logic
+            atomicMax(&x2[label], x + 1);
+            atomicMax(&y2[label], y + 1);
+        }
+    }
+}
+"""
+
+# Compile the kernel once
+get_bounds_kernel = cupy.RawKernel(BOUNDS_KERNEL_CODE, "get_bounds")
+
+
+def find_contours_gpu_equivalent(mask_gpu_mat, stream=None):
+    """
+    GPU equivalent to cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    Returns: torch.Tensor [N, 4] containing (x1, y1, x2, y2) in analysis space.
+    """
+    # Bridge OpenCV GpuMat to CuPy (Zero-Copy)
+    w, h = mask_gpu_mat.size()
+    ptr = mask_gpu_mat.cudaPtr()
+    pitch_bytes = mask_gpu_mat.step
+
+    mask_cp = cupy.ndarray(
+        (h, w),
+        dtype=cupy.uint8,
+        memptr=cupy.cuda.MemoryPointer(
+            cupy.cuda.UnownedMemory(ptr, pitch_bytes * h, mask_gpu_mat), 0
+        ),
+        strides=(pitch_bytes, 1),
     )
 
-    def gpumat2cupy(gpu_mat):
-        """Bridge OpenCV GpuMat to CuPy without copying data."""
-        # 1. Get properties from GpuMat
-        w, h = gpu_mat.size()
-        # Check if it's 3-channel (CV_8UC3) or 1-channel (CV_8UC1)
-        channels = 3 if gpu_mat.type() == cv2.CV_8UC3 else 1
+    # Use the stream pointer if provided, otherwise default to 0 (Null Stream)
+    stream_ptr = stream.cudaPtr() if stream else 0
 
-        if channels == 3:
-            shape = (h, w, 3)
-            # strides = (bytes_per_row, bytes_per_pixel, bytes_per_channel)
-            strides = (gpu_mat.step, 3, 1)
-        else:
-            shape = (h, w)
-            strides = (gpu_mat.step, 1)
+    with cupy.cuda.ExternalStream(stream_ptr):
+        # Labeling (Equivalent to finding connected components)
+        # labeled is an int32 array where every 'blob' has a unique number
+        structure = cupy.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]])
+        labeled, num_labels = cupyx.scipy.ndimage.label(mask_cp, structure=structure)
 
-        # 2. Map OpenCV types to CuPy typestrs
-        # CV_8UC1 is 'u1' (unsigned 1-byte), etc.
-        # type_map = {cv2.CV_8U: "|u1", cv2.CV_32F: "<f4", cv2.CV_8UC1: "|u1"}
+        if num_labels == 0:
+            return torch.empty((0, 4), device="cuda")
 
-        # 3. Create the __cuda_array_interface__ dictionary
-        # This tells CuPy where the data is and how it's shaped
-        if_dict = {
-            "version": 3,
-            "shape": shape,
-            "typestr": "|u1",
-            # "descr": [("", type_map.get(gpu_mat.type(), "|u1"))],
-            "data": (gpu_mat.cudaPtr(), False),  # (Pointer, Read-only)
-            "strides": strides,
-        }
+        # Setup Bounding Box Buffers
+        x1 = cupy.full((num_labels + 1,), w, dtype=cupy.int32)
+        y1 = cupy.full((num_labels + 1,), h, dtype=cupy.int32)
+        x2 = cupy.full((num_labels + 1,), -1, dtype=cupy.int32)
+        y2 = cupy.full((num_labels + 1,), -1, dtype=cupy.int32)
 
-        # 4. Create a dummy object with the interface and wrap it in CuPy
-        class Holder:
-            pass
+        # Run the Bounds Kernel
+        # IMPORTANT: Use labeled.strides[0]//4 to get the pitch in elements
+        pitch_elements = labeled.strides[0] // 4
+        tpb = (16, 16)
+        bpg = ((w + tpb[0] - 1) // tpb[0], (h + tpb[1] - 1) // tpb[1])
 
-        holder = Holder()
-        holder.__cuda_array_interface__ = if_dict
-        return cupy.asarray(holder)
+        get_bounds_kernel(
+            bpg, tpb, (labeled, pitch_elements, w, h, num_labels, x1, y1, x2, y2)
+        )
+
+    # Stack and return as Torch Tensor for YOLO/Drawing
+    # We skip index 0 as it represents the background (black)
+    # boxes = torch.stack(
+    #     [
+    #         torch.as_tensor(x1[1:], device="cuda"),
+    #         torch.as_tensor(y1[1:], device="cuda"),
+    #         torch.as_tensor(x2[1:], device="cuda"),
+    #         torch.as_tensor(y2[1:], device="cuda"),
+    #     ],
+    #     dim=1,
+    # ).float()
+    boxes = cupy.column_stack((x1[1:], y1[1:], x2[1:], y2[1:]))
+
+    return torch.as_tensor(boxes, device="cuda").float()
 
 
 def get_detection_color(index, is_bgr=False):
@@ -428,7 +905,13 @@ def draw_label(
 
 
 def retry_query(
-    query, local_db=None, num_retries: int = LOCKTIMEOUT_RETRIES, sleep_timer: int = 0
+    query,
+    local_db=None,
+    num_retries: int = LOCKTIMEOUT_RETRIES,
+    sleep_timer: int = 0,
+    DBHOST=DBHOST_DEFAULT,
+    DBPORT=DBPORT_DEFAULT,
+    DEBUG_FLAG=DEBUG_FLAG_DEFAULT,
 ):
     # global db
     db = local_db if local_db else vdms.vdms().connect(DBHOST, DBPORT)
@@ -438,7 +921,7 @@ def retry_query(
             k in response[0]["info"].lower() for k in ERR_KEYWORDS
         ):
             err = response[0]["info"]
-            if DEBUG == "1":
+            if DEBUG_FLAG:
                 query_type = list(query[0].keys())[0]
                 print(
                     f"DEBUG [process_stream Attempt #{ridx}] Received '{err}' for {query_type} query",
@@ -447,7 +930,7 @@ def retry_query(
             if sleep_timer > 0:
                 time.sleep(sleep_timer)
         else:
-            if DEBUG == "1":
+            if DEBUG_FLAG:
                 print(
                     f"[DEBUG process_stream] Successful query response: {response}",
                     flush=True,
@@ -467,123 +950,9 @@ def format_df_value(value):
     return value
 
 
-def get_model(
-    MODEL_NAME,
-    model_dir,
-    run_platform,
-    device_input,
-    batch=1,
-    half_flag=True,
-    dynamic_flag=True,
-):
-    final_model_path = f"{model_dir}/{MODEL_NAME}.pt"
-    pt_detection_model = YOLO(final_model_path, verbose=False, task="detect")
-    if run_platform == "ov":
-        final_model_path = f"{model_dir}/{MODEL_NAME}_openvino_model/"
-        if not Path(final_model_path).exists():
-            pt_detection_model.export(
-                format="openvino",
-                half=half_flag,
-                dynamic=dynamic_flag,
-                device=device_input,
-                batch=batch,
-            )
-
-        object_detection_model = YOLO(
-            final_model_path,
-            verbose=False,
-            task="detect",
-        )
-
-        # det_ov_model = core.read_model(final_model_path+"yolo11n.xml")
-        # ov_config = {hints.performance_mode: hints.PerformanceMode.LATENCY}
-        # if device == "GPU":
-        #     ov_config["GPU_DISABLE_WINOGRAD_CONVOLUTION"] = "YES"
-        # compiled_model = core.compile_model(det_ov_model, device, ov_config)
-        # object_detection_model.predictor.model.ov_compiled_model = compiled_model
-
-    elif run_platform == "engine":
-        final_model_path = f"{model_dir}/{MODEL_NAME}.engine"
-        if not Path(final_model_path).exists():
-            pt_detection_model.export(
-                format="engine",
-                half=half_flag,
-                imgsz=[7680, 4320],  # Max dimensions (8K-[W,H]-[7680,4320])
-                dynamic=dynamic_flag,
-                device=device_input,
-                simplify=True,
-                batch=batch,
-            )
-
-        object_detection_model = YOLO(
-            final_model_path,
-            verbose=False,
-            task="detect",
-        )
-
-    elif run_platform == "onnx":
-        from torch import cuda
-        from ultralytics.utils.checks import check_requirements
-
-        check_requirements(
-            "onnxruntime-gpu"
-            if cuda.is_available() and device_input != "cpu"
-            else "onnxruntime"
-        )
-
-        final_model_path = f"{model_dir}/{MODEL_NAME}.onnx"
-        if not Path(final_model_path).exists():
-            pt_detection_model.export(
-                format="onnx",
-                half=half_flag,
-                dynamic=dynamic_flag,
-                device=device_input,
-                simplify=True,
-                batch=batch,
-            )
-
-        object_detection_model = YOLO(final_model_path, verbose=False, task="detect")
-
-    elif run_platform == "pt":
-        object_detection_model = pt_detection_model
-        if device_input == "cuda":
-            object_detection_model.to("cuda")
-        else:
-            object_detection_model.to(device_input)
-
-    else:
-        raise ValueError(f"[!] Model for {run_platform} is not implemented.")
-
-    return (
-        object_detection_model,
-        final_model_path,
-        list(object_detection_model.names.values()),
-    )
-
-
-def get_models(model_tag: str, model_dir=PROJECT_PATH / "models"):  # , _st_sidebar):
-    # FW-Model Name-TYPE
-    fw, model_name, model_fw, model_precision = model_tag.split("-")
-
-    if fw == "Ultralytics":
-        model, model_path, labels = get_model(
-            model_name,
-            model_dir / f"ultralytics/{model_precision}",
-            model_fw,
-            device_input,
-            batch=EXPORT_BATCH_SIZE,
-            half_flag=HALF_FLAG,
-            dynamic_flag=DYNAMIC_FLAG,
-        )
-    else:
-        raise ValueError(f"Model ({model_tag}) not implemented")
-
-    return model, model_path, labels
-
-
 def get_display_frame_in_bytes(
     foi, display_size=(960, 540), quality=50, return_bytes=True, device="CPU"
-):
+):  # Expects BGR
     H, W = foi.shape[:2]
     dH, dW = display_size
     if H == dH and W == dW:
@@ -609,7 +978,10 @@ def get_display_frame_in_bytes(
 
 # Manual FPS calculation if OpenCV reports 0
 def manual_fps_calculation(src, num_frames=10):
-    vid_obj = cv2.VideoCapture(src)
+    if isinstance(src, cv2.VideoCapture):
+        vid_obj = src
+    else:
+        vid_obj = cv2.VideoCapture(src)
 
     frame_count = 0
     start_t = time.time()
@@ -633,6 +1005,79 @@ def manual_fps_calculation(src, num_frames=10):
         return 0
 
 
+# def nv12_to_rgb_torch(nv12_tensor, height, width):
+#     """
+#     Fast GPU-based NV12 to RGB conversion using PyTorch.
+#     Input: [H*1.5, W] uint8 tensor on GPU
+#     Output: [3, H, W] float32 tensor on GPU (Normalized 0.0-1.0)
+#     """
+#     # Extract Y (Luma) plane: [0:height, :]
+#     y = nv12_tensor[:height, :].float()
+
+#     # Extract UV (Chroma) plane: [height:, :]
+#     # UV is interleaved: U V U V ...
+#     uv = nv12_tensor[height:, :].reshape(height // 2, width // 2, 2).float()
+
+#     # Upsample UV to match Y dimensions using Bilinear interpolation
+#     # This stretches the color to match the 8K detail
+#     uv_upsampled = torch.nn.functional.interpolate(
+#         uv.permute(2, 0, 1).unsqueeze(0),
+#         size=(height, width),
+#         mode="bilinear",
+#         align_corners=False,
+#     ).squeeze(0)
+
+#     u = uv_upsampled[0]
+#     v = uv_upsampled[1]
+
+#     # YUV to RGB Conversion Matrix (BT.709 for 8K/HD)
+#     # Shift values to be zero-centered
+#     y = (y - 16) * 1.164
+#     u = u - 128
+#     v = v - 128
+
+#     r = y + 1.793 * v
+#     g = y - 0.213 * u - 0.533 * v
+#     b = y + 2.112 * u
+
+#     # Stack and Clamp
+#     rgb = torch.stack([r, g, b], dim=0)
+#     return torch.clamp(rgb, 0, 255).byte()  # Return as [3, 4320, 7680] uint8
+
+
+def rgb_to_nv12_torch(rgb_tensor):
+    """
+    Fast GPU conversion from RGB to NV12 using PyTorch.
+    Input: [3, H, W] uint8 tensor on GPU
+    Output: [H*1.5, W] uint8 tensor on GPU (NV12 format)
+    """
+    _, h, w = rgb_tensor.shape
+    rgb = rgb_tensor.float()
+
+    # BT.709 RGB to YUV coefficients (standard for HD/8K)
+    # Y plane (Luma)
+    y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+    # U and V planes (Chroma)
+    u = -0.1146 * rgb[0] - 0.3854 * rgb[1] + 0.5000 * rgb[2] + 128
+    v = 0.5000 * rgb[0] - 0.4542 * rgb[1] - 0.0458 * rgb[2] + 128
+
+    # Subsample Chroma (4:2:0)
+    # We take every 2nd pixel to shrink U and V to half-resolution
+    u_sub = u[::2, ::2]
+    v_sub = v[::2, ::2]
+
+    # Interleave U and V (NV12 requirement)
+    # Reshape to [H/2, W] by placing U and V side-by-side at each pixel
+    uv_interleaved = torch.stack((u_sub, v_sub), dim=2).reshape(h // 2, w)
+
+    # Combine Y and UV planes
+    # Resulting shape: [H + H/2, W] -> [1.5H, W]
+    nv12 = torch.cat([y, uv_interleaved], dim=0)
+
+    return torch.clamp(nv12, 0, 255).byte()
+
+
 # Generate and run UDF query
 def get_udf_query(
     filename_path,
@@ -641,8 +1086,13 @@ def get_udf_query(
     new_size,
     id="udf_metadata",
     metadata=None,
-    test_mode=TEST_MODE,
+    test_mode=TEST_MODE_DEFAULT,
     local_db=None,
+    UDF_HOST=UDF_HOST_DEFAULT,
+    UDF_PORT=UDF_PORT_DEFAULT,
+    DEBUG_FLAG=DEBUG_FLAG_DEFAULT,
+    DBHOST=DBHOST_DEFAULT,
+    DBPORT=DBPORT_DEFAULT,
 ):
     query = {
         "AddVideo": {
@@ -679,7 +1129,14 @@ def get_udf_query(
             flush=True,
         )
     try:
-        res = retry_query([query], local_db=local_db, sleep_timer=randint(1, 5))
+        res = retry_query(
+            [query],
+            local_db=local_db,
+            sleep_timer=randint(1, 5),
+            DBHOST=DBHOST,
+            DBPORT=DBPORT,
+            DEBUG_FLAG=DEBUG_FLAG,
+        )
 
         if DEBUG_FLAG:
             print(
@@ -707,13 +1164,22 @@ def metadata2vdms(
     clip_metadata,
     width,
     height,
+    VDMS_POOL: VDMSPool = None,
+    DEBUG_FLAG=DEBUG_FLAG_DEFAULT,
+    INGESTION=INGESTION_DEFAULT,
+    TEST_MODE=TEST_MODE_DEFAULT,
+    UDF_HOST=UDF_HOST_DEFAULT,
+    UDF_PORT=UDF_PORT_DEFAULT,
+    DBHOST=DBHOST_DEFAULT,
+    DBPORT=DBPORT_DEFAULT,
 ):
-    global VDMS_POOL
+    # global VDMS_POOL
 
     if VDMS_POOL is None:
+        # VDMS_POOL = VDMSPool(DBHOST, DBPORT, size=10)
         VDMS_POOL = VDMSPool(DBHOST, DBPORT, size=10)
 
-    if DEBUG == "1":
+    if DEBUG_FLAG:
         print(
             f"[TIMING],start_clip_metadata,{clip_key},{time.time()}",
             flush=True,
@@ -756,9 +1222,14 @@ def metadata2vdms(
             metadata=combined_metadata,
             test_mode=TEST_MODE,
             local_db=db,
+            UDF_HOST=UDF_HOST,
+            UDF_PORT=UDF_PORT,
+            DEBUG_FLAG=DEBUG_FLAG,
+            DBHOST=DBHOST,
+            DBPORT=DBPORT,
         )
 
-        if DEBUG == "1":
+        if DEBUG_FLAG:
             print(
                 f"[TIMING],end_clip_metadata,{clip_key},{time.time()}",
                 flush=True,
@@ -775,16 +1246,34 @@ def metadata2vdms_with_retry(
     width,
     height,
     max_retries=LOCKTIMEOUT_RETRIES,
+    VDMS_POOL: VDMSPool = None,
+    DEBUG_FLAG=DEBUG_FLAG_DEFAULT,
+    INGESTION=INGESTION_DEFAULT,
+    TEST_MODE=TEST_MODE_DEFAULT,
+    DBHOST=DBHOST_DEFAULT,
+    DBPORT=DBPORT_DEFAULT,
 ):
     """
     Attempts to send metadata to VDMS with exponential backoff.
     """
+    if VDMS_POOL is None:
+        # VDMS_POOL = VDMSPool(DBHOST, DBPORT, size=10)
+        VDMS_POOL = VDMSPool(DBHOST, DBPORT, size=10)
+
     retry_count = 0
     while retry_count < max_retries:
         try:
             # Attempt the actual upload (using your existing utility)
             success = metadata2vdms(
-                clip_key, clip_filename, clip_metadata, width, height
+                clip_key,
+                clip_filename,
+                clip_metadata,
+                width,
+                height,
+                VDMS_POOL=VDMS_POOL,
+                DEBUG_FLAG=DEBUG_FLAG,
+                INGESTION=INGESTION,
+                TEST_MODE=TEST_MODE,
             )
             if success:
                 print(f" [VDMS] Successfully uploaded {clip_key}")
@@ -802,114 +1291,8 @@ def metadata2vdms_with_retry(
     return False
 
 
-# Extract metadata from object model results
-def extract_metadata_from_results(stream_name, frameNum, results, img_size):
-    fW, fH = img_size
-    metadata = dict()
-    try:
-        for _, result in enumerate(results):
-            # GET METADATA FOR CLIP
-            boxes = result.boxes.cpu()
-            oidx = 0
-            for box in boxes:
-                confidence = float(box.conf.item())
-                if confidence > DETECTION_THRESHOLD:
-                    class_id = int(box.cls.item())
-                    class_name = str(result.names[class_id])
-
-                    if not OMIT_DETECTIONS_FLAG:
-                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                        print(
-                            # f"[OBJECT DETECTION] {class_name} detected in frame {frameNum} (Total detected: {current_cnt})",
-                            f"[{timestamp}] {stream_name} DETECTION on Frame {frameNum}: {class_name} detected",
-                            flush=True,
-                        )
-                    x1, y1, x2, y2 = box.xyxy.tolist()[0]
-                    height = min(y2, fH) - max(0, y1)
-                    width = min(x2, fW) - max(0, x1)
-                    object_res = [
-                        x1,
-                        y1,
-                        height,
-                        width,
-                        result.names[class_id],
-                        confidence,
-                        fH,
-                        fW,
-                    ]
-
-                    framenum_str = f"{frameNum:04d}_{oidx:04d}"
-                    if DEBUG_FLAG:
-                        meta_str = ",".join(
-                            [str(o) for o in object_res + [framenum_str]]
-                        )
-                        print(f"[{stream_name} METADATA],{meta_str}", flush=True)
-
-                    metadata[framenum_str] = {
-                        "frameId": frameNum,
-                        "bbId": framenum_str,
-                        "bbox": {
-                            "x": int(object_res[0]),
-                            "y": int(object_res[1]),
-                            "height": int(object_res[2]),
-                            "width": int(object_res[3]),
-                            "object": str(object_res[4]),
-                            "object_det": {
-                                "confidence": float(object_res[5]),
-                                "frameH": int(fH),
-                                "frameW": int(fW),
-                            },
-                        },
-                    }
-                    oidx += 1
-
-    except Exception:
-        e = traceback.format_exc()
-        print(f"Error in {stream_name} extract_metadata_from_results: {e}", flush=True)
-
-    return metadata
-
-
-# Release Video Writer object and re-encode video to seek via ffmpeg later
-def release_clip_and_reencode(clip_key, _out_vid, clip_filename, tmp_file, target_fps):
-    if DEBUG == "1":
-        print(
-            f"[TIMING],start_release_clip,{clip_key},{time.time()}",
-            flush=True,
-        )
-    _out_vid.release()
-    if DEBUG == "1":
-        print(
-            f"[TIMING],end_release_clip,{clip_key},{time.time()}",
-            flush=True,
-        )
-    _out_vid = None
-
-    # Re-encode video in order to seek via ffmpeg later
-    GENERAL_OPTS = "-flags -global_header -hide_banner -loglevel error -nostats -tune zerolatency -flush_packets 0"  #  -filter:v fps={target_fps}
-    CONVERSION = f"-c:v libx264 -preset ultrafast -filter:v fps=fps={target_fps}"  # "-c:v libx264 -preset medium"
-    reencode_cmd = f"ffmpeg -y -i {tmp_file} {GENERAL_OPTS} {CONVERSION} -crf 23 -c:a copy {clip_filename}"
-    cmd_list = shlex.split(reencode_cmd)
-    if DEBUG == "1":
-        print(
-            f"[TIMING],start_reencode,{clip_key},{time.time()}",
-            flush=True,
-        )
-    subprocess.run(cmd_list, check=True)
-    end_time = time.time()
-    # filename = str(Path(clip_filename).name)
-    if DEBUG == "1":
-        print(
-            f"[TIMING],end_reencode,{clip_key},{end_time}",
-            flush=True,
-        )
-        print(f"[TIMING],Save clip,{clip_key},{end_time}", flush=True)
-    os.remove(tmp_file)
-    return _out_vid
-
-
 def merge_boxes_limit(boxes, dist_threshold=25, min_area=32, max_size=640):
-    if not boxes:
+    if len(boxes) == 0:
         return []
 
     # EARLY FILTER: Remove noise (dots/specks) immediately

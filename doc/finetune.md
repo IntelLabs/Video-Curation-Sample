@@ -1,6 +1,6 @@
 # Fine-Tune YOLO Model
 
-This quide provides details on how to fine-tune a YOLO model using Ultralytics on GPU ONLY.
+This guide provides details on how to fine-tune a YOLO model using Ultralytics on GPU ONLY.
 For simplicity, the use-case for this guide is Drone Detection.
 Therefore, the goal is to finetune the YOLO11n model to detect only one class (`drone`).
 
@@ -24,7 +24,7 @@ Feel free to modify these parameters based on your hardware limitations such as 
 
 
 ## Finetune Script
-THe finetune script is used to run training, validation, and also test on a provided video (optional).
+The finetune script is used to run training, validation, and also test on a provided video (optional).
 To make deployment easy, we provide a Dockerfile which has the ideal environment and allow the script to run with deployment.
 The script has a few adjustible arguments, so feel free to modify the call in next section as needed.
 ```bash

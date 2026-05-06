@@ -9,19 +9,14 @@
             "name": "Python Debugger: Smart filtering",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/tests/filtering_test.py",
+            "program": "${workspaceFolder}/tests/test_detections.py",
             "cwd": "${workspaceFolder}/tests",
             "console": "integratedTerminal",
+            "justMyCode": false,
             "args": [
-                // "-r", "6", "7",
                 "-v", "<test_video>.mp4",
+                "--type", "motion",
             ],
-            "env": {
-                "TARGET_FPS": "15",
-                "CLIP_DURATION": "None",
-                "ENABLE_VDMS": "False",
-                "DEBUG": "1",
-            }
         }
     ]
 }
