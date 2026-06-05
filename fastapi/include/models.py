@@ -243,13 +243,26 @@ def verify_and_download(
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default=None,
+        dest="output_path",
+        help="Path to print json of model classes",
+    )
+    args = parser.parse_args()
+
     config = PipelineConfig(
         CODE_DIR=os.getenv("CODE_DIR", "/home"),
         CUSTOM_MODEL_FLAG=str2bool(os.getenv("CUSTOM_MODEL_FLAG", False)),
         DBHOST=os.getenv("DBHOST", "vdms-service"),
         DEBUG=os.getenv("DEBUG", "0"),
         DEVICE=os.getenv("DEVICE", "CPU"),
-        ENABLE_QUERYING=os.getenv("ENABLE_QUERYING", False),
+        ENABLE_QUERYING=os.getenv("ENABLE_QUERYING", True),
         INGESTION=os.getenv("INGESTION", "object"),
         MODEL_NAME=os.getenv("MODEL_NAME", "yolo11n"),
         OMIT_DETECTIONS_FLAG=str2bool(os.getenv("OMIT_DETECTIONS_FLAG", False)),
@@ -286,7 +299,7 @@ if __name__ == "__main__":
 
     # Download models if it doesn't exist
     if "object" in config.INGESTION:
-        _, _, _ = get_model(
+        _, _, classes = get_model(
             Path(dir_path),
             config.MODEL_NAME,
             run_platform_name,
@@ -297,6 +310,11 @@ if __name__ == "__main__":
             half_flag=True,
             dynamic_flag=True,
         )
+        if args.output_path is not None:
+            import json
+
+            with open(args.output_path, "w") as f:
+                json.dump({"classes": classes}, f, indent=4)
 
     if "face" in config.INGESTION:
         verify_and_download(

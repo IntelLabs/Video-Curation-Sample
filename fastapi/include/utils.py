@@ -243,6 +243,7 @@ class PipelineConfig:
         self.SHARED_MODEL = kwargs.get("SHARED_MODEL", False)
 
         # PIPELINE
+        self.DISABLE_DETECTION = kwargs.get("DISABLE_DETECTION", False)
         self.SMART_FILTERING_PIXEL_CONSTRAINT = SMART_FILTERING_PIXEL_CONSTRAINT
         self.BKGD_SUB_INCLUDE_HISTORY = BKGD_SUB_INCLUDE_HISTORY
         self.BKGD_SUB_INCLUDE_HISTORY_DILATE_KERNEL_SIZE = (
@@ -312,7 +313,6 @@ class PipelineConfig:
                 os.environ["CUDA_VISIBLE_DEVICES"] = str(best_gpu_index)
                 torch.cuda.set_device(0)
                 torch.cuda.empty_cache()
-                print(f"Using GPU: {torch.cuda.get_device_name(0)}", flush=True)
         else:
             self.model_path += "_openvino_model/"
 
@@ -1250,6 +1250,8 @@ def metadata2vdms_with_retry(
     DEBUG_FLAG=DEBUG_FLAG_DEFAULT,
     INGESTION=INGESTION_DEFAULT,
     TEST_MODE=TEST_MODE_DEFAULT,
+    UDF_HOST=UDF_HOST_DEFAULT,
+    UDF_PORT=UDF_PORT_DEFAULT,
     DBHOST=DBHOST_DEFAULT,
     DBPORT=DBPORT_DEFAULT,
 ):
@@ -1274,6 +1276,10 @@ def metadata2vdms_with_retry(
                 DEBUG_FLAG=DEBUG_FLAG,
                 INGESTION=INGESTION,
                 TEST_MODE=TEST_MODE,
+                UDF_HOST=UDF_HOST,
+                UDF_PORT=UDF_PORT,
+                DBHOST=DBHOST,
+                DBPORT=DBPORT,
             )
             if success:
                 print(f" [VDMS] Successfully uploaded {clip_key}")

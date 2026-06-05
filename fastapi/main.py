@@ -3,6 +3,7 @@ import warnings
 warnings.filterwarnings("ignore", message="The value of the smallest subnormal for")
 
 import asyncio
+import json
 import logging
 import multiprocessing as mp
 import os
@@ -19,13 +20,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.templating import Jinja2Templates
 
+MODEL_CLASSES_FILE = "/var/www/cache/model_classes.json"
+
 RUN_CONFIG = PipelineConfig(
     CODE_DIR=os.getenv("CODE_DIR", "/home"),
     CUSTOM_MODEL_FLAG=str2bool(os.getenv("CUSTOM_MODEL_FLAG", False)),
     DBHOST=os.getenv("DBHOST", "vdms-service"),
     DEBUG=os.getenv("DEBUG", "0"),
     DEVICE=os.getenv("DEVICE", "CPU"),
-    ENABLE_QUERYING=False,  # os.getenv("ENABLE_QUERYING", False),
+    ENABLE_QUERYING=os.getenv("ENABLE_QUERYING", True),
     INGESTION=os.getenv("INGESTION", "object"),
     MODEL_NAME=os.getenv("MODEL_NAME", "yolo11n"),
     OMIT_DETECTIONS_FLAG=str2bool(os.getenv("OMIT_DETECTIONS_FLAG", False)),
@@ -47,12 +50,12 @@ else:
     VideoStreamHandler = CPUStreamHandler
 
 
-if RUN_CONFIG.ENABLE_QUERYING:
-    from include.handlers import (
-        all_metadata,
-        clip_completion_tracker,
-        send_metadata_queue,
-    )
+# if RUN_CONFIG.ENABLE_QUERYING:
+#     from include.handlers import (
+#         all_metadata,
+#         clip_completion_tracker,
+#         send_metadata_queue,
+#     )
 
 # ----- LOGGING CONFIGURATION -----
 # Standardizes logs across the application and uvicorn server
@@ -270,6 +273,8 @@ async def dashboard_stats(request: Request):
     for name, streamer in active_streams.items():
         # AI Backlog: Tasks waiting in the ThreadPool
         ai_backlog = streamer.get_executor_backlog()
+        # AI Backlog: Tasks waiting in the ThreadPool
+        clipper_backlog = streamer.get_clip_executor_backlog()
 
         # Video Backlog: Frames waiting for Disk I/O
         video_backlog = (
@@ -292,6 +297,7 @@ async def dashboard_stats(request: Request):
             "inputfps": round(streamer.input_fps, 1),
             "targetfps": round(streamer.target_fps, 1),
             "is_streaming": streamer.active,
+            "clipper_backlog": clipper_backlog,
             "ai_backlog": ai_backlog,
             "video_backlog": video_backlog,
             "io_backlog": io_backlog,
@@ -399,14 +405,50 @@ async def health_check(request: Request):
         }
 
     # Global Sync Health
-    if RUN_CONFIG.ENABLE_QUERYING:
-        health_data["sync_engine"] = {
-            "pending_completions": len(clip_completion_tracker),
-            "metadata_buffer_size": len(all_metadata),
-            "vdms_queue_depth": send_metadata_queue.qsize(),
-        }
+    # if RUN_CONFIG.ENABLE_QUERYING:
+    #     health_data["sync_engine"] = {
+    #         "pending_completions": len(clip_completion_tracker),
+    #         # "metadata_buffer_size": len(all_metadata),
+    #         "vdms_queue_depth": send_metadata_queue.qsize(),
+    #     }
 
     return health_data
+
+
+@app.get("/model_classes")
+async def get_model_classes():
+    classes = app.state.classes
+
+    # Use classes already stored
+    if classes is not None:
+        main_app_logger.info(f"classes: {classes}")
+        return {"classes": classes}
+
+    # Read list from JSON file stored at entrypoint
+    if os.path.exists(MODEL_CLASSES_FILE):
+        with open(MODEL_CLASSES_FILE, "r") as f:
+            data = json.load(f)
+            classes = data.get("classes", None)
+            if classes is not None:
+                app.state.classes = classes
+                main_app_logger.info(f"classes: {classes}")
+                return classes
+
+    # Read from model of active stream
+    stream_name = list(app.state.active_streams.keys())
+    main_app_logger.info(f"stream_name: {stream_name}")
+    # Extracts the dynamic labels from your loaded AI model instance
+    if len(stream_name) > 0:
+        streamer = app.state.active_streams.get(stream_name[0])
+        if hasattr(streamer, "label_sources") and streamer.label_sources:
+            classes = list(streamer.label_sources)
+            app.state.classes = classes
+            main_app_logger.info(f"classes: {classes}")
+            return {"classes": classes}
+
+    # Fallback structure matching your old format if no model is loaded
+    default_classes = ["class0"]
+    return {"classes": default_classes}
 
 
 if __name__ == "__main__":
