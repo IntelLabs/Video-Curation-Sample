@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -7,6 +8,7 @@ from pathlib import Path
 import tensorrt as trt
 
 sys.path.insert(1, str(Path(__file__).parent.parent))
+from include.default_configs import ENABLE_QUERYING_DEFAULT
 from include.utils import PipelineConfig, get_freest_gpu, str2bool
 from torch import cuda
 from ultralytics import YOLO
@@ -18,6 +20,7 @@ def build_engine(
     onnx_path,
     engine_path,
     profile=[(1, 3, 32, 32), (8, 3, 640, 640), (100, 3, 640, 640)],
+    metadata=None,
 ):
     logger = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(logger)
@@ -54,6 +57,14 @@ def build_engine(
     print("Building engine... this will take some time.")
     serialized_engine = builder.build_serialized_network(network, config)
     with open(engine_path, "wb") as f:
+        if metadata:
+            meta_string = json.dumps(metadata)
+            meta_bytes = meta_string.encode("utf-8")
+            # Write a 4-byte little-endian signed integer indicating metadata length
+            f.write(len(meta_bytes).to_bytes(4, byteorder="little", signed=True))
+            # Write the raw JSON string bytes
+            f.write(meta_bytes)
+
         f.write(serialized_engine)
 
 
@@ -85,6 +96,7 @@ def get_model(
                 dynamic=dynamic_flag,
                 device=device_input,
                 # batch=batch,
+                data={"names": pt_detection_model.names},
             )
 
         object_detection_model = YOLO(
@@ -147,11 +159,24 @@ def get_model(
                     dynamic=True,
                     device=device_input,
                     simplify=True,
-                    # opset=12,
-                    # batch=batch,
+                    data={"names": pt_detection_model.names},
                 )
 
-            build_engine(onnx_model_path, final_model_path, profile=profile)
+            if hasattr(pt_detection_model.model, "stride"):
+                max_stride = int(pt_detection_model.model.stride.max().item())
+            else:
+                max_stride = 32  # Safe default fallback value for standard YOLO layouts
+
+            build_engine(
+                onnx_model_path,
+                final_model_path,
+                profile=profile,
+                metadata={
+                    "stride": max_stride,
+                    "task": "detect",
+                    "names": pt_detection_model.names,
+                },
+            )
 
         object_detection_model = YOLO(
             final_model_path,
@@ -175,6 +200,7 @@ def get_model(
                 device=device_input,
                 simplify=True,
                 batch=batch,
+                data={"names": pt_detection_model.names},
             )
 
         object_detection_model = YOLO(final_model_path, verbose=False, task="detect")
@@ -262,7 +288,7 @@ if __name__ == "__main__":
         DBHOST=os.getenv("DBHOST", "vdms-service"),
         DEBUG=os.getenv("DEBUG", "0"),
         DEVICE=os.getenv("DEVICE", "CPU"),
-        ENABLE_QUERYING=os.getenv("ENABLE_QUERYING", True),
+        ENABLE_QUERYING=os.getenv("ENABLE_QUERYING", ENABLE_QUERYING_DEFAULT),
         INGESTION=os.getenv("INGESTION", "object"),
         MODEL_NAME=os.getenv("MODEL_NAME", "yolo11n"),
         OMIT_DETECTIONS_FLAG=str2bool(os.getenv("OMIT_DETECTIONS_FLAG", False)),
@@ -288,7 +314,7 @@ if __name__ == "__main__":
         if torch.cuda.is_available():
             torch.cuda.set_device(0)
             torch.cuda.empty_cache()
-            print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+            # print(f"Using GPU: {torch.cuda.get_device_name(0)}")
         # EXPORT_BATCH_SIZE = 64  # 32, 50  # int(os.environ.get("GPU_BATCH_SIZE", 1))
         run_platform_name = "engine"
         print("[!] USING GPU & TENSORRT")

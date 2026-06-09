@@ -13,6 +13,7 @@ import time
 from datetime import datetime
 
 import psutil
+from include.default_configs import ENABLE_QUERYING_DEFAULT
 from include.handlers import lifespan
 from include.utils import PipelineConfig, StreamRequest, str2bool
 
@@ -28,7 +29,7 @@ RUN_CONFIG = PipelineConfig(
     DBHOST=os.getenv("DBHOST", "vdms-service"),
     DEBUG=os.getenv("DEBUG", "0"),
     DEVICE=os.getenv("DEVICE", "CPU"),
-    ENABLE_QUERYING=os.getenv("ENABLE_QUERYING", True),
+    ENABLE_QUERYING=os.getenv("ENABLE_QUERYING", ENABLE_QUERYING_DEFAULT),
     INGESTION=os.getenv("INGESTION", "object"),
     MODEL_NAME=os.getenv("MODEL_NAME", "yolo11n"),
     OMIT_DETECTIONS_FLAG=str2bool(os.getenv("OMIT_DETECTIONS_FLAG", False)),
@@ -230,7 +231,7 @@ async def view_stream(name: str, request: Request):
                 # Yield control to the event loop to prevent blocking
                 await asyncio.sleep(0.001)
         except Exception as e:
-            main_app_logger.error(f"Generator Error: {e}")
+            main_app_logger.error(f"[EXCEPTION] Generator Error: {e}")
         # finally:
         #     streamer.reader_busy.value = False # Safety unlock
 

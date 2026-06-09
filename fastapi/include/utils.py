@@ -16,6 +16,7 @@ import cupyx.scipy.ndimage
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from include.default_configs import (
     BKGD_SUB_INCLUDE_HISTORY,
     BKGD_SUB_INCLUDE_HISTORY_DILATE_KERNEL_SIZE,
@@ -37,6 +38,7 @@ from include.default_configs import (
     DILATE_KERNEL_SIZE,
     DISPLAY_FRAME_QUALITY,
     DISPLAY_FRAME_SIZE,
+    ENABLE_QUERYING_DEFAULT,
     INGESTION_DEFAULT,
     MAX_DETECTIONS,
     MAX_WORKERS,
@@ -67,88 +69,11 @@ from include.default_configs import (
 )
 from pydantic import BaseModel
 
-# import streamlit as st
 import vdms
 
 """
 GENERAL DEFINITIONS/FUNCTIONS
 """
-
-
-def merge_boxes_gpu(raw_boxes, gap_limit=10):
-    device_input = "cuda"
-    x1, y1, x2, y2 = raw_boxes.unbind(1)
-
-    # Calculate pairwise gaps [N, N] using broadcasted subtraction
-    h_gaps = torch.max(
-        torch.zeros(1, device=device_input),
-        torch.max(x1.unsqueeze(0) - x2.unsqueeze(1), x1.unsqueeze(1) - x2.unsqueeze(0)),
-    )
-    v_gaps = torch.max(
-        torch.zeros(1, device=device_input),
-        torch.max(y1.unsqueeze(0) - y2.unsqueeze(1), y1.unsqueeze(1) - y2.unsqueeze(0)),
-    )
-
-    adj = (h_gaps < gap_limit) & (v_gaps < gap_limit)
-
-    # Parallel Connected Components (Iterative grouping)
-    components = torch.arange(raw_boxes.shape[0], device=device_input)
-    for _ in range(3):  # Reduced iterations for lower latency
-        components = torch.max(adj * components, dim=1)[0]
-
-    # Fused Cluster Extraction
-    unique_ids = components.unique()
-    raw_boxes = torch.stack(
-        [
-            torch.cat(
-                [
-                    raw_boxes[components == i, :2].min(0)[0],
-                    raw_boxes[components == i, 2:].max(0)[0],
-                ]
-            )
-            for i in unique_ids
-        ]
-    )
-    return raw_boxes
-
-
-def merge_boxes_cpu(boxes, gap_limit=10):
-    """
-    Greedy merge in 640x640 space to consolidate swarm fragments.
-    Input: List of [x1, y1, x2, y2] within [0, 640]
-    """
-    if not boxes:
-        return []
-
-    # O(N log N) sort by X for early exit optimization
-    boxes = sorted(boxes, key=lambda x: x[0])
-    merged = []
-
-    while boxes:
-        curr = boxes.pop(0)
-        i = 0
-        while i < len(boxes):
-            test = boxes[i]
-            # Early exit: horizontal gap exceeds limit
-            if test[0] - curr[2] > gap_limit:
-                break
-
-            # Check vertical gap
-            y_dist = max(0, test[1] - curr[3], curr[3] - test[1])
-            if y_dist <= gap_limit:
-                # Expand curr box to include test
-                curr = [
-                    min(curr[0], test[0]),
-                    min(curr[1], test[1]),
-                    max(curr[2], test[2]),
-                    max(curr[3], test[3]),
-                ]
-                boxes.pop(i)
-                i = 0  # Re-check boundaries
-            else:
-                i += 1
-        merged.append(curr)
-    return merged
 
 
 def get_freest_gpu():
@@ -223,7 +148,9 @@ class PipelineConfig:
         # VDMS
         self.DBHOST = kwargs.get("DBHOST", DBHOST_DEFAULT)
         self.DBPORT = int(kwargs.get("DBPORT", DBPORT_DEFAULT))
-        self.ENABLE_QUERYING = str2bool(kwargs.get("ENABLE_QUERYING", False))
+        self.ENABLE_QUERYING = str2bool(
+            kwargs.get("ENABLE_QUERYING", ENABLE_QUERYING_DEFAULT)
+        )
         self.INGESTION = kwargs.get("INGESTION", INGESTION_DEFAULT)
         self.UDF_HOST = kwargs.get("UDF_HOST", UDF_HOST_DEFAULT)
         self.UDF_PORT = int(kwargs.get("UDF_PORT", UDF_PORT_DEFAULT))
@@ -291,8 +218,8 @@ class PipelineConfig:
         self.DEBUG_FLAG = True if self.DEBUG == "1" else False
 
         if self.DETECTION_TYPE == "motion" and self.ENABLE_QUERYING:
-            self.ENABLE_QUERYING = False
-            self.DISPLAY_FRAME_QUALITY = 100
+            # self.ENABLE_QUERYING = False
+            # self.DISPLAY_FRAME_QUALITY = 100
             self.THICKNESS = 10
 
         self.sf_enabled = kwargs.get("SMART_FILTERING_ENABLED", SMART_FILTERING_ENABLED)
@@ -343,11 +270,6 @@ class VDMSPool:
         # Put the connection back for reuse
         self.pool.put(conn)
 
-
-# device_input_DEFAULT = DEVICE_DEFAULT.lower() if DEVICE_DEFAULT == "CPU" else "cuda"
-# Path(SHARED_OUTPUT_DEFAULT).mkdir(parents=True, exist_ok=True)
-
-# VDMS_POOL = None
 
 ERR_KEYWORDS = [
     "timeout",
@@ -567,40 +489,6 @@ DETECTION_ACCEL_KERNEL = cupy.RawKernel(
     """,
     "fast_detect",
 )
-# DETECTION_ACCEL_KERNEL = cupy.RawKernel(
-#     r"""
-# extern "C" __global__
-# void fast_detect(const unsigned char* bgs_mask, unsigned char* out_mask, int pitch, int w, int h, float thresh) {
-#     int x = blockIdx.x * blockDim.x + threadIdx.x;
-#     int y = blockIdx.y * blockDim.y + threadIdx.y;
-
-#     if (x >= 2 && x < w-2 && y >= 2 && y < h-2) {
-#         unsigned char val = bgs_mask[y * pitch + x];
-#         unsigned char res = (val > thresh) ? 255 : 0;
-
-#         if (res == 0) {
-#             bool found = false;
-#             for (int dy = -2; dy <= 2; dy++) {
-#                 for (int dx = -2; dx <= 2; dx++) {
-#                     // CIRCULAR CHECK: Skip the far corners of the 5x5 square
-#                     // This mimics cv2.MORPH_ELLIPSE and prevents over-merging
-#                     if (abs(dx) == 2 && abs(dy) == 2) continue;
-
-#                     if (bgs_mask[(y + dy) * pitch + (x + dx)] > thresh) {
-#                         found = true;
-#                         break;
-#                     }
-#                 }
-#                 if (found) break;
-#             }
-#             if (found) res = 255;
-#         }
-#         out_mask[y * pitch + x] = res;
-#     }
-# }
-# """,
-#     "fast_detect",
-# )
 
 # Fused Kernel: Single-pass Bounding Box Extraction with Stride Support
 BOUNDS_KERNEL = cupy.RawKernel(
@@ -623,32 +511,6 @@ void find_bounds(const unsigned char* labeled_ptr, int step, int width, int heig
 """,
     "find_bounds",
 )
-
-
-# def tensor2opencv(frame_raw, device_input, is_bgr=True):
-#     # GPU Path (Always RGB -> needs swap to BGR)
-#     if device_input == "cuda":
-#         if hasattr(frame_raw, "permute"):
-#             # [C, H, W] -> [H, W, C]
-#             frame_cpu = (
-#                 frame_raw.permute(1, 2, 0).detach().cpu().numpy().astype(np.uint8)
-#             )
-#         else:
-#             frame_cpu = np.ascontiguousarray(frame_raw, dtype=np.uint8)
-
-#         if not is_bgr:
-#             # GPU reader outputs RGB, so we MUST swap to BGR for VideoWriter
-#             frame_cpu = cv2.cvtColor(frame_cpu, cv2.COLOR_RGB2BGR)
-
-#     # Handle CPU Path (Check if swap is needed)
-#     else:
-#         frame_cpu = np.ascontiguousarray(frame_raw, dtype=np.uint8)
-#         if frame_cpu.shape[0] == 3:
-#             frame_cpu = frame_cpu.transpose(1, 2, 0)
-
-#         if not is_bgr:
-#             frame_cpu = cv2.cvtColor(frame_cpu, cv2.COLOR_RGB2BGR)
-#     return frame_cpu
 
 
 def tensor2opencv(frame_source, device_input, is_bgr=True, resize_h=640, resize_w=640):
@@ -785,7 +647,172 @@ void get_bounds(const int* labeled, int pitch, int w, int h, int num_labels,
 get_bounds_kernel = cupy.RawKernel(BOUNDS_KERNEL_CODE, "get_bounds")
 
 
-def find_contours_gpu_equivalent(mask_gpu_mat, stream=None):
+def merge_boxes_gpu(raw_boxes, gap_limit=10, size_limit=1000):
+    """
+    Refined Parallel Merger with Size Constraints.
+    Prevents merges that would create boxes larger than size_limit.
+    """
+    if raw_boxes.shape[0] <= 1:
+        return raw_boxes
+
+    x1, y1, x2, y2 = raw_boxes.unbind(1)
+
+    # 1. Calculate pairwise gaps (Existing logic)
+    h_gaps = torch.max(
+        torch.zeros(1, device=raw_boxes.device),
+        torch.max(x1.unsqueeze(0) - x2.unsqueeze(1), x1.unsqueeze(1) - x2.unsqueeze(0)),
+    )
+    v_gaps = torch.max(
+        torch.zeros(1, device=raw_boxes.device),
+        torch.max(y1.unsqueeze(0) - y2.unsqueeze(1), y1.unsqueeze(1) - y2.unsqueeze(0)),
+    )
+
+    # 2. NEW: Calculate potential union dimensions for ALL pairs [N, N]
+    # We find the min/max coordinates if box i and box j were merged
+    union_x1 = torch.min(x1.unsqueeze(0), x1.unsqueeze(1))
+    union_y1 = torch.min(y1.unsqueeze(0), y1.unsqueeze(1))
+    union_x2 = torch.max(x2.unsqueeze(0), x2.unsqueeze(1))
+    union_y2 = torch.max(y2.unsqueeze(0), y2.unsqueeze(1))
+
+    union_w = union_x2 - union_x1
+    union_h = union_y2 - union_y1
+
+    # 3. ADJACENCY MASK: Must be close AND the result must be under the limit
+    # This prevents the creation of massive "megaboxes"
+    adj = (
+        (h_gaps < gap_limit)
+        & (v_gaps < gap_limit)
+        & (union_w < size_limit)
+        & (union_h < size_limit)
+    )
+
+    # 4. Parallel Connected Components (Existing logic)
+    components = torch.arange(raw_boxes.shape[0], device=raw_boxes.device)
+    r = 3
+    for _ in range(r):
+        components = torch.max(adj * components, dim=1).values
+
+    unique_ids = components.unique()
+    merged = []
+    for i in unique_ids:
+        mask = components == i
+        merged.append(
+            torch.cat(
+                [raw_boxes[mask, :2].min(0).values, raw_boxes[mask, 2:].max(0).values]
+            )
+        )
+
+    return torch.stack(merged)
+
+
+def merge_boxes_cpu(boxes, gap_limit=10):
+    """
+    Greedy merge in 640x640 space to consolidate swarm fragments.
+    Input: List of [x1, y1, x2, y2] within [0, 640]
+    """
+    if not boxes:
+        return []
+
+    # O(N log N) sort by X for early exit optimization
+    boxes = sorted(boxes, key=lambda x: x[0])
+    merged = []
+
+    while boxes:
+        curr = boxes.pop(0)
+        i = 0
+        while i < len(boxes):
+            test = boxes[i]
+            # Early exit: horizontal gap exceeds limit
+            if test[0] - curr[2] > gap_limit:
+                break
+
+            # Check vertical gap
+            y_dist = max(0, test[1] - curr[3], curr[3] - test[1])
+            if y_dist <= gap_limit:
+                # Expand curr box to include test
+                curr = [
+                    min(curr[0], test[0]),
+                    min(curr[1], test[1]),
+                    max(curr[2], test[2]),
+                    max(curr[3], test[3]),
+                ]
+                boxes.pop(i)
+                i = 0  # Re-check boundaries
+            else:
+                i += 1
+        merged.append(curr)
+    return merged
+
+
+def find_contours_gpu_equivalent(
+    mask_gpu_mat, stream=None, grid_size=16, limit_640=1000, max_boxes=100
+):
+    """
+    ULTRA-OPTIMIZED: Grid-based Region Proposal.
+    Reduces N to prevent merger bottlenecks. Latency: <0.5ms.
+    """
+    # 1. Zero-copy bridge: GpuMat -> CuPy -> Torch
+    mask_cp = gpumat2cupy(mask_gpu_mat)
+    mask_tensor = torch.as_tensor(mask_cp, device="cuda")
+
+    # # 2. Downsample via Max Pooling (Acts as Denoise + Grouper)
+    # # A 32x32 grid on 640x640 creates a 20x20 matrix (400 cells max)
+    # pooled = F.max_pool2d(
+    #     mask_tensor.unsqueeze(0).unsqueeze(0).float(),
+    #     kernel_size=grid_size,
+    #     stride=grid_size
+    # ).squeeze()
+
+    # # 3. Get Indices of Motion
+    # indices = torch.nonzero(pooled > 0)
+    # A grid_size of 32 has 1,024 pixels.
+    # We require at least 5% (approx 50 pixels) to be white to trigger a ROI.
+    # This 'math' kills terrain shimmer but keeps solid drone blobs.
+    # density_threshold = (grid_size * grid_size) * 0.05
+
+    # Use torch.count_nonzero if using AvgPool, or stick to pooled with threshold
+    # Since 'pooled' from MaxPool is just the max value (0 or 255),
+    # we should use F.avg_pool2d instead to get a density map:
+
+    density_map = F.avg_pool2d(
+        mask_tensor.unsqueeze(0).unsqueeze(0).float(),
+        kernel_size=grid_size,
+        stride=grid_size,
+    ).squeeze()
+
+    # Define your sensitivity (e.g., 5% density)
+    # If a block is 5% full of 'white' (255) pixels, the average will be 12.75
+    density_threshold = 2  # int((grid_size * grid_size) * 0.01)
+
+    # 255 * 0.10 means the grid cell must be 10% white pixels
+    indices = torch.nonzero(density_map > density_threshold)
+
+    # EARLY EXIT: No motion detected, return empty
+    if indices.shape[0] == 0:
+        return torch.empty((0, 4), device="cuda")
+    # 2. SORT BY DENSITY: Get values for each index
+    # We pull the density values for every 'hot' cell
+    densities = density_map[indices[:, 0], indices[:, 1]]
+
+    # 3. Get the sort order (Descending: highest density first)
+    _, sort_order = torch.sort(densities, descending=True)
+    indices = indices[sort_order]
+
+    # CAP N: If scene is too noisy, take top regions to save the merger
+    if indices.shape[0] > max_boxes:
+        indices = indices[:max_boxes]
+
+    # 4. Map back to 640p Bounding Boxes
+    y1, x1 = indices[:, 0] * grid_size, indices[:, 1] * grid_size
+    y2, x2 = y1 + grid_size, x1 + grid_size
+    raw_boxes = torch.stack([x1, y1, x2, y2], dim=1).float()
+
+    # 5. Merge adjacent grid blocks
+    # gap_limit=grid_size+2 ensures diagonal/nearby blocks connect
+    return merge_boxes_gpu(raw_boxes, gap_limit=grid_size * 2, size_limit=limit_640)
+
+
+def find_contours_gpu_equivalentv1(mask_gpu_mat, stream=None):
     """
     GPU equivalent to cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     Returns: torch.Tensor [N, 4] containing (x1, y1, x2, y2) in analysis space.
@@ -1005,46 +1032,6 @@ def manual_fps_calculation(src, num_frames=10):
         return 0
 
 
-# def nv12_to_rgb_torch(nv12_tensor, height, width):
-#     """
-#     Fast GPU-based NV12 to RGB conversion using PyTorch.
-#     Input: [H*1.5, W] uint8 tensor on GPU
-#     Output: [3, H, W] float32 tensor on GPU (Normalized 0.0-1.0)
-#     """
-#     # Extract Y (Luma) plane: [0:height, :]
-#     y = nv12_tensor[:height, :].float()
-
-#     # Extract UV (Chroma) plane: [height:, :]
-#     # UV is interleaved: U V U V ...
-#     uv = nv12_tensor[height:, :].reshape(height // 2, width // 2, 2).float()
-
-#     # Upsample UV to match Y dimensions using Bilinear interpolation
-#     # This stretches the color to match the 8K detail
-#     uv_upsampled = torch.nn.functional.interpolate(
-#         uv.permute(2, 0, 1).unsqueeze(0),
-#         size=(height, width),
-#         mode="bilinear",
-#         align_corners=False,
-#     ).squeeze(0)
-
-#     u = uv_upsampled[0]
-#     v = uv_upsampled[1]
-
-#     # YUV to RGB Conversion Matrix (BT.709 for 8K/HD)
-#     # Shift values to be zero-centered
-#     y = (y - 16) * 1.164
-#     u = u - 128
-#     v = v - 128
-
-#     r = y + 1.793 * v
-#     g = y - 0.213 * u - 0.533 * v
-#     b = y + 2.112 * u
-
-#     # Stack and Clamp
-#     rgb = torch.stack([r, g, b], dim=0)
-#     return torch.clamp(rgb, 0, 255).byte()  # Return as [3, 4320, 7680] uint8
-
-
 def rgb_to_nv12_torch(rgb_tensor):
     """
     Fast GPU conversion from RGB to NV12 using PyTorch.
@@ -1147,7 +1134,7 @@ def get_udf_query(
             print(f"[DEBUG] {filename} INGEST_VIDEO RESPONSE: {res}", flush=True)
     except Exception:
         e = traceback.format_exc()
-        print(f"[DEBUG] VDMS Query Exception: {e}", flush=True)
+        print(f"[EXCEPTION] VDMS Query Exception: {e}", flush=True)
 
 
 def _sort_dict_by_frame(in_dict):

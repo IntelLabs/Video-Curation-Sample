@@ -22,7 +22,15 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-main_app_logger = logging.getLogger()
+
+# Suppress low-delay reference block warnings from OpenCV/PyAV/FFmpeg
+os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
+os.environ["OPENCV_LOG_LEVEL"] = "OFF"
+logging.getLogger("libav").setLevel(logging.CRITICAL)
+logging.getLogger("libav.hevc").setLevel(logging.CRITICAL)
+av.logging.set_level(av.logging.PANIC)
+
+main_app_logger = logging.getLogger(__name__)
 
 
 # ----- PIPELINE CONFIGURATION -----
@@ -37,6 +45,7 @@ cv2.setNumThreads(0)
 # DEVICE = os.getenv("DEVICE", "CPU")
 # device_input = DEVICE.lower() if DEVICE == "CPU" else "cuda"
 
+from include.default_configs import ENABLE_QUERYING_DEFAULT
 from include.utils import PipelineConfig, manual_fps_calculation, str2bool
 
 BASE_PIPELINE_CONFIG = PipelineConfig(
@@ -45,7 +54,7 @@ BASE_PIPELINE_CONFIG = PipelineConfig(
     DBHOST=os.getenv("DBHOST", "vdms-service"),
     DEBUG=os.getenv("DEBUG", "0"),
     DEVICE=os.getenv("DEVICE", "CPU"),
-    ENABLE_QUERYING=os.getenv("ENABLE_QUERYING", True),
+    ENABLE_QUERYING=os.getenv("ENABLE_QUERYING", ENABLE_QUERYING_DEFAULT),
     INGESTION=os.getenv("INGESTION", "object"),
     MODEL_NAME=os.getenv("MODEL_NAME", "yolo11n"),
     OMIT_DETECTIONS_FLAG=str2bool(os.getenv("OMIT_DETECTIONS_FLAG", False)),
@@ -69,12 +78,15 @@ class BaseReader:
         source,
         target_fps=BASE_PIPELINE_CONFIG.TARGET_FPS,
         clip_duration=BASE_PIPELINE_CONFIG.CLIP_DURATION,
-        only_target_frames=True,
+        queue_size=2,
     ):
         self.source = source
+        self.is_rtsp = str(self.source).startswith("rtsp://")
         self.frame_idx = 0
-        self.frame_queue = queue.Queue(maxsize=2)  # 5
+        self.frame_queue = queue.Queue(maxsize=queue_size)  # 2)  # 5
         self.stopped = False
+        self.reconnect_failed = False
+        self.init_error = None
         self.target_fps = (
             float(target_fps) if target_fps not in [None, 0] else target_fps
         )
@@ -113,12 +125,18 @@ class CPUHybridReader(BaseReader):
         source,
         target_fps=BASE_PIPELINE_CONFIG.TARGET_FPS,
         clip_duration=BASE_PIPELINE_CONFIG.CLIP_DURATION,
-        only_target_frames=True,
         MODEL_W=BASE_PIPELINE_CONFIG.MODEL_W,
         MODEL_H=BASE_PIPELINE_CONFIG.MODEL_H,
+        queue_size=2,
+        # as_tensor=False,
     ):
-        super().__init__(source, target_fps=target_fps, clip_duration=clip_duration)
-
+        super().__init__(
+            source,
+            target_fps=target_fps,
+            clip_duration=clip_duration,
+            queue_size=queue_size,
+        )
+        # self.as_tensor = as_tensor
         target_fps, clip_duration = (self.target_fps, self.clip_duration)
         # options = (
         #     {"rtsp_transport": "tcp", "stimeout": "5000000"}
@@ -127,41 +145,124 @@ class CPUHybridReader(BaseReader):
         # )
         self.MODEL_H = MODEL_H
         self.MODEL_W = MODEL_W
+        self.device = "CPU"  # Global from include.utils
+        self.target_frame_idx = 0
+        self.cap = None
 
-        self.cap = self._create_capture(target_fps, clip_duration)
+        max_retries = 5
+        retry_cnt = 0
+        connected = False
+
+        while not connected and not self.stopped:
+            try:
+                # Clean up stale capture descriptors safely to clear sockets
+                if self.cap is not None:
+                    try:
+                        self.cap.release()
+                    except Exception:
+                        pass
+                    self.cap = None
+
+                # Safely intercept capture context extraction layers
+                # Note: We pass self.source instead of recreating string evaluations
+                if not isinstance(self.source, cv2.VideoCapture):
+                    params = [cv2.CAP_PROP_N_THREADS, 1]
+                    test_cap = cv2.VideoCapture(
+                        str(self.source), cv2.CAP_FFMPEG, params=params
+                    )
+                else:
+                    test_cap = self.source
+
+                if test_cap and test_cap.isOpened():
+                    # Validate that we can extract safe telemetry properties
+                    self.get_fps_and_framecnt(
+                        test_cap, self.target_fps, self.clip_duration
+                    )
+                    self.frame_width = int(test_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    self.frame_height = int(test_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    self.numFrames = int(test_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+                    if self.input_fps <= 0 or self.frame_width <= 0:
+                        raise RuntimeError(
+                            "VideoCapture opened but returned invalid stream properties."
+                        )
+
+                    self.cap = test_cap
+                    self.get_frameWH()
+                    connected = True
+                else:
+                    raise RuntimeError(
+                        "OpenCV VideoCapture failed to open target URI resource context."
+                    )
+
+            except Exception as e:
+                retry_cnt += 1
+                self.init_error = str(e)
+
+                # Exit if local file resource or retry count exceeded
+                if not self.is_rtsp or retry_cnt >= max_retries:
+                    main_app_logger.error(
+                        f"Critical: Could not open/connect to {self.source}"
+                    )
+                    self.reconnect_failed = True
+                    self.stopped = True
+                    # Halt and exit the server immediately
+                    raise RuntimeError(
+                        f"Critical CPU stream reader initialization failure: {self.init_error}"
+                    )
+                    return
+
+                wait_time = retry_cnt * 2
+                main_app_logger.warning(
+                    f"CPU connection pending... Retry ({retry_cnt}/{max_retries}) in {wait_time} seconds."
+                )
+                time.sleep(wait_time)
+
+        # self.cap = self._create_capture(target_fps, clip_duration)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Force low latency
         self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
 
         # self.frame_queue = deque(maxlen=5)  # Keep queue small to stay "real-time"
         # self.frame_queue = queue.Queue(maxsize=5)
         # self.stopped = False
-        self.device = "CPU"  # Global from include.utils
+        # self.device = "CPU"  # Global from include.utils
         # self.frame_idx = 0
-        self.target_frame_idx = 0
+        # self.target_frame_idx = 0
         # self.frame_queue = queue.Queue(maxsize=30)
 
     def _create_capture(self, target_fps, clip_duration):
         """Creates a VideoCapture with stable RTSP options."""
-        if not isinstance(self.source, cv2.VideoCapture):
-            self.source = str(self.source)
-            params = [cv2.CAP_PROP_N_THREADS, 1]
-            cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG, params=params)
-        else:
-            cap = self.source
-        self.get_fps_and_framecnt(cap, target_fps, clip_duration)
-        self.frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.numFrames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.get_frameWH()
-        return cap
+        # if not isinstance(self.source, cv2.VideoCapture):
+        #     self.source = str(self.source)
+        #     params = [cv2.CAP_PROP_N_THREADS, 1]
+        #     cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG, params=params)
+        # else:
+        #     cap = self.source
+        # self.get_fps_and_framecnt(cap, target_fps, clip_duration)
+        # self.frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        # self.frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # self.numFrames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # self.get_frameWH()
+        # return cap
+
+        if isinstance(self.source, cv2.VideoCapture):
+            return self.source
+        params = [cv2.CAP_PROP_N_THREADS, 1]
+        return cv2.VideoCapture(str(self.source), cv2.CAP_FFMPEG, params=params)
 
     # Gets video details
     def get_fps_and_framecnt(self, cap, target_fps, clip_duration):
         self.input_fps = int(cap.get(cv2.CAP_PROP_FPS))  # hardware fps
-        # print(f"in fps: {sself.input_fps} target fps: {target_fps}")
+        # print(f"in fps: {self.input_fps} target fps: {target_fps}")
         if self.input_fps == 0:  # Case when FPS isn't available
             self.input_fps = manual_fps_calculation(cap, num_frames=10)
             print(f"new in fps: {self.input_fps}")
+
+        # If the stream can't connect, stop immediately instead of calculating.
+        if self.input_fps <= 0:
+            raise RuntimeError(
+                f"Failed to initialize stream reader endpoint: {self.source}"
+            )
 
         self.target_fps = (
             target_fps
@@ -169,8 +270,9 @@ class CPUHybridReader(BaseReader):
             else self.input_fps
         )
 
-        self.frame_skip = int(self.input_fps / self.target_fps)
-        if self.frame_skip < 1:
+        if self.input_fps > 0 and self.target_fps > 0:
+            self.frame_skip = max(1, int(self.input_fps / self.target_fps))
+        else:
             self.frame_skip = 1
         # self.skip_count = self.frame_skip - 1
 
@@ -219,8 +321,13 @@ class CPUHybridReader(BaseReader):
                         break
                     try:
                         # Logic to recreate the VideoCapture
-                        self.cap = self._create_capture(
-                            self.target_fps, self.clip_duration
+                        # self.cap = self._create_capture(
+                        #     self.target_fps, self.clip_duration
+                        # )
+                        # self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        params = [cv2.CAP_PROP_N_THREADS, 1]
+                        self.cap = cv2.VideoCapture(
+                            str(self.source), cv2.CAP_FFMPEG, params=params
                         )
                         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                         retry_cnt = 0
@@ -251,7 +358,33 @@ class CPUHybridReader(BaseReader):
                     self.cap = None
                     continue
 
-                self.frame_queue.put((frame, self.frame_idx))
+                # if self.as_tensor:
+                #     frame_tensor = torch.from_numpy(frame)
+
+                #     # 3. Push to GPU memory immediately
+                #     # non_blocking=True speeds up the host-to-device transfer
+                #     frame_tensor = frame_tensor.to("cuda", non_blocking=True)
+
+                #     # 4. Rearrange dimensions to PyTorch format: [H, W, C] -> [C, H, W]
+                #     # .permute() changes layout; .float() converts uint8 to float32 for interpolation
+                #     frame_tensor = frame_tensor.permute(2, 0, 1).float()
+
+                #     # 5. Add Batch dimension: [C, H, W] -> [1, C, H, W]
+                #     frame_tensor = frame_tensor.unsqueeze(0)
+
+                #     # 6. Normalize pixel values to [0.0, 1.0] if required by your model
+                #     frame = frame_tensor / 255.0
+
+                # self.frame_queue.put((frame, self.frame_idx))
+                try:
+                    self.frame_queue.put((frame, self.frame_idx), timeout=1.0)
+                except queue.Full:
+                    try:
+                        # Non-blocking pop to gracefully evict the oldest stale frame token
+                        self.frame_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    self.frame_queue.put((frame, self.frame_idx))
                 self.target_frame_idx += 1
                 self.frame_idx += 1
             except Exception as e:
@@ -277,14 +410,19 @@ class GPUHybridReader(BaseReader):
         self,
         source,
         gpu_id=0,
-        only_target_frames=True,
         target_fps=BASE_PIPELINE_CONFIG.TARGET_FPS,
         clip_duration=BASE_PIPELINE_CONFIG.CLIP_DURATION,
         MODEL_W=BASE_PIPELINE_CONFIG.MODEL_W,
         MODEL_H=BASE_PIPELINE_CONFIG.MODEL_H,
+        queue_size=2,
     ):
         global nvc
-        super().__init__(source, target_fps=target_fps, clip_duration=clip_duration)
+        super().__init__(
+            source,
+            target_fps=target_fps,
+            clip_duration=clip_duration,
+            queue_size=queue_size,
+        )
 
         if "PyNvVideoCodec" not in sys.modules:
             try:
@@ -317,11 +455,19 @@ class GPUHybridReader(BaseReader):
         target_fps, clip_duration = (self.target_fps, self.clip_duration)
         self.av_options = (
             {
+                # "rtsp_transport": "tcp",
+                # "stimeout": "2000000",  # 2s
+                # "probesize": "10000000",  # "32000000",  # 32MB for 8K
+                # "analyzeduration": "5000000",
+                # "buffer_size": "10240000",  # 10MB socket buffer
                 "rtsp_transport": "tcp",
-                "stimeout": "2000000",  # 2s
-                "probesize": "10000000",  # "32000000",  # 32MB for 8K
-                "analyzeduration": "5000000",
-                "buffer_size": "10240000",  # 10MB socket buffer
+                "stimeout": "2000000",
+                "timeout": "2000000",
+                "rw_timeout": "2000000",
+                "err_detect": "explode",
+                "flags": "discardcorrupt",
+                "probesize": "32000000",
+                "analyzeduration": "32000000",
             }
             if str(self.source).startswith("rtsp")
             else {}
@@ -361,8 +507,9 @@ class GPUHybridReader(BaseReader):
             if target_fps not in [None, 0] and self.input_fps > target_fps
             else self.input_fps
         )
-        self.frame_skip = int(self.input_fps / self.target_fps)
-        if self.frame_skip < 1:
+        if self.input_fps > 0 and self.target_fps > 0:
+            self.frame_skip = max(1, int(self.input_fps / self.target_fps))
+        else:
             self.frame_skip = 1
         self.max_frames_per_clip = (
             None
@@ -379,8 +526,8 @@ class GPUHybridReader(BaseReader):
         self.sync_locked = True
 
     def get_stream(self):
-        max_init_retries = 5
-        init_retry_cnt = 0
+        max_retries = 5
+        retry_cnt = 0
         connected = False
         is_rtsp = str(self.source).startswith("rtsp")
 
@@ -404,17 +551,26 @@ class GPUHybridReader(BaseReader):
                     connected = True
 
             except Exception as e:
-                init_retry_cnt += 1
-                if not is_rtsp or init_retry_cnt >= max_init_retries:
-                    main_app_logger.error(
-                        f"Critical: Could not open/connect to {self.name}"
-                    )
-                    raise e
+                retry_cnt += 1
+                self.init_error = str(e)
 
+                if not is_rtsp or retry_cnt >= max_retries:
+                    main_app_logger.error(
+                        f"Critical: Could not open/connect to {self.source}"
+                    )
+                    self.reconnect_failed = True
+                    self.stopped = True
+                    # Halt and exit the server immediately
+                    raise RuntimeError(
+                        f"Critical GPU stream reader initialization failure: {self.init_error}"
+                    )
+                    return
+
+                wait_time = retry_cnt * 2
                 main_app_logger.warning(
-                    f"Failed to connect to stream. Retry {init_retry_cnt}/{max_init_retries}..."
+                    f"GPU connection pending... Retry ({retry_cnt}/{max_retries}) in {wait_time} seconds."
                 )
-                time.sleep(init_retry_cnt * 2)
+                time.sleep(wait_time)
 
     def stream_frames(self):
         """
@@ -437,7 +593,7 @@ class GPUHybridReader(BaseReader):
                             self.source,
                             options={
                                 **self.av_options,
-                                "err_detect": "ignore_err",  # Don't stop demuxing on minor packet errors
+                                "err_detect": "explode",  # Don't stop demuxing on minor packet errors
                                 "flags": "low_delay",  # Reduce internal buffering
                             },
                         )
@@ -504,10 +660,6 @@ class GPUHybridReader(BaseReader):
                         maxheight=hw_max_h,
                         latency=latency_mode,
                     )
-                    print(
-                        f"[DEBUG] Hardware Decoder initialized for {self.source}",
-                        flush=True,
-                    )
 
                 # Re-initialize BitStream Filter for this session
                 bsf_map = {"hevc": "hevc_mp4toannexb", "h264": "h264_mp4toannexb"}
@@ -529,8 +681,9 @@ class GPUHybridReader(BaseReader):
                     if target_fps not in [None, 0] and self.input_fps > target_fps
                     else self.input_fps
                 )
-                self.frame_skip = int(self.input_fps / self.target_fps)
-                if self.frame_skip < 1:
+                if self.input_fps > 0 and self.target_fps > 0:
+                    self.frame_skip = max(1, int(self.input_fps / self.target_fps))
+                else:
                     self.frame_skip = 1
                 self.max_frames_per_clip = (
                     None
@@ -563,7 +716,11 @@ class GPUHybridReader(BaseReader):
                         self.raw_input.copy_(torch.from_numpy(img_array))
                         gpu_tensor = self.raw_input.permute(2, 0, 1)
 
-                        self.frame_queue.put((gpu_tensor, self.frame_idx))
+                        # CRITICAL FIX: Break the shared buffer pointer!
+                        # Clones the frame to a private memory block before queueing it.
+                        safe_frame = gpu_tensor.clone().contiguous()
+
+                        self.frame_queue.put((safe_frame, self.frame_idx))
                         self.frame_idx += 1
 
                         # if not is_rtsp and self.frame_idx >= 500:
@@ -575,33 +732,40 @@ class GPUHybridReader(BaseReader):
                         f"[INFO] Starting HW-Accelerated Pump for {self.source}",
                         flush=True,
                     )
-                    for packet in self.container.demux(self.stream):
-                        if self.stopped:
+                    # Create an explicit stream packet extractor to isolate bitstream errors
+                    packet_iterator = self.container.demux(self.stream)
+
+                    while not self.stopped:
+                        try:
+                            packet = next(packet_iterator)
+                        except (ValueError, OSError, StopIteration):
                             break
 
                         # Check for corruption/validity safely
                         is_broken = packet.size == 0 or packet.dts is None
-                        is_broken = (
-                            is_broken
-                            or getattr(packet, "corrupt", False)
-                            or getattr(packet, "is_corrupt", False)
-                        )
+                        # is_broken = (
+                        #     is_broken
+                        #     or getattr(packet, "corrupt", False)
+                        #     or getattr(packet, "is_corrupt", False)
+                        # )
 
                         if is_broken:
-                            print(
-                                "[WARNING] Corrupt packet detected. Locking sync.",
-                                flush=True,
-                            )
-                            self.sync_locked = True
+                            # main_app_logger.warning("[WARNING] Corrupt packet detected. Locking sync.")
+                            # self.sync_locked = True
                             continue
 
+                        # ─── OPTIMIZED HARDWARE SYNCHRONIZATION BARRIER ──────────────────
                         if self.sync_locked:
-                            if packet.is_keyframe:
-                                if packet.size > 100000:  # 100KB
-                                    self.sync_locked = False
-                                else:
-                                    continue
-
+                            # Rely explicitly on PyAV header flag definitions instead of packet.size
+                            if getattr(packet, "is_keyframe", False):
+                                main_app_logger.info(
+                                    "[SYNC] Valid hardware keyframe intercepted. Unlocking decoder track."
+                                )
+                                self.sync_locked = False
+                            else:
+                                # Drop incomplete frames to prevent hardware canvas corruption
+                                continue
+                        # ─────────────────────────────────────────────────────────────────
                         # if self.stopped:
                         #     break
                         if packet.size == 0 or packet.dts is None:
@@ -639,21 +803,47 @@ class GPUHybridReader(BaseReader):
                                         # Zero-Copy Bridge: Hardware Surface -> PyTorch Tensor
                                         gpu_tensor = torch.from_dlpack(decoded_frame)
                                         # 2. CONVERSION: Turn NV12 [YUV] into BGR immediately
-                                        gpu_tensor = self.nv12_to_bgr_reader(
-                                            gpu_tensor,
-                                            # self.frame_height,
-                                            # self.frame_width,
-                                            # is_8k=self.is_h264_8k,
+                                        converted_bgr = self.nv12_to_bgr_reader(
+                                            gpu_tensor
                                         )
 
-                                        # Use .clone() for threaded safety to prevent hardware surface reuse glitches
-                                        self.frame_queue.put(
-                                            (gpu_tensor.clone(), self.frame_idx)
-                                        )
+                                        # CRITICAL FIX: Force a brand-new, isolated memory block allocation
+                                        # on the GPU so the decoder cannot overwrite this frame's pixels
+                                        # while downstream threads are analyzing the mask.
+                                        safe_frame = converted_bgr.clone().contiguous()
+
+                                        while not self.stopped:
+                                            try:
+                                                self.frame_queue.put(
+                                                    (
+                                                        safe_frame,
+                                                        self.frame_idx,
+                                                    ),
+                                                    timeout=0.1,
+                                                )
+                                                break
+                                            except queue.Full:
+                                                try:
+                                                    self.frame_queue.get_nowait()
+                                                except queue.Empty:
+                                                    pass
+                                        torch.cuda.current_stream().synchronize()
                                         self.frame_idx += 1
+                                    except (
+                                        av.FFmpegError,
+                                        av.InvalidDataError,
+                                        RuntimeError,
+                                    ) as decode_fault:
+                                        main_app_logger.warning(
+                                            f"Isolating corrupt video packet fragment: {decode_fault}"
+                                        )
+                                        if hasattr(decoded_frame, "Unlock"):
+                                            decoded_frame.Unlock()
+                                        continue
                                     finally:
                                         # Immediate VRAM Cleanup
-                                        del gpu_tensor
+                                        if "gpu_tensor" in locals():
+                                            del gpu_tensor
                                         if hasattr(decoded_frame, "Unlock"):
                                             decoded_frame.Unlock()
                                         del decoded_frame
@@ -693,8 +883,17 @@ class GPUHybridReader(BaseReader):
                         except Exception:
                             pass
 
-                    # CRITICAL: Reset the hardware decoder handle
-                    # This forces the 'while' loop to recreate self.nv_dec (Line 741)
+                    # Force close the C++ decoder context layer before resetting the pointer
+                    if self.nv_dec is not None:
+                        try:
+                            if hasattr(self.nv_dec, "Close"):
+                                self.nv_dec.Close()
+                        except Exception:
+                            pass
+                        del self.nv_dec
+
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
                     self.nv_dec = None
                     while not self.frame_queue.empty():
                         try:
@@ -704,19 +903,26 @@ class GPUHybridReader(BaseReader):
                     time.sleep(0.5)  # Wait before reconnection attempt
 
             except Exception as e:
-                print(f"[ERROR] Reader Thread Failure: {e}", flush=True)
+                print(f"[EXCEPTION] Reader Thread Failure: {e}", flush=True)
                 traceback.print_exc()
                 if not is_rtsp:
                     self.stopped = True
                     break
 
                 self.sync_locked = True
-                if self.nv_dec:
+                if self.nv_dec is not None:
+                    try:
+                        # Force a hardware surface close step to release hardware rings instantly
+                        if hasattr(self.nv_dec, "Close"):
+                            self.nv_dec.Close()
+                    except Exception:
+                        pass
                     del self.nv_dec
-                    # Force CUDA to synchronize and clear errors
-                    torch.cuda.synchronize()
-                    torch.cuda.empty_cache()
-                    self.nv_dec = None
+
+                # Force CUDA to synchronize and clear driver error state flags safely
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                self.nv_dec = None
                 time.sleep(1.0)  # Backoff for RTSP reconnection
 
         self.stopped = True
@@ -738,15 +944,62 @@ class GPUHybridReader(BaseReader):
             self.container.close()
             self.container = None
 
-    def nv12_to_bgr_reader(self, nv12_tensor):  # , h, w, is_8k=False):
+    # def nv12_to_bgr_reader(self, nv12_tensor):  # , h, w, is_8k=False):
+    #     """Internal reader helper to convert raw hardware surfaces to BGR."""
+    #     h, w = self.frame_height, self.frame_width
+    #     is_8k = self.is_h264_8k
+    #     with torch.no_grad():
+    #         if is_8k:
+    #             # 8K Path: Extract and unzipper interleaved UV
+    #             y = nv12_tensor[0:1, :, :].half()
+    #             uv_raw = nv12_tensor[1:2, :, :].half()
+    #             u = uv_raw[:, :, 0::2]
+    #             v = uv_raw[:, :, 1::2]
+    #             u = F.interpolate(u.unsqueeze(0), size=(h, w), mode="nearest").squeeze(
+    #                 0
+    #             )
+    #             v = F.interpolate(v.unsqueeze(0), size=(h, w), mode="nearest").squeeze(
+    #                 0
+    #             )
+    #         else:
+    #             # Standard NV12 Path
+    #             y = nv12_tensor[:h, :w].unsqueeze(0).half()
+
+    #             uv = (
+    #                 nv12_tensor[h:, :w]
+    #                 .reshape(h // 2, w // 2, 2)
+    #                 .permute(2, 0, 1)
+    #                 .unsqueeze(0)
+    #                 .half()
+    #             )
+    #             uv_up = F.interpolate(uv, size=(h, w), mode="nearest")
+    #             u, v = uv_up[0, 0:1, :, :], uv_up[0, 1:2, :, :]
+
+    #         # BT.709 Math (Natural Color)
+    #         y = (y - 16.0) * 1.164
+    #         u, v = u - 128.0, v - 128.0
+
+    #         r = y + 1.793 * v
+    #         g = y - 0.213 * u - 0.533 * v
+    #         b = y + 2.112 * u
+
+    #         # Stack as BGR [B, G, R] for OpenCV/Browser compatibility
+    #         return torch.cat([b, g, r], dim=0).clamp(0, 255).to(torch.uint8)
+
+    def nv12_to_bgr_reader(self, nv12_tensor):
         """Internal reader helper to convert raw hardware surfaces to BGR."""
         h, w = self.frame_height, self.frame_width
         is_8k = self.is_h264_8k
+
+        # EXTRACT TRUE STRIDE: Get the actual hardware allocation width
+        # which includes the hidden byte-alignment padding columns.
+        stride_w = nv12_tensor.shape[1]
+
         with torch.no_grad():
             if is_8k:
-                # 8K Path: Extract and unzipper interleaved UV
-                y = nv12_tensor[0:1, :, :].half()
-                uv_raw = nv12_tensor[1:2, :, :].half()
+                # 8K Path: Slice using stride_w, then strip padding out cleanly
+                y = nv12_tensor[0:1, :, :stride_w].half()
+                uv_raw = nv12_tensor[1:2, :, :stride_w].half()
                 u = uv_raw[:, :, 0::2]
                 v = uv_raw[:, :, 1::2]
                 u = F.interpolate(u.unsqueeze(0), size=(h, w), mode="nearest").squeeze(
@@ -757,14 +1010,18 @@ class GPUHybridReader(BaseReader):
                 )
             else:
                 # Standard NV12 Path
-                y = nv12_tensor[:h, :w].unsqueeze(0).half()
+                # 1. Slice using the full hardware stride_w to preserve vertical row boundaries
+                y_padded = nv12_tensor[:h, :stride_w].half()
+                uv_padded = nv12_tensor[h:, :stride_w].half()
+
+                # 2. Crop out the hardware padding columns horizontally to get clean spatial grids
+                y = y_padded[:, :w].unsqueeze(0)
 
                 uv = (
-                    nv12_tensor[h:, :w]
+                    uv_padded[:, :w]
                     .reshape(h // 2, w // 2, 2)
                     .permute(2, 0, 1)
                     .unsqueeze(0)
-                    .half()
                 )
                 uv_up = F.interpolate(uv, size=(h, w), mode="nearest")
                 u, v = uv_up[0, 0:1, :, :], uv_up[0, 1:2, :, :]
@@ -777,8 +1034,12 @@ class GPUHybridReader(BaseReader):
             g = y - 0.213 * u - 0.533 * v
             b = y + 2.112 * u
 
-            # Stack as BGR [B, G, R] for OpenCV/Browser compatibility
-            return torch.cat([b, g, r], dim=0).clamp(0, 255).to(torch.uint8)
+            # Stack as BGR [B, G, R]
+            out_tensor = torch.cat([b, g, r], dim=0).clamp(0, 255).to(torch.uint8)
+
+            # CRITICAL PIECE: Force memory to be completely linear and sequentially packed
+            # before it enters the queue or gets sliced by the sub-frame window pipeline
+            return out_tensor.contiguous()
 
     @property
     def true_height(self):
