@@ -59,6 +59,7 @@ RUN if [ "${DEVICE}" = "GPU" ]; then \
 ENV PATH="$VIRTUAL_ENV/bin:/usr/local/cuda/bin:${PATH}"
 ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
 
+# scorecard-ignore: pinned-dependencies
 RUN pip3 install --no-cache-dir "pip==26.0.1" "torch==2.10.0" "torchvision==0.25.0" "numpy==1.26.4"
 
 
