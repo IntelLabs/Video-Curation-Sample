@@ -41,9 +41,9 @@ The current filtering pipeline includes the following steps:
 The current implementation of the Smart Filtering pipeline is optimized for the test use-case, drone detection.
 Drones are typically small in the video frames so if your use-case of interest has different objects, it may be beneficial to test the pipeline results on an existing test video for your use-case.
 
-For this case, we provide [`test_detections.py`](./fastapi/tests/test_detections.py) which annotates ROIs identified by the Smart Filtering pipeline onto each frame of the video for visual inspection.
+For this case, we provide [`test_detections.py`](/fastapi/tests/test_detections.py) which annotates ROIs identified by the Smart Filtering pipeline onto each frame of the video for visual inspection.
 
-For testing purposes, we will manually deploy the fastapi Dockerfile as it contains the same setup used in the application AND start the test script.
+For testing purposes, you can use VSCode DevContainer (easiest method) or manually deploy the fastapi dockerfile. Using VSCode is straight forward, so here, we will manually deploy the fastapi Dockerfile as it contains the same setup used in the application AND start the test script.
 Here we will build the container, if not available:
 ```bash
 REPO_DIR=`pwd`
@@ -61,21 +61,8 @@ docker build --network host \
 
 
 The script for testing the pipeline is in `fastapi/tests/` and your test video is expected to be in `inputs/` (i.e. `anduril_swarm_8K.mp4`) which is mounted to `/watch_dir` within container.
-This script can be run as a PyTest or from command line using following arguments:
 
-| Argument | Default | Description |
-| -------- | ------- | ----------- |
-| -v VIDEO,<br>--video VIDEO | anduril_swarm_8K.mp4 | Video filename (located in /inputs) |
-| --no-custom | - | Enable if using Ultralytics YOLO model |
-| -m MODEL_NAME,<br>--model MODEL_NAME | drone_detection | Name of model. Required if `--no-custom` is enabled. |
-| --type {object,motion} | None | Filter by detection type (object or motion) |
-| --device {cpu,gpu} | None | Filter by device (cpu or gpu) |
-| --sf | None | Filter by Smart Filtering |
-| --debug | False | Enable debug message and save intermediate images for Smart Filtering tests |
-| -n DEBUG_FRAME_LIMIT | 100 | Number of frames used for debugging |
-<br>
-
-Please see [Detection](#detections-using-sf-and-fine-tuned-yolo-model) section for expected location of models.
+Please see [Detection](#detections-using-sf-and-fine-tuned-yolo-model) section for expected location of models and see [Test Pipeline: Smart Filtering](#test-pipeline) for more information on testing the filtering pipeline.
 
 >***NOTE:*** The default video is an open-source video of a swarm of drones.
 This video can be downloaded from [yolov11-UAV-finetune](https://github.com/droneforge/yolov11-UAV-finetune/blob/main/anduril_swarm.mp4).
@@ -86,7 +73,7 @@ Since this work focuses on HR videos, we converted the test video to 8K using th
 
 
 To deploy this test, run the following command but modify the name of the test_video.
-The results from the test will be saved in `fastapi/tests/test_detections_results_drone_detection/<test_video>`.
+The results from the test will be saved in `fastapi/tests/test_detections_results/drone_detection/<test_video>`.
 ```bash
 docker run --rm --ipc=host \
 --gpus all --env NVIDIA_DRIVER_CAPABILITIES=all \
@@ -100,7 +87,7 @@ docker run --rm --ipc=host \
 -v ${REPO_DIR}/fastapi/resources:/home/resources \
 -v ${REPO_DIR}/fastapi/tests:/home/tests \
 -v ${REPO_DIR}/fastapi/tests/nginx.conf:/etc/nginx/nginx.conf \
-lcc_fastapi:stream /bin/bash -c "python /home/tests/test_detections.py -v <test_video>.mp4 --type motion"
+lcc_fastapi:stream /bin/bash -c "python /home/tests/test_detections.py --source <test_video>.mp4 --type motion"
 ```
 
 
@@ -124,12 +111,14 @@ lcc_fastapi:stream tail -f /dev/null
 ```
 
 You can attach to the container to debug the filtering as needed.
+
+For testing other components, please see [Testing Pipeline Components](#testing-pipeline-components) section.
 <br>
 
 
 #### VSCode
 If using VSCode, the provided `.vscode` directory is already mounted in the above command which includes `launch.json` for debugging.
-You can use the docker extension to connect to the `lcc_fastapi:stream` container by clicking `Attach Visual Studio Code`.
+You can use the provided DevContainer or use the docker extension to connect to the `lcc_fastapi:stream` container by clicking `Attach Visual Studio Code`.
 Once connected, it will install VSCode in the container.
 If you receive an error regarding permissions during installation, you must modify the remote user.
 To allow permission for the installation, open the `Command Pallette` and select `Dev Containers: Open Attached Container Configuration File`.
@@ -177,7 +166,7 @@ For the smart filtering pipeline, the following are potential areas for optimiza
 <br>
 
 Once satisfied with annotated results, you can proceed with running the full pipeline.
-***NOTE:*** If you modified any methods, be sure to update the predefined code to use your changes in the pipeline.
+***NOTE:*** If you modified any methods within the test script, be sure to update the predefined code to use your changes in the pipeline.
 <br>
 
 
@@ -194,6 +183,113 @@ Place your model in the appropriate directory for the application.
 
 Please note the model labels are retrieved from the model directly, so the model must contain these details.
 <br>
+
+
+## Testing Pipeline Components
+We provided multiple test scripts to test different components of the pipeline.
+Each of the tests can be run as specified in the [Smart Filtering Pipeline: Testing](#testing) section using the same video `anduril_swarm_8K.mp4` as `SOURCE`.
+Here we provide details on each available test.
+
+| Component | Test File | Description |
+| --------- | --------- | ----------- |
+| Detection Model | [test_model.py](/fastapi/tests/test_model.py) | Test the model for both CPU and GPU on provided RTSP URL or video file |
+| Smart Filtering | [test_detections.py](/fastapi/tests/test_detections.py) | This test independently evaluates the detection pipeline (with and without Smart Filtering) only and does not include video clip generation or sending metadata to database for querying. |
+| Stream Reader | [test_pipeline.py](/fastapi/tests/test_pipeline.py) | Scenario 1 tests the behavior of Readers when provided an invalid RTSP url.<br>Scenario 2 reads the RTSP url or video file for a specified duration or until it ends. |
+| Video Clip Generation | [test_pipeline.py](/fastapi/tests/test_pipeline.py) | Scenario 3 mimics the clip generation within the pipeline. |
+| Smart Filtering | [test_pipeline.py](/fastapi/tests/test_pipeline.py) | Scenario 4 tests the entire pipeline and saves output video of results. |
+
+
+### Test Models
+This test reads the `SOURCE` from `./inputs` (the local directory or `/watch_dir` if in container), or RTSP server, and creates a video with overlaid detection results for both GPU and CPU model.
+```bash
+python test_models.py -s "${SOURCE}"
+```
+
+You can also use the Yolo11n model by using:
+```bash
+python test_models.py -s "${SOURCE}" -m yolo11n --no-custom
+```
+
+The arguments available for this test are as follows:
+| Argument | Default | Description |
+| -------- | ------- | ----------- |
+| -s SOURCE,<br>--source SOURCE | anduril_swarm_8K.mp4 | Video filename (located in /inputs) or RTSP target stream endpoint |
+| --no-custom | - | Enable if using Ultralytics YOLO model |
+| -m MODEL_NAME,<br>--model MODEL_NAME | drone_detection | Name of model. Required if `--no-custom` is enabled. |
+| --type {object,motion} | None | Filter by detection type (object or motion) |
+| --device {cpu,gpu} | None | Filter by device (cpu or gpu) |
+<br>
+
+
+### Test Detections
+This test reads the `SOURCE` from `./inputs`, and evaluates the detection pipeline only.
+
+To run the detection test, use the following:
+```bash
+python test_detections.py --source "${SOURCE}"
+```
+
+You also have control on which scenario, model, etc. to use during testinh.
+The arguments available are as follows:
+| Argument | Default | Description |
+| -------- | ------- | ----------- |
+| -s SOURCE,<br>--source SOURCE | anduril_swarm_8K.mp4 | Video filename (located in ./inputs) |
+| --no-custom | - | Enable if using Ultralytics YOLO model |
+| -m MODEL_NAME,<br>--model MODEL_NAME | drone_detection | Name of model. Required if `--no-custom` is enabled. |
+| --type {object,motion} | None | Filter by detection type (object or motion). "motion" shows the ROI while "object" shows detection results. |
+| --device {cpu,gpu,all} | all | Filter by target hardware. |
+| --sf | None | Filter test by Smart Filtering pipeline |
+| --debug | False | Enable debug message |
+| -n DEBUG_FRAME_LIMIT | 100 | Number of frames used for debugging |
+<br>
+
+
+### Test Pipeline
+This test reads the `SOURCE` from `./inputs` or RTSP server, and uses the stream readers to perform multiple scenarios.
+
+To run the full pipeline test, use the following:
+```bash
+python test_pipeline.py --source "${SOURCE}"
+```
+
+You also have control on which scenario, model, etc. to use during testinh.
+The arguments available are as follows:
+| Argument | Default | Description |
+| -------- | ------- | ----------- |
+| -s SOURCE,<br>--source SOURCE | anduril_swarm_8K.mp4 | Video filename (located in ./inputs) or RTSP target stream endpoint |
+| -d DURATION,<br>--duration DURATION | 2 | Test duration in minutes |
+| --scenario | - | Specify one or more scenarios. Otherwise all scenarios are ran. Available scenarios: [1, 2, 3, 4] |
+| --no-custom | - | Enable if using Ultralytics YOLO model |
+| -m MODEL_NAME,<br>--model MODEL_NAME | drone_detection | Name of model. Required if `--no-custom` is enabled. |
+| --type {object,motion} | None | Filter by detection type (object or motion). "motion" shows the ROI while "object" shows detection results. |
+| --device {cpu,gpu,all} | all | Filter by target hardware. |
+| --sf | None | Filter test by Smart Filtering pipeline |
+| --debug | False | Enable debug message |
+<!-- | -n DEBUG_FRAME_LIMIT | 100 | Number of frames used for debugging | -->
+<br>
+
+#### Scenario 1: Invalid RTSP URL
+Scenario 1 is a simple test to verify the pipeline ends if an invalid input is provided. For this test, an invalie RTSP url is provided, there are 5 retry attempts, and after a failed connection, the test ends. By default, the test iterates over available devices ("cpu" and "gpu").
+
+
+#### Scenario 2: Stability & Throughput
+Scenario 2 evaluates the stability and throughput of the readers by continuously reading from the reader for the duration of the source or for a specified duration (whichever comes first). By default, the test iterates over available devices ("cpu" and "gpu").
+
+
+#### Scenario 3: Video Clip Generation
+Scenario 3 evaluates the video clip generation process in the pipeline.
+In the pipeline, we segment the input video into 10 sec clips for easy retrieval and playback associated with results in the query UI. By default, the test iterates over available devices ("cpu" and "gpu").
+The resulting video clips generated from this test are located in `test_pipeline_results/scenario3_*`.
+
+
+#### Scenario 4: Pipeline (Without Sending Metadata)
+Scenario 4 mimics the entire pipeline excluding sending the generated metadata to VDMS.  By default, the test iterates over available devices ("cpu" and "gpu"), detection type ("object" or "motion"), and with and without SF.
+The resulting video clips and the detection results are located in `test_pipeline_results/scenario4_*`.
+
+In the case of testing the Smart Filtering pipeline, to display the ROIs, you can use the following, which will test for both gpu and cpu.
+```bash
+python test_pipeline.py --scenario 4 --source "${SOURCE}" --type motion
+```
 
 
 ## Pipeline Deployment
