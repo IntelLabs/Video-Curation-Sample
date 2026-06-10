@@ -2,9 +2,10 @@ import argparse
 import csv
 import gc
 import logging
+import multiprocessing as mp
 import os
-import queue
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -23,7 +24,13 @@ from include.default_configs import (
     MODEL_NAME_DEFAULT,
     THRESHOLD_VALUE,
 )
-from include.handlers import CPUStreamHandler, DeviceBaseHandler, GPUStreamHandler
+from include.handlers import (
+    CPUStreamHandler,
+    DeviceBaseHandler,
+    GPUStreamHandler,
+    log_to_logger,
+)
+from include.handlers import test_rendering_worker as rendering_worker
 from include.utils import (
     PipelineConfig,
     tensor2opencv,
@@ -87,9 +94,7 @@ force_export = False
 #     writer.release()
 
 
-def fps_comparison_chart(
-    chart_path, results, fps_key="Logic/Theo. Est. FPS (All frames)"
-):
+def fps_comparison_chart(chart_path, results, fps_key="Pipeline FPS (Video frames)"):
     try:
         names = [r["Test Name"] for r in results]
         fps_values = [float(r[fps_key]) for r in results]
@@ -174,14 +179,14 @@ def setup_context(request):
                     (r for r in results if r["Test Name"] == match_name), None
                 )
                 if cpu_row:
-                    gpu_fps = float(row["Logic/Theo. Est. FPS (All frames)"])
-                    cpu_fps = float(cpu_row["Logic/Theo. Est. FPS (All frames)"])
+                    gpu_fps = float(row["Pipeline FPS (Video frames)"])
+                    cpu_fps = float(cpu_row["Pipeline FPS (Video frames)"])
                     speedup = (gpu_fps / cpu_fps) if cpu_fps > 0 else 0
-                    row["Speedup vs CPU"] = f"{speedup:.2f}x"
+                    row["Pipeline Speedup vs CPU"] = f"{speedup:.2f}x"
                 else:
-                    row["Speedup vs CPU"] = "N/A"
+                    row["Pipeline Speedup vs CPU"] = "N/A"
             else:
-                row["Speedup vs CPU"] = "Baseline (CPU)"
+                row["Pipeline Speedup vs CPU"] = "Baseline (CPU)"
 
         keys = results[0].keys()
         with open(
@@ -192,24 +197,47 @@ def setup_context(request):
             dict_writer.writerows(results)
 
         print(f"\n[FINAL] Benchmarks saved to {request.cls.csv_filename}")
+
         for r in results:
             print(
-                f" > {r['Test Name']}: {r['Logic/Theo. Est. FPS (All frames)']} FPS | Speedup: {r.get('Speedup vs CPU', 'N/A')}"
+                f" > {r['Test Name']}: {r['Pipeline FPS (Video frames)']} FPS | {r['Pipeline FPS (Target frames)']} FPS | {r['sf+roi+det FPS (Target frames)']} FPS | {r['Display FPS']} FPS | Speedup: {r.get('Pipeline Speedup vs CPU', 'N/A')}"
             )
 
         chart_path = (
             request.cls.result_dir
-            / f"{request.cls.csv_filename.replace('.csv', '')}_theoFPS.png"
+            / f"{request.cls.csv_filename.replace('.csv', '')}_sfFPS.png"
         )
         fps_comparison_chart(
-            chart_path, results, fps_key="Logic/Theo. Est. FPS (All frames)"
+            chart_path, results, fps_key="sf+roi+det FPS (Video frames)"
         )
 
         chart_path = (
             request.cls.result_dir
-            / f"{request.cls.csv_filename.replace('.csv', '')}_realFPS.png"
+            / f"{request.cls.csv_filename.replace('.csv', '')}_pipelineFPS.png"
         )
-        fps_comparison_chart(chart_path, results, fps_key="Real Est. FPS (All frames)")
+        fps_comparison_chart(chart_path, results, fps_key="Pipeline FPS (Video frames)")
+
+        chart_path = (
+            request.cls.result_dir
+            / f"{request.cls.csv_filename.replace('.csv', '')}_sfFPS_target.png"
+        )
+        fps_comparison_chart(
+            chart_path, results, fps_key="sf+roi+det FPS (Target frames)"
+        )
+
+        chart_path = (
+            request.cls.result_dir
+            / f"{request.cls.csv_filename.replace('.csv', '')}_pipelineFPS_target.png"
+        )
+        fps_comparison_chart(
+            chart_path, results, fps_key="Pipeline FPS (Target frames)"
+        )
+
+        chart_path = (
+            request.cls.result_dir
+            / f"{request.cls.csv_filename.replace('.csv', '')}_displayFPS_target.png"
+        )
+        fps_comparison_chart(chart_path, results, fps_key="Display FPS")
 
 
 @pytest.fixture(autouse=True)
@@ -243,10 +271,10 @@ def each_test_setup(request):
         DETECTION_TYPE=detection_type,
     )
 
-    video_output_name = f"{test_class_self._testMethodName}_detections_output.mp4"
+    # video_output_name = f"{test_class_self._testMethodName}_detections_output.mp4"
     vid_dir = test_class_self.result_dir / "results"
     vid_dir.mkdir(parents=True, exist_ok=True)
-    test_video_output_path = os.path.join(str(vid_dir), video_output_name)
+    # test_video_output_path = os.path.join(str(vid_dir), video_output_name)
     os.environ["TEST_SUITE_RENDER_DIR"] = str(vid_dir)
     test_class_self.config.SHARED_OUTPUT = str(test_class_self.result_dir)
 
@@ -259,7 +287,7 @@ def each_test_setup(request):
     import time
 
     test_class_self._stop_lock = threading.Lock()
-    test_class_self.stat_start_time = time.perf_counter()
+    # test_class_self.stat_start_time = time.perf_counter() # timing to display detection
 
     test_class_self.device = test_class_self.config.DEVICE
     test_class_self.device_input = test_class_self.config.device_input
@@ -326,22 +354,10 @@ def each_test_setup(request):
     test_class_self.next_process_idx = 0.0
     test_class_self.frame_in_clip_count = 0
     test_class_self.frame_count = 0
-
-    from include.handlers import test_rendering_worker
+    test_class_self.elapsed_display_time = 0.0
 
     if hasattr(test_class_self, "setup_threads"):
         test_class_self.setup_threads()
-
-    test_class_self.render_proc = threading.Thread(
-        target=test_rendering_worker,
-        args=(
-            test_class_self.render_queue,
-            (test_class_self.disp_w, test_class_self.disp_h),
-            test_video_output_path,
-            test_class_self.target_fps,
-        ),
-        daemon=True,
-    )
 
     shared_event_buffer = {"sf": [], "roi": [], "det": []}
     test_class_self.gpu_event_buffer = shared_event_buffer
@@ -446,6 +462,116 @@ class TestSmartFilteringDetections:
 
         # Execute
         self.run_pipeline()  # pipeline_fn)
+
+    def setup_threads(self):
+        # Shared 10MB memory for display
+        self.setup_shared_memory()
+
+        # Executor for Async YOLO tasks and FFmpeg re-encoding
+        # self.executor = ThreadPoolExecutor(max_workers=self.config.MAX_WORKERS)
+        # self.clip_executor = ThreadPoolExecutor(max_workers=self.config.MAX_WORKERS)
+
+        print(
+            f"sf_enabled: {self.config.sf_enabled}\tTEST_MODE: {self.config.TEST_MODE}",
+            flush=True,
+        )
+
+        # Producer: Handles acquisition and AI metadata logs
+        # self.process_thread = threading.Thread(
+        #     target=self.run_pipeline,
+        #     daemon=True,
+        # )
+
+        self.signal_queue = mp.Queue(maxsize=1)
+        self.render_queue = mp.Queue(maxsize=5)
+
+        # if self.config.TEST_MODE:
+        test_dir = os.getenv(
+            "TEST_SUITE_RENDER_DIR", str(Path(self.config.SHARED_OUTPUT))
+        )
+        os.makedirs(test_dir, exist_ok=True)
+
+        video_output_name = f"{self._testMethodName}_detections_output.mp4"
+        out_path = os.path.join(test_dir, video_output_name)
+
+        log_to_logger(
+            f"[TEST MODE] Detection results saved to: {out_path}", level="info"
+        )
+        self.render_proc = threading.Thread(
+            target=rendering_worker,
+            args=(
+                self.render_queue,
+                (self.disp_w, self.disp_h),
+                out_path,
+                self.target_fps,
+            ),
+            daemon=True,
+        )
+
+        # Dummy target alignment to prevent execution signature exceptions
+        self.display_proc = threading.Thread(target=lambda: None, daemon=True)
+        # else:
+        #     self.render_proc = mp.Process(
+        #         target=rendering_worker,
+        #         args=(
+        #             self.render_queue,
+        #             self.shared_details,
+        #             self.ready_buffer_idx,
+        #             self.reader_active_idx,
+        #             self.shm_frame_lengths,
+        #             self.signal_queue,
+        #             (self.disp_w, self.disp_h),
+        #             self.config.DISPLAY_FRAME_QUALITY,
+        #         ),
+        #     )
+
+        #     def display_signal_sync():
+        #         while self.active:
+        #             # Wait for signal
+        #             # if self.mp_frame_ready_event.wait(timeout=1.0):
+        #             #     self.mp_frame_ready_event.clear()
+        #             try:
+        #                 _ = self.signal_queue.get(timeout=1.0)
+        #                 # print(f"[DEBUG]: Signal received in FastAPI process for {self.name}", flush=True)
+        #                 # Wake FastAPI async loop in main thread
+        #                 self.loop.call_soon_threadsafe(self.frame_ready_event.set)
+        #             except queue.Empty:
+        #                 continue
+
+        #     self.display_proc = threading.Thread(
+        #         target=display_signal_sync, daemon=True
+        #     )
+
+        # if self.config.ENABLE_QUERYING:
+        #     # NEW: Dedicated I/O pool for Disk/GPU transfers (Higher worker count for 8K)
+        #     self.io_executor = ThreadPoolExecutor(max_workers=8)
+
+        #     # Dedicated FFmpeg pool so re-encoding doesn't slow down live AI
+        #     self.ffmpeg_executor = ThreadPoolExecutor(max_workers=2)
+
+        #     if not self.config.TEST_MODE:
+        #         # Sends metadata to VDMS
+        #         self.metadata_thread = threading.Thread(
+        #             target=send_metadata,
+        #             args=(
+        #                 VDMSPool(self.config.DBHOST, self.config.DBPORT, size=10),
+        #                 self.config.DEBUG_FLAG,
+        #                 self.config.INGESTION,
+        #                 self.config.TEST_MODE,
+        #                 self.config.UDF_HOST,
+        #                 self.config.UDF_PORT,
+        #                 self.config.DBHOST,
+        #                 self.config.DBPORT,
+        #             ),
+        #             daemon=True,
+        #         )
+
+        #     # Consumer: Handles GPU-to-CPU download and Disk I/O (Writing resized frames to RAM disk)
+        #     self.writer_thread = threading.Thread(
+        #         target=self.video_writer_core_loop,
+        #         args=(self.stop_writer,),
+        #         daemon=True,
+        #     )
 
     # HELPERS --------------------------------------------
     def _print_gpu_mem(self):
@@ -599,7 +725,7 @@ class TestSmartFilteringDetections:
 
     def _finalize_benchmarks(
         self,
-        n_frames,
+        # n_frames,
         num_objs,
         total_pipeline_ms,
         real_world_latency_ms,
@@ -610,12 +736,12 @@ class TestSmartFilteringDetections:
     ):
         """Aggregates metrics and adds them to the results list."""
         latency_s = total_pipeline_ms / 1000.0  # Just pipeline (sf + roi_ det)
-        est_fps = n_frames / latency_s if latency_s > 0 else 0
+        est_fps = self.frame_count / latency_s if latency_s > 0 else 0
         est_fps_processed = self.frame_count_target / latency_s if latency_s > 0 else 0
-        duration_s = n_frames / self.input_fps if self.input_fps > 0 else 0
+        duration_s = self.frame_count / self.input_fps if self.input_fps > 0 else 0
 
         real_latency_s = real_world_latency_ms / 1000.0
-        real_est_fps = n_frames / real_latency_s if real_latency_s > 0 else 0
+        real_est_fps = self.frame_count / real_latency_s if real_latency_s > 0 else 0
         real_est_fps_processed = (
             self.frame_count_target / real_latency_s if real_latency_s > 0 else 0
         )
@@ -666,19 +792,22 @@ class TestSmartFilteringDetections:
                 "Device": self.device,
                 "Smart Filtering": "Enabled" if sf_enabled else "Disabled",
                 "Video": self.video_path.name,  # self.name?
-                "Video Duration (s)": f"{duration_s:.4f}",
-                "Video Frames": n_frames,
                 "Video FPS": f"{self.input_fps:.2f}",
-                "Pipeline Latency (s)": f"{latency_s:.2f}",
-                "Frames Processed": self.frame_count_target,
+                "Video Duration (s)": f"{duration_s:.4f}",
+                "Video Frames": self.frame_count,
+                "Target Frames": self.frame_count_target,
+                "Pipeline Latency (s)": f"{real_latency_s:.2f}",
+                "Display Latency (s)": f"{self.elapsed_display_time:.2f}",
+                "sf+roi+det Latency (s)": f"{latency_s:.2f}",
                 # Includes time by HW decoder (reader) and preparing output video
-                "Real Est. FPS (All frames)": f"{real_est_fps:.2f}",
-                "Real Est. FPS (Processed frames)": f"{real_est_fps_processed:.2f}",
-                # Isolates algorithm from disk I/O bottlenecks
-                "Logic/Theo. Est. FPS (All frames)": f"{est_fps:.2f}",
-                "Logic/Theo. Est. FPS (Processed frames)": f"{est_fps_processed:.2f}",
-                "Display Frames Processed": stat_frame_count,
+                "Pipeline FPS (Video frames)": f"{real_est_fps:.2f}",
+                "Pipeline FPS (Target frames)": f"{real_est_fps_processed:.2f}",
+                # TIming to display frame (read to after send to render queue)
+                "Display Frames": stat_frame_count,
                 "Display FPS": f"{stat_fps:.2f}",
+                # Only sf + roi + det
+                "sf+roi+det FPS (Video frames)": f"{est_fps:.2f}",
+                "sf+roi+det FPS (Target frames)": f"{est_fps_processed:.2f}",
                 "Avg SF (ms)": f"{avg_sf:.2f}",
                 "Avg ROI (ms)": f"{avg_roi:.2f}",
                 "Avg Obj. Detection (ms)": f"{avg_det:.2f}",
@@ -692,10 +821,13 @@ class TestSmartFilteringDetections:
 
         print(f"\n[{self._testMethodName}] Latency: {latency_s:.2f} sec")
         print(
-            f"\n[{self._testMethodName}] Logic/Theo. Est. FPS (All frames): {est_fps:.2f} ({self.numFrames} frames)"
+            f"\n[{self._testMethodName}] Pipeline FPS (Target frames): {real_est_fps_processed:.2f} ({self.frame_count_target} frames)"
         )
         print(
-            f"\n[{self._testMethodName}] Logic/Theo. Est. FPS (Processed frames): {est_fps_processed:.2f} ({self.frame_count_target} frames)"
+            f"\n[{self._testMethodName}] sf+roi+det FPS (Target frames): {est_fps_processed:.2f} ({self.frame_count_target} frames)"
+        )
+        print(
+            f"\n[{self._testMethodName}] Display FPS (Target frames): {stat_fps:.2f} ({stat_frame_count} frames)"
         )
 
     # def tensor2opencv_gpu(self, frame_tensor):
@@ -1058,7 +1190,7 @@ class TestSmartFilteringDetections:
 
         while self.active:
             # 1. CAPTURE COMPLETE CYCLE OVERHEAD
-            t_cycle_start = time.perf_counter()
+            # t_cycle_start = time.perf_counter()
 
             device_frame, frame_num = self.reader.read()
             if device_frame is None:
@@ -1090,6 +1222,7 @@ class TestSmartFilteringDetections:
                     break
                 continue
 
+            self.stat_start_time = time.perf_counter()  # timing to display detection
             self.frame_count += 1
             # is_target_frame = float(frame_num) >= self.next_process_idx
             # CRITICAL CADENCE DRIFT FIX: If input FPS equals target FPS, or if Smart Filtering
@@ -1104,60 +1237,89 @@ class TestSmartFilteringDetections:
                 is_target_frame = float(frame_num) >= self.next_process_idx
 
             # 2. DISPATCH WORKLOADS ASYNCHRONOUSLY
+            metrics = {}
             if is_target_frame:
                 self.next_process_idx += self.step_size
 
                 if self.device_input == "cuda":
-                    curr_event = torch.cuda.Event()
-                    curr_event.record()
+                    # Instantiate a lightweight hardware fence event object
+                    curr_event = torch.cuda.Event(enable_timing=False)
+                    # curr_event.record()
+                    # Record the exact milestone on the default stream right after fetching the frame data
+                    curr_event.record(torch.cuda.default_stream())
                     self.inference_stream.wait_event(curr_event)
                     with torch.cuda.stream(self.inference_stream):
+                        # 1. Isolate the incoming image buffer canvas
+                        isolated_device_frame = (
+                            device_frame.clone()
+                            if torch.is_tensor(device_frame)
+                            else device_frame.copy()
+                        )
+
+                        # 2. RUN BACKGROUND SUBTRACTION IMMEDIATELY ON THE PRODUCER TIMELINE
+                        # This guarantees that the mask matches this exact frame_num before threads overlap!
                         nob, metrics = self.pipeline_fn(
-                            device_frame, frame_num, is_target_frame
+                            isolated_device_frame,
+                            frame_num,
+                            is_target_frame,
+                            self.stat_start_time,
                         )
                 else:
+                    # 1. Isolate the incoming image buffer canvas
+                    isolated_device_frame = (
+                        device_frame.clone()
+                        if torch.is_tensor(device_frame)
+                        else device_frame.copy()
+                    )
+
+                    # 2. RUN BACKGROUND SUBTRACTION IMMEDIATELY ON THE PRODUCER TIMELINE
+                    # This guarantees that the mask matches this exact frame_num b
                     nob, metrics = self.pipeline_fn(
-                        device_frame, frame_num, is_target_frame
+                        isolated_device_frame,
+                        frame_num,
+                        is_target_frame,
+                        self.stat_start_time,
                     )
 
                 num_objs += nob
-            else:
-                # Process background execution context for skipped frames
-                nob, metrics = self.pipeline_fn(
-                    device_frame, frame_num, is_target_frame
-                )
+            # else:
+            #     # Process background execution context for skipped frames
+            #     nob, metrics = self.pipeline_fn(
+            #         device_frame, frame_num, is_target_frame, self.stat_start_time
+            #     )
 
             # 3. ENFORCE UNIFIED HARDWARE TIMING BARRIER
-            if self.device_input == "cuda":
-                torch.cuda.synchronize()
+            # if self.device_input == "cuda":
+            #     torch.cuda.synchronize()
 
-            t_cycle_end = time.perf_counter()
-            cycle_total_ms = (t_cycle_end - t_cycle_start) * 1000.0
+            # t_cycle_end = time.perf_counter()
+            # cycle_total_ms = (t_cycle_end - t_cycle_start) * 1000.0
 
             # 4. ALLOCATE ALL TRACKING TIMINGS ACCURATELY
-            if is_target_frame:
-                if metrics != {}:
-                    num_crops = len(metrics["bbs"]) if metrics["bbs"] is not None else 0
-                    self.crops_per_frame_list.append(num_crops)
+            # if is_target_frame:
+            if metrics != {}:
+                num_crops = len(metrics["bbs"]) if metrics["bbs"] is not None else 0
+                self.crops_per_frame_list.append(num_crops)
 
-                    if self.config.sf_enabled:
-                        self.component_stats["sf"].append(metrics["sf_time"])
-                        self.component_stats["roi"].append(metrics["roi_time"])
-                        self.component_stats["det"].append(metrics["det_time"])
-                    else:
-                        # Full-frame YOLO baseline accounts for total data movement cycle
-                        self.component_stats["det"].append(cycle_total_ms)
-                        self.component_stats["sf"].append(0.0)
-                        self.component_stats["roi"].append(0.0)
+                if self.config.sf_enabled:
+                    self.component_stats["sf"].append(metrics["sf_time"])
+                    self.component_stats["roi"].append(metrics["roi_time"])
+                else:
+                    # Full-frame YOLO baseline accounts for total data movement cycle
+                    # self.component_stats["det"].append(cycle_total_ms)
+                    self.component_stats["sf"].append(0.0)
+                    self.component_stats["roi"].append(0.0)
+
+                self.component_stats["det"].append(metrics["det_time"])
 
                 if self.config.sf_enabled and metrics.get("bbs") is not None:
                     cov = self.calculate_unique_coverage(metrics["bbs"])
                     coverage_percentages.append(cov)
-            else:
-                # CRITICAL METRICS FIX: If Smart Filtering runs on a skipped frame,
-                # its mask generation overhead MUST be captured and tracked!
-                if self.config.sf_enabled and metrics != {}:
-                    self.component_stats["sf"].append(metrics["sf_time"])
+            # else:
+            #     # CRITICAL METRICS FIX: If Smart Filtering runs on a skipped frame,
+            #     # its mask generation overhead MUST be captured and tracked!
+            #     if self.config.sf_enabled and metrics != {}:
+            #         self.component_stats["sf"].append(metrics["sf_time"])
 
         if self.device_input == "cuda":
             torch.cuda.synchronize()
@@ -1174,7 +1336,7 @@ class TestSmartFilteringDetections:
             print(f" [WARNING] No objects detected for {self._testMethodName}")
 
         self._finalize_benchmarks(
-            self.frame_count,
+            # self.frame_count,
             num_objs,
             total_pipeline_time_ms,
             real_world_latency_ms,
@@ -1332,7 +1494,9 @@ class TestSmartFilteringDetections:
     #     self.update_frame()
     #     return num_objs, metrics
 
-    def pipeline_fn(self, device_frame, overall_frame_num, is_target_frame):
+    def pipeline_fn(
+        self, device_frame, overall_frame_num, is_target_frame, stat_start_time
+    ):
         num_objs = 0
         metrics = {"sf_time": 0, "roi_time": 0, "det_time": 0, "bbs": None}
 
@@ -1398,13 +1562,17 @@ class TestSmartFilteringDetections:
                 metrics["bbs"] = bbs_full_res
 
             if self.config.DEBUG_FLAG:
-                if self.device_input == "cuda":
-                    torch.cuda.stream(self.inference_stream)
-                    torch.cuda.synchronize()
-                    display_source = inf_data["mask"]
-                    self.debug_save_mask(
-                        display_source, self.frame_count_target, rois=bbs_full_res
-                    )
+                # if self.device_input == "cuda":
+                #     # Isolate data capturing using an asynchronous memory clone operation
+                #     # This safely copies data without dropping your multi-stream execution pipeline concurrency
+                #     display_source = inf_data["mask"].clone().to("cpu", non_blocking=True)
+                # else:
+                display_source = inf_data["mask"]
+                #     self.inference_stream.synchronize()
+                # display_source = inf_data["mask"]
+                self.debug_save_mask(
+                    display_source, self.frame_count_target, rois=bbs_full_res
+                )
 
         clean_bbs = []
         if self.config.sf_enabled and bbs_full_res is not None:
@@ -1420,9 +1588,19 @@ class TestSmartFilteringDetections:
             t_start = time.perf_counter()
 
         if self.config.DETECTION_TYPE != "motion":
-            det_frame = (
-                inf_data["full_frame"] if "full_frame" in inf_data else device_frame
-            )
+            # det_frame = (
+            #     inf_data["full_frame"] if "full_frame" in inf_data else device_frame
+            # )
+            # Isolate your image buffer array view to prevent upstream reader pointer races
+            if "full_frame" in inf_data:
+                det_frame = inf_data["full_frame"]
+            else:
+                det_frame = (
+                    device_frame.clone()
+                    if torch.is_tensor(device_frame)
+                    else device_frame.copy()
+                )
+
             merged = clean_bbs if self.config.sf_enabled else None
             metadata, _ = self.get_detections(
                 det_frame,
@@ -1479,31 +1657,49 @@ class TestSmartFilteringDetections:
 
         data_to_draw = clean_bbs if self.config.DETECTION_TYPE == "motion" else metadata
 
-        try:
-            if (
-                hasattr(self, "render_queue")
-                and getattr(self, "render_queue", None) is not None
-                and not self.render_queue.full()
-            ):
-                self.render_queue.put(
-                    (
-                        disp_frame,
-                        inf_data["frameNum"]
-                        if "frameNum" in inf_data
-                        else self.frame_count_target,
-                        data_to_draw,
-                        self.label_source,
-                    )
-                )
-            if self.config.DEBUG_FLAG:
-                self.debug_save_img(disp_frame, self.frame_count_target)
-                self.debug_save_img_roi(
-                    disp_frame, bbs_full_res, self.frame_count_target
-                )
-        except queue.Full:
-            pass
+        # try:
+        #     if (
+        #         hasattr(self, "render_queue")
+        #         and getattr(self, "render_queue", None) is not None
+        #         and not self.render_queue.full()
+        #     ):
+        #         self.render_queue.put(
+        #             (
+        #                 disp_frame,
+        #                 inf_data["frameNum"]
+        #                 if "frameNum" in inf_data
+        #                 else self.frame_count_target,
+        #                 data_to_draw,
+        #                 self.label_source,
+        #             )
+        #         )
+        #     if self.config.DEBUG_FLAG:
+        #         self.debug_save_img(disp_frame, self.frame_count_target)
+        #         self.debug_save_img_roi(
+        #             disp_frame, bbs_full_res, self.frame_count_target
+        #         )
+        # except queue.Full:
+        #     pass
 
-        self.update_frame()
+        if (
+            hasattr(self, "render_queue")
+            and getattr(self, "render_queue", None) is not None
+        ):
+            self.render_queue.put(
+                (
+                    disp_frame,
+                    inf_data["frameNum"]
+                    if "frameNum" in inf_data
+                    else self.frame_count_target,
+                    data_to_draw,
+                    self.label_source,
+                )
+            )
+        if self.config.DEBUG_FLAG:
+            self.debug_save_img(disp_frame, self.frame_count_target)
+            self.debug_save_img_roi(disp_frame, bbs_full_res, self.frame_count_target)
+
+        self.update_frame(stat_start_time)
         return num_objs, metrics
 
     # def sf_cpu_pipeline_fn(self, device_frame, overall_frame_num, is_target_frame):

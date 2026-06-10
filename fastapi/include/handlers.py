@@ -704,7 +704,7 @@ class DeviceBaseHandler:
         self.prepare_pipeline()
 
         # Start dedicated inference thread and timers
-        self.stat_start_time = time.perf_counter()
+        # self.stat_start_time = time.perf_counter() # timing to display frame
         self.last_heartbeat = time.time()
         self.setup_threads()
 
@@ -821,15 +821,16 @@ class DeviceBaseHandler:
         self.disp_w, self.disp_h = self.config.DISPLAY_FRAME_SIZE
 
         # Performance Tracking
-        self.total_objects_detected = 0
+        self.elapsed_display_time = 0.0
         self.frame_count = 0  # Frame count for videos
         self.frame_count_target = 0
-        self.next_process_idx = 0.0
-        self.stat_frame_count = 0
-        self.stat_fps = 0
-        self.latest_processed_frame = None
-        self.last_frame_id = 0
         self.last_delivered_frame_id = -1  # Track what was actually sent
+        self.last_frame_id = 0
+        self.latest_processed_frame = None
+        self.next_process_idx = 0.0
+        self.stat_fps = 0
+        self.stat_frame_count = 0
+        self.total_objects_detected = 0
 
         self.writer_done = True
 
@@ -896,17 +897,17 @@ class DeviceBaseHandler:
             self.ai_pinned_tensors.append(torch.from_numpy(view))
 
         # Pre-allocate a 4D FP16 GPU staging canvas to maximize Tensor Core performance
-        if self.device_input == "cuda":
-            self.ai_gpu_staging = torch.empty(
-                (1, 3, self.frame_height, self.frame_width),
-                dtype=torch.float16,
-                device=f"cuda:{self.gpu_id}",
-            )
-            self.preview_gpu_staging = torch.empty(
-                (1, 3, self.frame_height, self.frame_width),
-                dtype=torch.float16,
-                device=f"cuda:{self.gpu_id}",
-            )
+        # if self.device_input == "cuda":
+        # self.ai_gpu_staging = torch.empty(
+        #     (1, 3, self.frame_height, self.frame_width),
+        #     dtype=torch.float16,
+        #     device=f"cuda:{self.gpu_id}",
+        # )
+        # self.preview_gpu_staging = torch.empty(
+        #     (1, 3, self.frame_height, self.frame_width),
+        #     dtype=torch.float16,
+        #     device=f"cuda:{self.gpu_id}",
+        # )
 
         # Pre-allocate 640x640 workspace footprint across CPU and GPU spaces
         for _ in range(self.ring_depth):
@@ -1158,7 +1159,7 @@ class DeviceBaseHandler:
         time.sleep(0.1)
 
         # Start the producer and consumer threads
-        if not self.process_thread.is_alive():
+        if hasattr(self, "process_thread") and not self.process_thread.is_alive():
             self.process_thread.start()
 
         if (
@@ -1499,11 +1500,11 @@ class DeviceBaseHandler:
         self.scale_x = self.frame_width / self.config.MODEL_W
         self.scale_y = self.frame_height / self.config.MODEL_H
 
-    def update_frame(self):
+    def update_frame(self, stat_start_time):
         self.stat_frame_count += 1
-        elapsed = time.perf_counter() - self.stat_start_time
-        if elapsed > 0.5:
-            self.stat_fps = round(self.stat_frame_count / elapsed, 1)
+        self.elapsed_display_time += time.perf_counter() - stat_start_time
+        # if elapsed > 0.5:
+        self.stat_fps = round(self.stat_frame_count / self.elapsed_display_time, 1)
 
     def is_processing(self):
         """Returns True if any part of the pipeline is still active."""
@@ -1886,6 +1887,8 @@ class DeviceBaseHandler:
                 time.sleep(0.002)
                 continue
 
+            self.stat_start_time = time.perf_counter()  # timing to display detection
+
             # Keep 8K frame on GPU (Skip CPU conversion for non-target frames)
             # if self.device_input == "cuda" and not self.reader.is_h264_8k:
             #     with torch.cuda.stream(self.ingest_stream):
@@ -1912,38 +1915,54 @@ class DeviceBaseHandler:
 
             def wrapped_fn(*args):
                 if self.device_input == "cuda":
-                    with torch.cuda.stream(self.inference_stream):
-                        dev_frame, f_num, target_flag = args
-                        # FIX: Explicitly crop out any hardware padding columns horizontally
-                        # and rows vertically before forcing linear memory contiguity.
-                        # if dev_frame.ndim >= 2:
-                        #     h_raw, w_raw = dev_frame.shape[-2:]
-                        #     if w_raw != self.frame_width or h_raw != self.frame_height:
-                        #         dev_frame = dev_frame[..., :self.frame_height, :self.frame_width]
+                    # Ensure the worker thread switches to your targeted pipeline execution timeline
+                    torch.cuda.set_stream(self.inference_stream)
+                    dev_frame, f_num, target_flag, stat_start_time = args
+                    isolated_device_frame = (
+                        dev_frame.clone()
+                        if torch.is_tensor(dev_frame)
+                        else dev_frame.copy()
+                    )
 
-                        # isolated_frame = dev_frame.clone().contiguous()
-                        # self.pipeline_fn(isolated_frame, f_num, target_flag)
-                        self.pipeline_fn(dev_frame, f_num, target_flag)
+                    self.pipeline_fn(
+                        isolated_device_frame, f_num, target_flag, stat_start_time
+                    )
+
+                    # Force a non-blocking device barrier to ensure operations have fully hit VRAM
+                    # before releasing the thread context
+                    self.inference_stream.synchronize()
                 else:
-                    self.pipeline_fn(*args)
+                    dev_frame, f_num, target_flag, stat_start_time = args
+                    isolated_device_frame = (
+                        dev_frame.clone()
+                        if torch.is_tensor(dev_frame)
+                        else dev_frame.copy()
+                    )
+                    self.pipeline_fn(
+                        isolated_device_frame, f_num, target_flag, stat_start_time
+                    )
 
-            if is_target_frame:
+            if is_target_frame:  # timing to display detection
                 self.next_process_idx += self.step_size
                 # Handoff to AI and Writer
-            if self.active:
+                # if self.active:
+                # Clone the tensor buffer immediately on the producer thread
+                # to prevent upstream overwrite races by the next reader iteration.
+                # isolated_device_frame = device_frame.clone() if torch.is_tensor(device_frame) else device_frame.copy()
                 self.executor.submit(
                     # pipeline_fn,
                     wrapped_fn,
                     device_frame,
                     frame_num,
                     is_target_frame,
+                    self.stat_start_time,
                 )
             # else:
             #     # Process background execution context for skipped frames
             #     self.pipeline_fn(device_frame, frame_num, is_target_frame)
 
-            if self.device_input == "cuda":
-                torch.cuda.synchronize()
+            # if self.device_input == "cuda":
+            #     torch.cuda.synchronize()
 
             # --- PRECISE CLOCK SYNC ---
             # This prevents the producer from "lapping" the consumer
@@ -2243,25 +2262,50 @@ class DeviceBaseHandler:
     #     # return metadata, frame_bytes
 
     def get_gpu_rois_by_area(self, mask, max_candidates=100):
+        # Extract true spatial constraints straight from the active mask object footprint
+        if torch.is_tensor(mask):
+            mask_h, mask_w = mask.shape[-2:]
+        elif isinstance(mask, cv2.cuda.GpuMat):
+            # cv2.cuda.GpuMat.size() returns a tuple of (width, height) standard formatting
+            mask_w, mask_h = mask.size()
+        else:
+            mask_h, mask_w = mask.shape[:2]
+
+        # This prevents find_contours_gpu_equivalent from mutating the mask variables used by other threads.
+        if isinstance(mask, cv2.cuda.GpuMat):
+            # .clone() allocates a new C++ memory surface and forces full continuity
+            isolated_kernel_mask = mask.clone()
+        elif torch.is_tensor(mask):
+            isolated_kernel_mask = mask.clone().contiguous()
+        else:
+            isolated_kernel_mask = mask.copy()
+
         # Get raw boxes from mask (Direct VRAM bridge)
         boxes_gpu = find_contours_gpu_equivalent(
-            mask,
+            isolated_kernel_mask,
             stream=self.bgs_stream,
             limit_640=640 * 1.5,
         )
 
+        # --- FIX: ELIMINATE STREAM RACE ---
         if boxes_gpu is None or len(boxes_gpu) == 0:
             return torch.empty((0, 4), device=self.device_input)
 
         # Wrap existing GPU memory as a float tensor (Zero Copy)
-        raw_boxes = torch.as_tensor(boxes_gpu, device=self.device_input).float()
+        # raw_boxes = torch.as_tensor(boxes_gpu, device=self.device_input).float()
+        if self.device_input == "cuda":
+            # Wrap the native device handle and IMMEDIATELY append .clone()
+            # This allocates a brand new, physically isolated VRAM block to secure the bounding boxes
+            raw_boxes = (
+                torch.as_tensor(boxes_gpu, device=self.device_input).float().clone()
+            )
+        else:
+            raw_boxes = torch.as_tensor(boxes_gpu, device=self.device_input).float()
 
         # Vectorized Pre-Filter (Removes noise blobs before merging)
         w = raw_boxes[:, 2] - raw_boxes[:, 0]
         h = raw_boxes[:, 3] - raw_boxes[:, 1]
-        mask_filter = (
-            (w * h > self.min_contour_area) & (w < self.resize_w) & (h < self.resize_h)
-        )
+        mask_filter = (w * h > self.min_contour_area) & (w < mask_w) & (h < mask_h)
         raw_boxes = raw_boxes[mask_filter]
 
         # Prevents N^2 distance matrix from exploding during high noise
@@ -2657,18 +2701,20 @@ class DeviceBaseHandler:
                         else:
                             crop_resized = crop.float()
 
-                        # Instantiate a clean, pre-allocated padded evaluation canvas context
-                        padded_canvas = torch.zeros(
-                            (3, th, tw), dtype=torch.float32, device=device_input
-                        )
+                        # Force the canvas tracking allocation to occur safely inside your active stream scope context
+                        with torch.cuda.stream(self.inference_stream):
+                            # Instantiate a clean, pre-allocated padded evaluation canvas context
+                            padded_canvas = torch.zeros(
+                                (3, th, tw), dtype=torch.float32, device=device_input
+                            )
 
-                        # Center the aspect-scaled crop onto the dark zero-padded mask grid
-                        dx = (tw - nw) // 2
-                        dy = (th - nh) // 2
-                        padded_canvas[:, dy : dy + nh, dx : dx + nw] = crop_resized
+                            # Center the aspect-scaled crop onto the dark zero-padded mask grid
+                            dx = (tw - nw) // 2
+                            dy = (th - nh) // 2
+                            padded_canvas[:, dy : dy + nh, dx : dx + nw] = crop_resized
 
-                        # Convert directly to half-precision to speed up pipeline passes
-                        roi_patches.append(padded_canvas.to(torch.half))
+                            # Convert directly to half-precision to speed up pipeline passes
+                            roi_patches.append(padded_canvas.to(torch.half))
                 else:
                     # CPU Path: Aspect-preserving resize and padding via OpenCV
                     crop = src_tensor[y1:y2, x1:x2]
@@ -2700,6 +2746,7 @@ class DeviceBaseHandler:
 
                 if is_cuda and isinstance(batch_slices[0], torch.Tensor):
                     with torch.inference_mode():
+                        torch.cuda.set_stream(self.inference_stream)
                         inference_batch = torch.stack(batch_slices).to(
                             device_input, dtype=torch.float16, non_blocking=True
                         )
@@ -2734,8 +2781,8 @@ class DeviceBaseHandler:
                         del inference_batch
 
             # 4. Map Patch Bounding Boxes back onto the Global 8K Frame Coordinates Map
-            scale_display_x = tw / self.frame_width
-            scale_display_y = th / self.frame_height
+            scale_display_x = tw / float(self.frame_width)
+            scale_display_y = th / float(self.frame_height)
 
             for idx, res in enumerate(results_pool):
                 ox, oy, o_width, o_height, scale_f, pad_x, pad_y = patch_coordinates[
@@ -2889,31 +2936,45 @@ class DeviceBaseHandler:
         if clean_640p.shape[0] < 1:
             return torch.empty((0, 4), device=self.device_input)
 
-        # Scale to 8K space
-        # return clean_640p * self.scales_tensor
-        # margin = 0.10
-        # offsets = (clean_640p[:, 2:] - clean_640p[:, :2]) * margin
-        # clean_640p[:, :2] -= offsets
-        # clean_640p[:, 2:] += offsets
-        # 1. Add 30-pixel 'breathing room' (in 640p space)
-        # padding = 40  # self.config.ROI_BB_FULL_RES_PADDING /  self.scale_x
-        # clean_640p[:, 0] -= padding
-        # clean_640p[:, 1] -= padding
-        # clean_640p[:, 2] += padding
-        # clean_640p[:, 3] += padding
+        # # Scale to 8K space
+        # # return clean_640p * self.scales_tensor
+        # # margin = 0.10
+        # # offsets = (clean_640p[:, 2:] - clean_640p[:, :2]) * margin
+        # # clean_640p[:, :2] -= offsets
+        # # clean_640p[:, 2:] += offsets
+        # # 1. Add 30-pixel 'breathing room' (in 640p space)
+        # # padding = 40  # self.config.ROI_BB_FULL_RES_PADDING /  self.scale_x
+        # # clean_640p[:, 0] -= padding
+        # # clean_640p[:, 1] -= padding
+        # # clean_640p[:, 2] += padding
+        # # clean_640p[:, 3] += padding
 
-        # 2. Re-merge the padded boxes (connects nearby drones into one clean crop)
-        clean_640p = merge_boxes_gpu(
-            clean_640p,
-            gap_limit=self.dist_thresh_640,
-            size_limit=limit_640,  # self.config.ROI_MERGE_SIZE_LIMIT / self.scale_x,
-        )
+        # # 2. Re-merge the padded boxes (connects nearby drones into one clean crop)
+        # clean_640p = merge_boxes_gpu(
+        #     clean_640p,
+        #     gap_limit=self.dist_thresh_640,
+        #     size_limit=limit_640,  # self.config.ROI_MERGE_SIZE_LIMIT / self.scale_x,
+        # )
 
-        # Scale to 8K and clamp
-        clean_full = clean_640p * self.scales_tensor
-        # clean_full[:, [0, 2]] = clean_full[:, [0, 2]].clamp(0, self.frame_width)
-        # clean_full[:, [1, 3]] = clean_full[:, [1, 3]].clamp(0, self.frame_height)
-        return clean_full
+        # # Scale to 8K and clamp
+        # clean_full = clean_640p * self.scales_tensor
+        # # clean_full[:, [0, 2]] = clean_full[:, [0, 2]].clamp(0, self.frame_width)
+        # # clean_full[:, [1, 3]] = clean_full[:, [1, 3]].clamp(0, self.frame_height)
+        # return clean_full
+
+        xmin = clean_640p[:, 0]
+        ymin = clean_640p[:, 1]
+        w = clean_640p[:, 2]
+        h = clean_640p[:, 3]
+
+        xmax = xmin + w
+        ymax = ymin + h
+
+        # Stack into standard format layout [xmin, ymin, xmax, ymax]
+        standard_boxes = torch.stack([xmin, ymin, xmax, ymax], dim=1)
+
+        # 4. Scale to absolute 8K workspace dimensions accurately
+        return standard_boxes * self.scales_tensor
 
     # def pipeline_fn(self, device_frame, overall_frame_num, is_target_frame):
     #     # ─── LAZY CUDA STREAM INITIALIZATION FOR PROCESS ISOLATION ───
@@ -3101,7 +3162,9 @@ class DeviceBaseHandler:
 
     #         self.update_frame()
 
-    def pipeline_fn(self, device_frame, overall_frame_num, is_target_frame):
+    def pipeline_fn(
+        self, device_frame, overall_frame_num, is_target_frame, stat_start_time
+    ):
         global all_metadata
         current_clip_id = self.clip_id
         current_clip_key = f"{self.name}_{current_clip_id:03d}.mp4"
@@ -3194,9 +3257,15 @@ class DeviceBaseHandler:
 
             if self.config.DETECTION_TYPE != "motion":
                 # Object Mode: Run YOLO and prepare metadata
-                det_frame = (
-                    inf_data["full_frame"] if "full_frame" in inf_data else device_frame
-                )  # RGB
+                if "full_frame" in inf_data:
+                    det_frame = inf_data["full_frame"]
+                else:
+                    det_frame = (
+                        device_frame.clone()
+                        if torch.is_tensor(device_frame)
+                        else device_frame.copy()
+                    )
+
                 merged = clean_bbs if self.config.sf_enabled else None
                 # num_bbs = 0 if merged is None else len(clean_bbs)
                 # print(f"[DEBUG] {current_clip_key} 'merged' num bbs: {num_bbs}")
@@ -3256,7 +3325,7 @@ class DeviceBaseHandler:
                 if (
                     hasattr(self, "render_queue")
                     and getattr(self, "render_queue", None) is not None
-                    and not self.render_queue.full()
+                    # and not self.render_queue.full()
                 ):
                     self.render_queue.put(  # put(  put_nowait
                         (
@@ -3269,7 +3338,7 @@ class DeviceBaseHandler:
             except queue.Full:
                 pass
 
-            self.update_frame()
+            self.update_frame(stat_start_time)
 
     # VIDEO CLIPPING
     def start_new_clip(self):
@@ -4091,7 +4160,7 @@ class GPUStreamHandler(DeviceBaseHandler):
                 #         self.fgMask, self.prev_bkgd, stream=stream
                 #     )
 
-    def rbtd_full_gpu(self, frame):
+    def rbtd_full_gpuv1(self, frame):
         """
         GPU-Accelerated Motion Detection Pipeline (Producer).
 
@@ -4263,6 +4332,128 @@ class GPUStreamHandler(DeviceBaseHandler):
             "mask": self.labels_gpu,  # GpuMat pointer to cleaned mask
             # "full_frame": frame,  # Kept for high-res cropping
             "full_frame": frame,  # current_gpu_frame,
+        }
+
+    def rbtd_full_gpu(self, device_frame):
+        """
+        Asynchronously handles downsampling, conversion, background subtraction, and morphology
+        by reshaping PyTorch CUDA Tensors to interleaved layouts before mapping to GpuMat.
+        """
+        # 1. BRIDGE THE PYTORCH TO OPENCV VRAM GAP (ZERO-COPY & INTERLEAVED)
+        if torch.is_tensor(device_frame):
+            # Reshape tensor to channel-last layout [H, W, C] to completely prevent the 3x3 grid tiling artifact
+            interleaved_frame = device_frame.permute(1, 2, 0).contiguous()
+
+            h_raw, w_raw, ch = interleaved_frame.shape
+            cuda_mem_ptr = interleaved_frame.data_ptr()
+            cv_type = cv2.CV_8UC3 if ch == 3 else cv2.CV_8UC1
+
+            src_gpu_mat = cv2.cuda.createGpuMatFromCudaMemory(
+                h_raw, w_raw, cv_type, cuda_mem_ptr
+            )
+        else:
+            src_gpu_mat = device_frame
+            ch = src_gpu_mat.channels()
+
+        # 2. INSTANTIATE GPUMAT CONTROLLERS WITH STRIDED LAYOUT HEADERS
+        recycled_resize_mat = cv2.cuda.GpuMat(
+            self.resize_h, self.resize_w, cv2.CV_8UC3 if ch == 3 else cv2.CV_8UC1
+        )
+        gray_resize_mat = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8UC1)
+        raw_mask = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8UC1)
+        thresh_mask = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8UC1)
+        clean_mask = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8UC1)
+
+        # 3. RUN ASYNCHRONOUS DOWN-SAMPLING GATE
+        cv2.cuda.resize(
+            src_gpu_mat,
+            dst=recycled_resize_mat,
+            dsize=(self.resize_w, self.resize_h),
+            interpolation=cv2.INTER_LINEAR,
+            stream=self.bgs_stream,
+        )
+
+        # 4. COLOR LAYOUT CORRECTION (COLLAPSE CHANNELS SAFELY)
+        if recycled_resize_mat.channels() == 3:
+            cv2.cuda.cvtColor(
+                recycled_resize_mat,
+                cv2.COLOR_BGR2GRAY,
+                dst=gray_resize_mat,
+                stream=self.bgs_stream,
+            )
+            motion_input = gray_resize_mat
+        else:
+            motion_input = recycled_resize_mat
+
+        # 4. EXECUTE SEGMENTATION METRICS
+        raw_mask = self.backSub.apply(
+            motion_input,
+            0.005,  # float(self.lr),
+            stream=self.bgs_stream,
+        )
+        include_history = self.config.BKGD_SUB_INCLUDE_HISTORY
+        method = self.config.BKGD_SUB_INCLUDE_HISTORY_METHOD
+        if include_history:
+            # If this is the first run, clone the mask instead of ANDing with an empty/white buffer
+            # if len(self.mask_history) < 1:
+            #     self.prev_bkgd.setTo(255, stream)  # Clear the initial white buffer
+
+            for m in list(self.mask_history):
+                # Dilate the historical mask on GPU
+                dilated = self.dilate_filter_for_enhanced_mask.apply(
+                    m, stream=self.bgs_stream
+                )
+
+                if method == "or":
+                    # Bitwise OR on GPU
+                    cv2.cuda.bitwise_or(
+                        self.prev_bkgd, dilated, self.prev_bkgd, stream=self.bgs_stream
+                    )
+                else:
+                    # Bitwise AND on GPU
+                    cv2.cuda.bitwise_and(
+                        self.prev_bkgd, dilated, self.prev_bkgd, stream=self.bgs_stream
+                    )
+
+            self.mask_history.append(raw_mask.clone())
+
+            min_val, max_val, _, _ = cv2.cuda.minMaxLoc(self.prev_bkgd)
+            if max_val != min_val and max_val > 0:
+                raw_mask = cv2.cuda.bitwise_or(
+                    raw_mask, self.prev_bkgd, stream=self.bgs_stream
+                )
+
+        # 5. MORPHOLOGICAL TRANSFORMATIONS BINARY FILTERS
+        cv2.cuda.threshold(
+            raw_mask,
+            self.config.THRESHOLD_VALUE,
+            self.config.THRESHOLD_MAX_VALUE,
+            cv2.THRESH_BINARY,
+            thresh_mask,
+            stream=self.bgs_stream,
+        )
+
+        # cv2.cuda.dilate(
+        #     thresh_mask,
+        #     clean_mask,
+        #     self.dilate_kernel,
+        #     stream=self.bgs_stream
+        # )
+        self.dilate_filter.apply(thresh_mask, clean_mask, self.bgs_stream)
+
+        # 6. ENFORCE INDEPENDENT WORKSPACE MEMORY VIEWS
+        # Allocate an isolated output mask surface container
+        isolated_kernel_mask = cv2.cuda.GpuMat(
+            self.resize_h, self.resize_w, cv2.CV_8UC1
+        )
+        clean_mask.copyTo(dst=isolated_kernel_mask, stream=self.bgs_stream)
+
+        # return isolated_kernel_mask
+        # self.bgs_stream.waitForCompletion()
+
+        return {
+            "mask": isolated_kernel_mask,  # GpuMat pointer to cleaned mask
+            "full_frame": device_frame,  # current_gpu_frame,
         }
 
     def findContours_gpu(self, mask, method="fused"):
