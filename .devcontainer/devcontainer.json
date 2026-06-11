@@ -1,0 +1,74 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/debian
+{
+	"name": "Pipeline Dev",
+	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+	// "image": "mcr.microsoft.com/devcontainers/base:bullseye"
+    "build": {
+        // Path is relative to the devcontainer.json file.
+		"dockerfile" : "Dockerfile",
+        // "context" : "..",
+		// "dockerfile" : "../fastapi/Dockerfile",
+        "context" : "../fastapi",
+		"args":{
+			"HTTP_PROXY" : "${localEnv:HTTP_PROXY}",
+			"http_proxy" : "${localEnv:http_proxy}",
+			"HTTPS_PROXY" : "${localEnv:HTTPS_PROXY}",
+			"https_proxy" : "${localEnv:https_proxy}",
+			"NO_PROXY" : "${localEnv:NO_PROXY}",
+			"no_proxy" : "${localEnv:no_proxy}",
+		}
+    },
+	"containerEnv" : {
+		"HTTP_PROXY" : "${localEnv:HTTP_PROXY}",
+		"http_proxy" : "${localEnv:http_proxy}",
+		"HTTPS_PROXY" : "${localEnv:HTTPS_PROXY}",
+		"https_proxy" : "${localEnv:https_proxy}",
+		"NO_PROXY" : "${localEnv:NO_PROXY}",
+		"no_proxy" : "${localEnv:no_proxy}",
+	},
+
+	"runArgs" : [ "--rm", "--gpus", "all", "--ipc=host", "--name", "pipeline_dev", "-p", "8011:8000","--cap-add=SYS_NICE", "--shm-size=8gb"],  //, "--net=host", "--privileged", "--shm-size=2gb"],
+
+	"postStartCommand": "apt-get update -o Acquire::Check-Date=false -y && apt-get install -y gdb sudo && cp -rp /workspace/app/*.md /app/ && cp -rp /workspace/app/.vscode /app/ && cp -rp /workspace/app/.gitignore /app/ && cp -rp /workspace/app/.github /app/",
+	// "postAttachCommand": "sudo chown -R ${localEnv:USER} /workspaces",
+
+	// Features to add to the dev container. More info: https://containers.dev/features.
+	// "features": {},
+
+	// Use 'forwardPorts' to make a list of ports inside the container available locally.
+	// "forwardPorts": [],
+
+	// Configure tool-specific properties.
+	"customizations": {
+		"vscode" : {
+			"extensions" : [
+				"ms-python.python",
+				"ms-python.vscode-pylance",
+				"esbenp.prettier-vscode"
+			]
+		  }
+	},
+
+	"workspaceFolder": "/home",
+	"workspaceMount": "source=./,target=/workspace/app,type=bind,consistency=cached",
+
+	// For training only
+	// "mounts": [
+	// 	"source=/data1/dataset,target=/workspace/dataset,type=bind"
+	// ],
+
+	// For fastapi
+	"mounts": [
+		"source=./inputs,target=/watch_dir,type=bind",
+		"source=./fastapi,target=/home,type=bind"
+		// "source=./fastapi/resources,target=/home/resources,type=bind",
+		// "source=./fastapi/tests,target=/home/tests,type=bind"
+	],
+
+	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+	// "remoteUser": "root"
+	// "containerUser": "${localEnv:USER}",
+	// "remoteUser": "${localEnv:USER}",
+	"updateRemoteUserUID": true //automatically updates the container user's UID and GID to match your local user's UID and GID to prevent permission issues with bind mounts
+}

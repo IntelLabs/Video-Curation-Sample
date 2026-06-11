@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Detection Dashboard</title>
+    <style>
+        /* GLOBAL STYLES: Sets a dark, high-contrast theme suitable for monitoring */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 { text-align: center; color: #00ffcc; margin-bottom: 30px; }
+
+        /* GRID SYSTEM: Dynamically arranges camera cards based on screen size */
+        #camera-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            gap: 25px;
+            padding: 10px;
+        }
+
+        /* Centers the single stream if only one camera is active */
+        #camera-grid:has(> :last-child:nth-child(1)) {
+            display: flex;
+            justify-content: center;
+        }
+
+        .camera-card {
+            background: #2d2d2d;
+            border-radius: 12px;
+            padding: 15px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+            border: 1px solid #444;
+            max-width: 800px;
+            width: 100%;
+        }
+
+        .camera-card h3 {
+            margin-top: 0;
+            color: #00ffcc;
+            font-size: 1.2em;
+            border-bottom: 1px solid #444;
+            padding-bottom: 10px;
+        }
+
+        /* MONITORING OVERLAY: Displays real-time FPS data for each stream */
+        .stats-bar {
+            background: #111;
+            padding: 8px 12px;
+            border-radius: 6px;
+            margin-bottom: 12px;
+            font-size: 0.85em;
+            color: #888;
+            display: flex;
+            gap: 15px;
+        }
+
+        .stats-bar span { color: #00ffcc; font-weight: bold; }
+        .stats-bar span.warning { color: #ff3333 !important; animation: blink 1.5s infinite; }
+        .stats-bar span.pending { color: #ffcc00; }
+        @keyframes blink { 50% { opacity: 0.5; } }
+
+        /* PERFORMANCE OPTIMIZATIONS: Critical for smooth 8K rendering */
+        .video-container {
+            position: relative;
+            background: #000;
+            border-radius: 6px;
+            overflow: hidden;
+            min-height: 300px;
+			will-change: transform;        /* Hints to the browser to prepare the GPU */
+        }
+
+        img {
+			width: 100%;
+			display: block;
+            /* Optimizes contrast for Chrome/Safari and crisp edges for Firefox */
+			image-rendering: -webkit-optimize-contrast;
+			/*image-rendering: crisp-edges; */              /* Firefox */
+            image-rendering: auto;                      /* Smoother for high-res 8K */
+			backface-visibility: hidden;               /* Prevents flickers during fast updates */
+			transform: translateZ(0);                  /* Forces Hardware Acceleration */
+		}
+
+        #no-streams-msg {
+            text-align: center;
+            color: #555;
+            font-size: 1.8em;
+            margin-top: 150px;
+            font-weight: 300;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Live Detection Dashboard</h1>
+
+    <!-- IDLE MESSAGE: Displayed when no camera streams are active -->
+    <div id="no-streams-msg" style="display: none;">
+        No Active Streams Detected
+    </div>
+
+    <div style="text-align: center; margin-bottom: 20px;">
+        <button id="refresh-btn" style="background: #444; color: #00ffcc; border: 1px solid #00ffcc; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.9em;">
+            Check for New Streams
+        </button>
+    </div>
+
+    <!-- DYNAMIC GRID: Initialized via Jinja2 on first load; managed by JS thereafter -->
+    <div id="camera-grid">
+        {% for id in cameras %}
+        <div class="camera-card" id="card-{{ id }}">
+            <h3>Camera: {{ id }}</h3>
+            <div class="stats-bar">
+                <div>DISPLAY FPS: <span id="fps-{{ id }}">0.0</span></div>
+                <!-- <div>INPUT FPS: <span id="inputfps-{{ id }}">0.0</span></div> -->
+                <div>TARGET FPS: <span id="targetfps-{{ id }}">0.0</span></div>
+                <!-- <div>Frames: <span id="frames-{{ id }}">0</span></div> -->
+            </div>
+            <div class="video-container">
+                <img src="/view_stream?name={{ id }}" alt="Camera Stream {{ id }}" decoding="async">
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <script>
+        const grid = document.getElementById('camera-grid');
+        const emptyMsg = document.getElementById('no-streams-msg');
+        const refreshBtn = document.getElementById('refresh-btn');
+
+        /*
+        WEB WORKER (ADAPTIVE POLLING):
+           Offloads data fetching to a background thread to keep the main UI responsive.
+           - Active mode: Polls every 1s when cameras are detected.
+           - Idle mode: Polls every 10s when the system is empty to save resources.
+        */
+        const workerCode = "let currentDelay = 1000; " +
+        "let timeoutId = null; " +
+        "async function fetchData() { " +
+        "  try { " +
+        // "    const listRes = await fetch(self.location.origin + '/stream_list'); " +
+        "    const response = await fetch(self.location.origin + '/dashboard_stats'); " +
+        "    if (response.ok) { " +
+        "      const stats = await response.json(); " +
+        "      const activeIds = Object.keys(stats); " +
+        "      if (activeIds.length > 0) { " +
+        "        /* ACTIVE: Poll fast (1s) */ " +
+        "        currentDelay = 1000; " +
+        // "        const statsRes = await fetch(self.location.origin + '/stream_stats'); " +
+        // "        const stats = statsRes.ok ? await statsRes.json() : {}; " +
+        "        self.postMessage({ activeIds, stats }); " +
+        "      } else { " +
+        "        /* IDLE: Poll slow (5s) */ " +
+        "        currentDelay = 5000; " +
+        "        self.postMessage({ activeIds: [], stats: {} }); " +
+        "      } " +
+        "    } " +
+        "  } catch (err) { currentDelay = 5000; } " +
+        "  timeoutId = setTimeout(fetchData, currentDelay); " +
+        "} " +
+        "self.onmessage = function(e) { " +
+        "  if (e.data.action === 'start' || e.data.action === 'force') { " +
+        "    clearTimeout(timeoutId); " + // Cancel any pending slow poll
+        "    fetchData(); " +             // Run immediately
+        "  } " +
+        "  if (e.data.action === 'pause') clearTimeout(timeoutId); " +
+        "}; "
+
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        const worker = new Worker(URL.createObjectURL(blob));
+
+        /* UI SYNC: Adds/Removes camera cards as the backend starts/stops streams */
+        worker.onmessage = function(e) {
+            const { activeIds, stats } = e.data;
+            syncUI(activeIds, stats);
+            updateUIStats(stats);
+        };
+
+        function syncUI(activeIds, stats) {
+            // Remove cards for cameras that are no longer active
+            document.querySelectorAll('.camera-card').forEach(card => {
+                const id = card.id.replace('card-', '');
+                const streamStats = stats[id];
+                if (!activeIds.includes(id) || (streamStats && streamStats.is_streaming === false)) {
+                    console.log("Removing dead stream:", id);
+                    card.remove();
+                }
+            });
+
+            // Dynamically inject new camera cards into the grid
+            activeIds.forEach(id => {
+                if (!document.getElementById('card-' + id)) {
+                    const card = document.createElement('div');
+                    card.className = 'camera-card';
+                    card.id = 'card-' + id;
+
+                    // Using standard quotes and concatenation for VS Code compatibility
+                    card.innerHTML =
+                        '<h3>Camera: ' + id + '</h3>' +
+                        '<div class="stats-bar">' +
+                            '<div>DISPLAY FPS: <span id="fps-' + id + '">0.0</span></div>' +
+                            // '<div>INPUT FPS: <span id="inputfps-' + id + '">0.0</span></div>' +
+                            '<div>TARGET FPS: <span id="targetfps-' + id + '">0.0</span></div>' +
+                            // '<div>Frames: <span id="frames-' + id + '">0</span></div>' +
+                            // '<div>Backlog: <span id="backlog-' + id + '">0</span></div>' +
+                            // '<div>Status: <span id="status-' + id + '">Pending</span></div>' +
+                        '</div>' +
+                        '<div class="video-container">' +
+                            '<img src="/view_stream?name=' + id + '" alt="Stream ' + id + '" decoding="async">' +
+                        '</div>';
+
+                    grid.appendChild(card);
+                }
+            });
+
+            emptyMsg.style.display = grid.children.length === 0 ? 'block' : 'none';
+        }
+
+        /* Updates text values for FPS/Stats without reloading the video container */
+        function updateUIStats(stats) {
+            for (const [id, data] of Object.entries(stats)) {
+                const fpsEl = document.getElementById(`fps-${id}`);
+                const inputfpsEl = document.getElementById(`inputfps-${id}`);
+                const targetfpsEl = document.getElementById(`targetfps-${id}`);
+                // const frameEl = document.getElementById(`frames-${id}`);
+                // const backlogEl = document.getElementById(`backlog-${id}`);
+                // const statusEl = document.getElementById(`status-${id}`);
+
+                if (fpsEl) fpsEl.textContent = data.fps;
+                if (inputfpsEl) inputfpsEl.textContent = data.inputfps;
+                if (targetfpsEl) targetfpsEl.textContent = data.targetfps;
+                // if (frameEl) frameEl.textContent = data.frames;
+                // if (backlogEl) {
+                //     backlogEl.textContent = data.reencode_backlog;
+                //     // Highlight in red if backlog > 3
+                //     backlogEl.className = data.reencode_backlog > 3 ? 'warning' : '';
+                // }
+
+                // if (statusEl) {
+                //     statusEl.textContent = data.last_clip_status;
+                //     statusEl.className = data.status === 'Warning' ? 'warning' : '';
+                // }
+            }
+        }
+
+        // TAB VISIBILITY
+        refreshBtn.onclick = () => {
+            refreshBtn.style.borderColor = "#00ffcc";
+            worker.postMessage({ action: 'force' });
+            setTimeout(() => refreshBtn.style.borderColor = "#444", 500);
+        };
+
+        /* BANDWIDTH SAVING: Pauses polling when the dashboard tab is hidden */
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                worker.postMessage({ action: 'pause' });
+            } else {
+                worker.postMessage({ action: 'resume' });
+            }
+        });
+
+        worker.postMessage({ action: 'start' });
+    </script>
+</body>
+</html>

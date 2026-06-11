@@ -41,7 +41,13 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
-RUN python3 -m venv ${VIRTUAL_ENV}
+    # hadolint ignore=DL3013
+RUN python3 -m venv ${VIRTUAL_ENV} && \
+    ${VIRTUAL_ENV}/bin/pip install --no-cache-dir \
+    "pip==26.0.1" \
+    "torch==2.10.0" \
+    "torchvision==0.25.0" \
+    "numpy==1.26.0"
 
 ENV DEVICE="GPU"
 
@@ -58,13 +64,6 @@ RUN if [ "${DEVICE}" = "GPU" ]; then \
 
 ENV PATH="$VIRTUAL_ENV/bin:/usr/local/cuda/bin:${PATH}"
 ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
-
-# RUN pip3 install --no-cache-dir "pip==26.0.1" "torch==2.10.0" "torchvision==0.25.0" "numpy==1.26.4"
-WORKDIR /home
-
-COPY requirements.* /home/
-# RUN pip3 install --no-cache-dir -r requirements.in
-RUN pip3 install --no-cache-dir --require-hashes -r requirements.txt
 
 
 # ARG PYTHON_VERSION=3.10
@@ -125,11 +124,11 @@ RUN cmake -D CMAKE_BUILD_TYPE=RELEASE \
 RUN rm -rf ${DEPENDENCY_DIR}
 
 # Set the working directory in the container
-# WORKDIR /home
+WORKDIR /home
 
-# COPY requirements.* /home/
-# # RUN pip3 install --no-cache-dir -r requirements.in
-# RUN pip3 install --no-cache-dir --require-hashes -r requirements.txt
+COPY requirements.* /home/
+# RUN pip3 install --no-cache-dir -r requirements.in
+RUN pip3 install --no-cache-dir --require-hashes -r requirements.txt
 
 
 RUN \

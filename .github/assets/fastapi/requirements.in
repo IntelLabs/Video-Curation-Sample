@@ -1,0 +1,26 @@
+av>=17.0.1
+cucim>=23.10.0
+cupy-cuda12x>=13.6.0
+fastapi>=0.135.1
+nncf>=2.19.0
+numpy>=1.26.4
+nvidia-cuda-runtime-cu12>=12.8.90
+nvidia-cudnn-cu12>=9.10.2.21
+onnx>=1.21.0
+onnxruntime-gpu>=1.23.2
+onnxslim>=0.1.82
+openvino-dev>=2024.6.0
+pip>=26.0.1
+protobuf>=5.29.6,<6  # For VDMS
+pynvvideocodec>=2.1.0
+pytest>=9.0.3
+requests>=2.33.0
+tensorrt_cu12==10.14.1.48.post1
+torch==2.10.0
+torchvision==0.25.0
+ultralytics>=8.4.8
+uvicorn>=0.42.0
+vdms>=0.0.23
+wheel>=0.46.3
+
+pillow>=12.1.1

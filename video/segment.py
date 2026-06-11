@@ -7,7 +7,14 @@ from urllib.parse import unquote
 
 from tornado import gen, web
 from tornado.concurrent import run_on_executor
-from utils import safely_join_path
+
+
+def safely_join_path(base_dir, add_path):
+    safe_base = os.path.abspath(base_dir)
+    candidate_path = os.path.abspath(os.path.join(safe_base, add_path))
+    if not candidate_path.startswith(safe_base + os.sep):
+        raise ValueError(f"Invalid path: {candidate_path}")
+    return candidate_path
 
 
 class SegmentHandler(web.RequestHandler):

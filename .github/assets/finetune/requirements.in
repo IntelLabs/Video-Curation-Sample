@@ -1,12 +1,17 @@
+cucim>=23.10.0
+cupy-cuda12x>=13.6.0
 numpy>=1.26.4
+nvidia-cuda-runtime-cu12>=12.8.90
+nvidia-cudnn-cu12>=9.10.2.21
 onnx>=1.21.0
 onnxruntime-gpu>=1.23.2
 onnxslim>=0.1.82
 pip>=26.0.1
-protobuf>=5.29.6,<6  # For VDMS
+requests>=2.33.0
 tensorrt_cu12==10.14.1.48.post1
 torch==2.10.0
 torchvision==0.25.0
-vdms>=0.0.23
+ultralytics>=8.4.8
 
 pillow>=12.1.1
+

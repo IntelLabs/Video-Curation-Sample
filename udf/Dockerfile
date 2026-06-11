@@ -9,8 +9,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 # fixes CVE-2023-4911 vulnerability on Ubuntu 22.04
+# hadolint ignore=DL3008
 RUN apt-get update && \
-    apt-get install --only-upgrade libc-bin libc6  && \
+    apt-get install -y --only-upgrade --no-install-recommends libc-bin libc6 && \
     apt-get install -y -q  --no-install-recommends python3-pip python3-venv \
     curl libgl1-mesa-glx && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv ${VIRTUAL_ENV}

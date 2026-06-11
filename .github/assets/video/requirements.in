@@ -1,19 +1,5 @@
---index-url https://download.pytorch.org/whl/cpu
---extra-index-url https://pypi.org/simple
-
-torch==2.10.0+cpu
-torchvision==0.25.0+cpu
-
 inotify>=0.2.12
-opencv-python-headless>=4.11.0.86
-openvino-dev>=2024.6.0
 pip>=26.0.1
-protobuf>=5.29.6,<6  # For VDMS
-psutil>=7.2.1
+pyyaml>=6.0.3
 requests>=2.33.0
 tornado>=6.5.5
-ultralytics>=8.4.7
-vdms>=0.0.23
-wheel>=0.46.3
-
-pillow>=12.1.1
