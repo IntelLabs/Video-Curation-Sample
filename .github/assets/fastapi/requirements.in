@@ -10,7 +10,7 @@ onnx>=1.21.0
 onnxruntime-gpu>=1.23.2
 onnxslim>=0.1.82
 openvino-dev>=2024.6.0
-pip>=26.0.1
+pip>=26.1
 protobuf>=5.29.6,<6  # For VDMS
 pynvvideocodec>=2.1.0
 pytest>=9.0.3
@@ -23,4 +23,7 @@ uvicorn>=0.42.0
 vdms>=0.0.23
 wheel>=0.46.3
 
-pillow>=12.1.1
+idna>=3.15
+pillow>=12.2.0
+starlette>=1.0.1
+urllib3>=2.7.0
