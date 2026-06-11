@@ -3,7 +3,7 @@
 # This script runs the Curation application
 #######################################################################################################################
 # DEFAULT VARIABLES
-INGESTION="object,face"
+INGESTION="object"  #,face"
 EXP_TYPE=compose
 DEBUG="0"
 DEVICE="CPU"

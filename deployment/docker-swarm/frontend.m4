@@ -12,6 +12,7 @@
             no_proxy: "vdms-service,video-service,${no_proxy}"
             NO_PROXY: "vdms-service,video-service,${NO_PROXY}"
             `DEBUG': "defn(`DEBUG')"
+            BACKEND_URL: "http://fastapi-service:8000"
         secrets:
             - source: self_crt
               target: /var/run/secrets/self.crt
@@ -35,3 +36,4 @@
         depends_on:
             - vdms-service
             - video-service
+            - fastapi-service

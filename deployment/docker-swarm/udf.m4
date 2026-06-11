@@ -17,8 +17,8 @@
             HTTP_PROXY: "${HTTP_PROXY}"
             https_proxy: "${https_proxy}"
             HTTPS_PROXY: "${HTTPS_PROXY}"
-            no_proxy: "video-service,vdms-service,${no_proxy}"
-            NO_PROXY: "video-service,vdms-service,${NO_PROXY}"
+            no_proxy: "fastapi-service,video-service,vdms-service,${no_proxy}"
+            NO_PROXY: "fastapi-service,video-service,vdms-service,${NO_PROXY}"
         volumes:
             - /etc/localtime:/etc/localtime:ro
             - app-content:/var/www:ro
@@ -48,8 +48,8 @@
             HTTP_PROXY: "${HTTP_PROXY}"
             https_proxy: "${https_proxy}"
             HTTPS_PROXY: "${HTTPS_PROXY}"
-            no_proxy: "video-service,vdms-service,${no_proxy}"
-            NO_PROXY: "video-service,vdms-service,${NO_PROXY}"
+            no_proxy: "fastapi-service,video-service,vdms-service,${no_proxy}"
+            NO_PROXY: "fastapi-service,video-service,vdms-service,${NO_PROXY}"
         volumes:
             - /etc/localtime:/etc/localtime:ro
             - app-content:/var/www:ro

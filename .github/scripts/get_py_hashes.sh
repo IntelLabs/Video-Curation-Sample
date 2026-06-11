@@ -6,6 +6,14 @@ SCRIPT_DIR=$(dirname "$(realpath "$0")")
 GH_DIR=$(dirname "${SCRIPT_DIR}")
 REPO_DIR=$(dirname "${GH_DIR}")
 
+# FASTAPI
+# uv pip compile ${GH_DIR}/assets/fastapi/requirements.CPU.in --no-header --no-annotate -o ${REPO_DIR}/fastapi/requirements.CPU.txt --generate-hashes --allow-unsafe --index-strategy unsafe-best-match
+# pip-compile --no-header --no-annotate -o ${REPO_DIR}/fastapi/requirements.GPU.txt --generate-hashes --allow-unsafe ${GH_DIR}/assets/fastapi/requirements.GPU.in
+pip-compile --no-header --no-annotate -o ${REPO_DIR}/fastapi/requirements.txt --generate-hashes --allow-unsafe ${GH_DIR}/assets/fastapi/requirements.in
+
+# FINETUNE
+pip-compile --no-header --no-annotate -o ${REPO_DIR}/finetune/requirements.txt --generate-hashes --allow-unsafe ${GH_DIR}/assets/finetune/requirements.in
+
 # FRONTEND
 pip-compile --no-header --no-annotate -o ${REPO_DIR}/frontend/requirements.txt --generate-hashes --allow-unsafe ${GH_DIR}/assets/frontend/requirements.in
 
@@ -13,6 +21,4 @@ pip-compile --no-header --no-annotate -o ${REPO_DIR}/frontend/requirements.txt -
 pip-compile --no-header --no-annotate -o ${REPO_DIR}/udf/requirements.txt --generate-hashes --allow-unsafe ${GH_DIR}/assets/udf/requirements.in
 
 # VIDEO
-uv pip compile ${GH_DIR}/assets/video/requirements.in --no-header --no-annotate -o ${REPO_DIR}/video/requirements.txt --generate-hashes --allow-unsafe --index-strategy unsafe-best-match
-uv pip compile ${GH_DIR}/assets/video/requirements.CPU.in --no-header --no-annotate -o ${REPO_DIR}/video/requirements.CPU.txt --generate-hashes --allow-unsafe --index-strategy unsafe-best-match
-pip-compile --no-header --no-annotate -o ${REPO_DIR}/video/requirements.GPU.txt --generate-hashes --allow-unsafe ${GH_DIR}/assets/video/requirements.GPU.in
+pip-compile --no-header --no-annotate -o ${REPO_DIR}/video/requirements.txt --generate-hashes --allow-unsafe ${GH_DIR}/assets/video/requirements.in

@@ -1,9 +1,13 @@
 #!/usr/bin/python3
 
+import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 
-from tornado import gen, web
-from tornado.concurrent import run_on_executor
+from tornado import gen, httpclient, web
+
+BACKEND_URL = os.getenv("BACKEND_URL", "http://fastapi-service:8000")
+FASTAPI_URL = f"{BACKEND_URL}/model_classes"
 
 
 class SettingHandler(web.RequestHandler):
@@ -14,196 +18,147 @@ class SettingHandler(web.RequestHandler):
     def check_origin(self, origin):
         return True
 
-    @run_on_executor
+    @gen.coroutine
+    def get_model_classes(self):
+        """Asynchronously fetches classes from the FastAPI container."""
+        client = httpclient.AsyncHTTPClient()
+        default_classes = ["class0"]
+
+        try:
+            response = yield client.fetch(FASTAPI_URL)
+            data = json.loads(response.body.decode("utf-8"))
+            return data.get("classes", default_classes)  # Default fallback if empty
+            # with open(MODEL_CLASSES_FILE, "r") as f:
+            #     data = json.load(f)
+            #     return data.get("classes", default_classes)
+        except Exception as e:
+            # Fallback to a basic list if the model container is unreachable
+            print(f"Error fetching model classes: {e}")
+            return default_classes
+
+    # @run_on_executor
+    @gen.coroutine
     def _settings(self):
-        return {
-            "controls": [
+        include_advanced = False
+        dynamic_objects = yield self.get_model_classes()
+
+        controls = []
+        if "person" in dynamic_objects:
+            person_control = {
+                "name": "person",
+                "icon": "images/person.png",
+                "description": "Find Person",
+                "params": [
+                    {
+                        "name": "Age Min",
+                        "type": "number",
+                        "value": 18,
+                    },
+                    {
+                        "name": "Age Max",
+                        "type": "number",
+                        "value": 75,
+                    },
+                    {
+                        "name": "Gender",
+                        "type": "list",
+                        "values": [
+                            "skip",
+                            "male",
+                            "female",
+                        ],
+                        "value": "skip",
+                    },
+                    {
+                        "name": "Emotion List",
+                        "type": "list",
+                        "values": [
+                            "skip",
+                            "neutral",
+                            "happy",
+                            "sad",
+                            "surprise",
+                            "anger",
+                        ],
+                        "value": "skip",
+                    },
+                ],
+            }
+            controls.append(person_control)
+
+        object_control = {
+            "name": "object",
+            "icon": "images/object.png",
+            "description": "Find Object",
+            "params": [
                 {
-                    "name": "person",
-                    "icon": "images/person.png",
-                    "description": "Find Person",
-                    "params": [
-                        {
-                            "name": "Age Min",
-                            "type": "number",
-                            "value": 18,
-                        },
-                        {
-                            "name": "Age Max",
-                            "type": "number",
-                            "value": 75,
-                        },
-                        {
-                            "name": "Gender",
-                            "type": "list",
-                            "values": [
-                                "skip",
-                                "male",
-                                "female",
-                            ],
-                            "value": "skip",
-                        },
-                        {
-                            "name": "Emotion List",
-                            "type": "list",
-                            "values": [
-                                "skip",
-                                "neutral",
-                                "happy",
-                                "sad",
-                                "surprise",
-                                "anger",
-                            ],
-                            "value": "skip",
-                        },
-                    ],
+                    "name": "Object List",
+                    "type": "list",
+                    "values": sorted(dynamic_objects),
+                    "value": dynamic_objects[0],
                 },
                 {
-                    "name": "object",
-                    "icon": "images/object.png",
-                    "description": "Find Object",
-                    "params": [
-                        {
-                            "name": "Object List",
-                            "type": "list",
-                            "values": [
-                                "airplane",
-                                "apple",
-                                "backpack",
-                                "banana",
-                                "baseball bat",
-                                "baseball glove",
-                                "bear",
-                                "bed",
-                                "bench",
-                                "bicycle",
-                                "bird",
-                                "boat",
-                                "book",
-                                "bottle",
-                                "bowl",
-                                "broccoli",
-                                "bus",
-                                "cake",
-                                "car",
-                                "carrot",
-                                "cat",
-                                "cell phone",
-                                "chair",
-                                "clock",
-                                "couch",
-                                "cow",
-                                "cup",
-                                "dining table",
-                                "dog",
-                                "donut",
-                                "elephant",
-                                "fire hydrant",
-                                "fork",
-                                "frisbee",
-                                "giraffe",
-                                "hair drier",
-                                "handbag",
-                                "horse",
-                                "hot dog",
-                                "keyboard",
-                                "kite",
-                                "knife",
-                                "laptop",
-                                "microwave",
-                                "motorcycle",
-                                "mouse",
-                                "orange",
-                                "oven",
-                                "parking meter",
-                                "person",
-                                "pizza",
-                                "potted plant",
-                                "refrigerator",
-                                "remote",
-                                "sandwich",
-                                "scissors",
-                                "sheep",
-                                "sink",
-                                "skateboard",
-                                "skis",
-                                "snowboard",
-                                "spoon",
-                                "sports ball",
-                                "stop sign",
-                                "suitcase",
-                                "surfboard",
-                                "teddy bear",
-                                "tennis racket",
-                                "tie",
-                                "toaster",
-                                "toilet",
-                                "toothbrush",
-                                "traffic light",
-                                "train",
-                                "truck",
-                                "tv",
-                                "umbrella",
-                                "vase",
-                                "wine glass",
-                                "zebra",
-                            ],
-                            "value": "person",
-                        },
-                        {
-                            "name": "Object Count",
-                            "type": "list",
-                            "values": ["skip"] + [str(x) for x in range(1, 26)],
-                            "value": "skip",
-                        },
-                        {
-                            "name": "Object Count Condition",
-                            "type": "list",
-                            "values": ["==", "<=", "<", ">=", ">"],
-                            "value": "==",
-                        },
-                        {
-                            "name": "Frame ID",
-                            "type": "text",
-                            "value": "skip",
-                        },
-                        {
-                            "name": "Frame Condition",
-                            "type": "list",
-                            "values": [
-                                "==",
-                                "<=",
-                                ">=",
-                            ],
-                            "value": "==",
-                        },
-                    ],
+                    "name": "Object Count",
+                    "type": "list",
+                    "values": ["skip"] + [str(x) for x in range(1, 26)],
+                    "value": "skip",
                 },
                 {
-                    "name": "video",
-                    "icon": "images/video.png",
-                    "description": "Find Video",
-                    "params": [
-                        {
-                            "name": "Video Name",
-                            "type": "text",
-                            "value": "*",
-                        }
-                    ],
+                    "name": "Object Count Condition",
+                    "type": "list",
+                    "values": ["==", "<=", "<", ">=", ">"],
+                    "value": "==",
                 },
-                # {
-                #     "name": "advanced",
-                #     "icon": "images/advanced.png",
-                #     "description": "Advanced",
-                #     "params": [
-                #         {
-                #             "name": "Search Queries",
-                #             "type": "text",
-                #             "value": "",
-                #         }
-                #     ],
-                # },
+                {
+                    "name": "Frame ID",
+                    "type": "text",
+                    "value": "skip",
+                },
+                {
+                    "name": "Frame Condition",
+                    "type": "list",
+                    "values": [
+                        "==",
+                        "<=",
+                        ">=",
+                    ],
+                    "value": "==",
+                },
             ],
+        }
+        controls.append(object_control)
+
+        video_control = {
+            "name": "video",
+            "icon": "images/video.png",
+            "description": "Find Video",
+            "params": [
+                {
+                    "name": "Video Name",
+                    "type": "text",
+                    "value": "*",
+                }
+            ],
+        }
+        controls.append(video_control)
+
+        if include_advanced:
+            advanced_control = {
+                "name": "advanced",
+                "icon": "images/advanced.png",
+                "description": "Advanced",
+                "params": [
+                    {
+                        "name": "Search Queries",
+                        "type": "text",
+                        "value": "",
+                    }
+                ],
+            }
+            controls.append(advanced_control)
+
+        return {
+            "controls": controls,
         }
 
     @gen.coroutine
