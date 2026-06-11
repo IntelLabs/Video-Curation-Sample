@@ -876,6 +876,16 @@ class DeviceBaseHandler:
 
         for i in range(self.ai_ring_depth):
             name = f"shm_ai_640_{self.name}_{i}_{os.getpid()}"
+
+            try:
+                # Attempt to attach to a lingering zombie segment
+                old_shm = shared_memory.SharedMemory(name=name)
+                old_shm.close()
+                old_shm.unlink()  # Permanently destroys the old OS block handle
+                main_app_logger.warning(f"Cleaned up residual zombie shared memory block: {name}")
+            except FileNotFoundError:
+                pass  # Block doesn't exist, safe to proceed normal initialization
+
             shm = shared_memory.SharedMemory(
                 name=name, create=True, size=self.frame_stride_bytes
             )
@@ -3498,6 +3508,7 @@ class DeviceBaseHandler:
         # self.clip_key = f"{self.name}_{self.clip_id:03d}.mp4"
 
         # Safe parameter array construction passed directly to kernel, avoiding subshell expansion failures
+        clip_duration = int(self.config.CLIP_DURATION)
         ffmpeg_args = [
             "ffmpeg",
             "-y",
@@ -3512,15 +3523,15 @@ class DeviceBaseHandler:
             "-i",
             "-",
             "-c:v",
-            "mpeg4",  # Or "libx264" if you prefer H.264
-            "-qscale:v",
-            "4",  # Quality scale (use -crf 23 if using libx264)
+            "libx264",  #"mpeg4",  # Or "libx264" if you prefer H.264
+            "-crf","23",
+            "-f","mpegts","-movflags","faststart",
             "-force_key_frames",
-            "expr:gte(t,n_forced*10)",
+            f"expr:gte(t,n_forced*{clip_duration})",
             "-f",
             "segment",
             "-segment_time",
-            "10",
+            f"{clip_duration}",
             "-reset_timestamps",
             "1",
             "-segment_format",
