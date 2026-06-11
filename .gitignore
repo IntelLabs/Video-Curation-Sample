@@ -5,5 +5,11 @@
 **/_*
 **/DockerImageTars/
 build/*
-video/resources/models/intel
-video/resources/models/ultralytics
+fastapi/resources/models/intel
+fastapi/resources/models/ultralytics
+fastapi/tests/*_results*
+fastapi/tests/*_test_imgs
+fastapi/tests/*.mp4
+finetune/.env
+finetune/app/*-Results
+inputs/camera_config.yaml

@@ -1,0 +1,79 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python Debugger: Pipeline",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tests/test_pipeline.py",
+      "console": "integratedTerminal",
+      "subProcess": false,
+      "justMyCode": false,
+      "args": [
+        "--duration", "2",
+
+        // AVAILABLE SCENARIO PARAMS
+        // Use --scenario to specify tests by number (1 - 4)
+        // 1 - 3: --device (cpu or gpu)
+        // 4: --device, --sf, --type (object or motion)
+
+        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
+        // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
+        // "--source", "<TEST_VIDEO>.mp4",
+      ]
+    },
+
+    {
+      "name": "Python Debugger: Model",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tests/test_model.py",
+      "cwd": "${workspaceFolder}/tests",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": false,
+      "args": [
+        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
+        // "--source", "<TEST_VIDEO>.mp4",
+      ]
+    },
+    {
+      "name": "Python Debugger: Smart filtering",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tests/test_pipeline.py",
+      "console": "integratedTerminal",
+      "subProcess": false,
+      "justMyCode": false,
+      "args": [
+        // SF SCENARIO PARAMS
+        // 4: --device, --sf, --type (object or motion)
+        "--scenario", "4",
+        "--sf",
+        "--type", "motion",
+
+        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
+        // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
+        // "--source", "<TEST_VIDEO>.mp4",
+      ]
+    },
+    {
+      "name": "Python Debugger: test_detections",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tests/test_detections.py",
+      "cwd": "${workspaceFolder}/tests",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": false,
+      "args": [
+        "--type", "object",
+        // "--source", "<TEST_VIDEO>.mp4",
+        // "-m", "yolo11n", "--no-custom",
+      ]
+    }
+  ]
+}
