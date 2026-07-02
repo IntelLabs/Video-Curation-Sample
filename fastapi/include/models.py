@@ -83,9 +83,9 @@ def get_model(
 ):
     final_model_path = f"{model_dir}/{model_name}.pt"
     pt_detection_model = YOLO(final_model_path, verbose=False, task="detect")
-    label_source = []
-    for k, v in pt_detection_model.names.items():
-        label_source.append(v)
+
+    # Secure the master label source dictionary reference from the raw baseline weights
+    master_names_dict = pt_detection_model.names
 
     if run_platform == "openvino":
         final_model_path = f"{model_dir}/{model_name}_openvino_model/"
@@ -96,7 +96,7 @@ def get_model(
                 dynamic=dynamic_flag,
                 device=device_input,
                 # batch=batch,
-                data={"names": pt_detection_model.names},
+                data={"names": master_names_dict},
             )
 
         object_detection_model = YOLO(
@@ -105,12 +105,49 @@ def get_model(
             task="detect",
         )
 
-        # det_ov_model = core.read_model(final_model_path+"yolo11n.xml")
-        # ov_config = {hints.performance_mode: hints.PerformanceMode.LATENCY}
-        # if device == "GPU":
-        #     ov_config["GPU_DISABLE_WINOGRAD_CONVOLUTION"] = "YES"
-        # compiled_model = core.compile_model(det_ov_model, device, ov_config)
+        import numpy as np
+        import openvino as ov
+        import openvino.preprocess as wp
+        from openvino import properties
+
+        core = ov.Core()
+        det_ov_model = core.read_model(final_model_path + f"{model_name}.xml")
+
+        # --- ULTRA-FAST HIGH-SPEED C++ GRAPH INJECTION ---
+        # We tell the OpenVINO compiler graph to apply the layout shift
+        # and normalization layers natively in C++ before returning data to Python
+        ppp = wp.PrePostProcessor(det_ov_model)
+
+        # Inject an implicit transposition rule directly onto the output layer node
+        # This shifts shapes from [1, 5, 8400] -> [1, 8400, 5] automatically in memory
+        output = ppp.output(0)
+        output.tensor().set_layout(ov.Layout("NCW"))
+        output.model().set_layout(ov.Layout("NWC"))
+
+        # Build the modifications back into the primary model reference structure
+        det_ov_model = ppp.build()
+
+        ov_config = {
+            # properties.hint.performance_mode(): properties.hint.PerformanceMode.THROUGHPUT,
+            properties.hint.performance_mode(): properties.hint.PerformanceMode.LATENCY,
+            properties.streams.num(): 1,  # Set strictly to 1 to prevent thread thrashing  #2,
+            properties.inference_num_threads(): os.cpu_count() or 4,
+        }
+        compiled_model = core.compile_model(
+            det_ov_model, device_input.upper(), ov_config
+        )
+        dummy_canvas = np.zeros((model_h, model_w, 3), dtype=np.uint8)
+        _ = object_detection_model.predict(dummy_canvas, verbose=False, save=False)
         # object_detection_model.predictor.model.ov_compiled_model = compiled_model
+
+        if (
+            hasattr(object_detection_model, "predictor")
+            and object_detection_model.predictor is not None
+        ):
+            # Re-map the raw execution backend instance to utilize the multi-stream parameters
+            object_detection_model.predictor.model.backend.ov_compiled_model = (
+                compiled_model
+            )
 
     elif run_platform == "engine":
         final_model_path = f"{model_dir}/{model_name}.engine"
@@ -159,7 +196,7 @@ def get_model(
                     dynamic=True,
                     device=device_input,
                     simplify=True,
-                    data={"names": pt_detection_model.names},
+                    data={"names": master_names_dict},
                 )
 
             if hasattr(pt_detection_model.model, "stride"):
@@ -174,7 +211,7 @@ def get_model(
                 metadata={
                     "stride": max_stride,
                     "task": "detect",
-                    "names": pt_detection_model.names,
+                    "names": master_names_dict,
                 },
             )
 
@@ -200,7 +237,7 @@ def get_model(
                 device=device_input,
                 simplify=True,
                 batch=batch,
-                data={"names": pt_detection_model.names},
+                data={"names": master_names_dict},
             )
 
         object_detection_model = YOLO(final_model_path, verbose=False, task="detect")
@@ -214,6 +251,13 @@ def get_model(
 
     else:
         raise ValueError(f"[!] Model for {run_platform} is not implemented.")
+
+    # --- SAFELY COMPILING FINAL DEFINITIVE LABELS LIST ---
+    # Interrogate the runtime model instance dictionary first; fallback directly to master reference maps
+    current_names = (
+        getattr(object_detection_model, "names", master_names_dict) or master_names_dict
+    )
+    label_source = [current_names[i] for i in sorted(current_names.keys())]
 
     return object_detection_model, final_model_path, label_source
 

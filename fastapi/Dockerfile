@@ -53,10 +53,10 @@ RUN apt-get update && \
 
 RUN python3 -m venv ${VIRTUAL_ENV} && \
     ${VIRTUAL_ENV}/bin/pip install --no-cache-dir \
-    "pip==26.0.1" \
+    "pip==26.1.2" \
     "torch==2.10.0" \
     "torchvision==0.25.0" \
-    "numpy==1.26.0"
+    "numpy==1.26.4"
 
 # OPENCV W/ CUDA SUPPORT
 ENV PYTHON_VERSION=3.10

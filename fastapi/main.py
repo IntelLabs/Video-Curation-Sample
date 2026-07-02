@@ -186,7 +186,7 @@ async def view_stream(name: str, request: Request):
 
                 # Wait for the background thread to signal that AI processing is complete
                 await streamer.frame_ready_event.wait()
-                streamer.frame_ready_event.clear()  # Reset for the next frame
+                # streamer.frame_ready_event.clear()  # Reset for the next frame
 
                 # streamer.reader_busy.value = True
                 # target_idx = streamer.ready_buffer_idx.value
@@ -197,7 +197,7 @@ async def view_stream(name: str, request: Request):
                 current_id = streamer.shared_details.get("last_id", -1)
                 if current_id > last_sent_id:
                     ready_idx = streamer.ready_buffer_idx.value
-                    streamer.reader_active_idx.value = ready_idx
+                    # streamer.reader_active_idx.value = ready_idx
                     frame_len = streamer.shm_frame_lengths[ready_idx]
 
                     if frame_len > 0:
@@ -205,30 +205,34 @@ async def view_stream(name: str, request: Request):
                         # shm_name = shm_names[ready_idx]
                         # print(f"DEBUG: Displaying SHM {shm_name}")
                         # frame_bytes = streamer.latest_processed_frame
-                        try:
-                            frame_bytes = bytes(reader_shms[ready_idx].buf[:frame_len])
-                        finally:
-                            streamer.reader_active_idx.value = -1
-                        last_sent_id = current_id
-                        streamer.last_heartbeat = time.time()
+                        # try:
+                        frame_bytes = bytes(reader_shms[ready_idx].buf[:frame_len])
+                        # finally:
+                        #     streamer.reader_active_idx.value = -1
+                        # last_sent_id = current_id
+                        # streamer.last_heartbeat = time.time()
                         # streamer.reader_busy.value = False
+                        streamer.frame_ready_event.clear()
 
                         # Multipart JPEG delivery with explicit Content-Length for stability
-                        yield (
-                            b"--frame\r\n"
-                            b"Content-Type: image/jpeg\r\n"
-                            b"Content-Length: "
-                            + str(len(frame_bytes)).encode()
-                            + b"\r\n\r\n"
-                            # b"Content-Length: "
-                            # + str(len(frame_bytes)).encode()
-                            # + b"\r\n\r\n"
-                            + frame_bytes
-                            + b"\r\n"
-                        )
-                        # last_sent_id = current_id
+                        if len(frame_bytes) > 0:
+                            yield (
+                                b"--frame\r\n"
+                                b"Content-Type: image/jpeg\r\n"
+                                b"Content-Length: "
+                                + str(len(frame_bytes)).encode()
+                                + b"\r\n\r\n"
+                                # b"Content-Length: "
+                                # + str(len(frame_bytes)).encode()
+                                # + b"\r\n\r\n"
+                                + frame_bytes
+                                + b"\r\n"
+                            )
+                        last_sent_id = current_id
+                        streamer.last_heartbeat = time.time()
 
                 # Yield control to the event loop to prevent blocking
+                # streamer.frame_ready_event.clear()  # Reset for the next frame
                 await asyncio.sleep(0.001)
         except Exception as e:
             main_app_logger.error(f"[EXCEPTION] Generator Error: {e}")

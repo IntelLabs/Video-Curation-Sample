@@ -3,6 +3,7 @@
 import os
 import queue
 import subprocess
+import threading
 import time
 import traceback
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ from include.default_configs import (
     DISPLAY_FRAME_SIZE,
     ENABLE_QUERYING_DEFAULT,
     INGESTION_DEFAULT,
+    IOU_THRESHOLD_DEFAULT,
     MAX_DETECTIONS,
     MAX_WORKERS,
     MODEL_H,
@@ -159,6 +161,7 @@ class PipelineConfig:
         self.DETECTION_THRESHOLD = float(
             kwargs.get("DETECTION_THRESHOLD", DETECTION_THRESHOLD_DEFAULT)
         )
+        self.IOU_THRESHOLD = float(kwargs.get("IOU_THRESHOLD", IOU_THRESHOLD_DEFAULT))
         self.MAX_DETECTIONS = int(kwargs.get("MAX_DETECTIONS", MAX_DETECTIONS))
         self.MODEL_H = int(kwargs.get("MODEL_H", MODEL_H))
         self.MODEL_W = int(kwargs.get("MODEL_W", MODEL_W))
@@ -269,6 +272,264 @@ class VDMSPool:
     def return_connection(self, conn):
         # Put the connection back for reuse
         self.pool.put(conn)
+
+
+class AsyncVideoWriter:
+    """Handles disk saving operations asynchronously on a background thread."""
+
+    def __init__(self, path, fourcc, fps, size):
+        self.writer = cv2.VideoWriter(path, fourcc, fps, size)
+        self.queue = queue.Queue()
+        self.running = True
+        self.thread = threading.Thread(target=self._write_loop, daemon=True)
+        self.thread.start()
+
+    def _write_loop(self):
+        while self.running or not self.queue.empty():
+            try:
+                frame = self.queue.get(timeout=0.05)
+                if frame is None:
+                    break
+                self.writer.write(frame)
+                self.queue.task_done()
+            except queue.Empty:
+                continue
+
+    def write_frame(self, frame):
+        self.queue.put(frame)
+
+    def release(self):
+        self.running = False
+        self.thread.join()
+        self.writer.release()
+
+
+# class AsyncDisplayWriterv1:
+#     """Handles disk saving operations asynchronously on a background thread."""
+
+#     def __init__(self, path, fourcc, fps, size):
+#         self.writer = cv2.VideoWriter(path, fourcc, fps, size)
+#         self.queue = queue.Queue()
+#         self.running = True
+#         self.thread = threading.Thread(target=self._write_loop, daemon=True)
+#         self.thread.start()
+
+#     def _write_loop(self):
+#         while self.running or not self.queue.empty():
+#             try:
+#                 frame = self.queue.get(timeout=0.05)
+#                 self.writer.write(frame)
+#                 self.queue.task_done()
+#             except queue.Empty:
+#                 continue
+
+#     def write_frame(self, frame):
+#         self.queue.put(frame)
+
+#     def release(self):
+#         self.running = False
+#         self.thread.join()
+#         self.writer.release()
+
+
+class AsyncDisplayWriter:
+    """
+    Ultra-efficient frame-delivery client for live web streaming.
+    Pipes annotated BGR numpy matrices directly into matching Linux
+    POSIX Shared Memory allocation slots to prevent thread context-switching.
+    """
+
+    def __init__(self, target_fps, display_size, quality=60):
+        self.target_fps = float(target_fps)
+        self.disp_w, self.disp_h = display_size
+        self.quality = int(quality)
+
+        # Ingestion pipeline constructs
+        self.queue = queue.Queue(maxsize=10)
+        self.running = True
+
+        # State indicators requested by the FastAPI handler endpoints
+        self.handler = None
+        self.thread = threading.Thread(target=self._write_loop, daemon=True)
+        self.thread.start()
+
+    def set_handler_context(self, handler_instance):
+        """Binds the active handler resource structures to secure index barriers."""
+        self.handler = handler_instance
+
+    def _write_loop(self):
+        # encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
+        while self.running or not self.queue.empty():
+            try:
+                item = self.queue.get(timeout=0.05)
+                if item is None:
+                    break
+                display_frame, frame_num = item
+                # self.writer.write(frame)
+                # Compress to highly packable, network-ready JPEG byte streams
+                # ret, jpeg_buf = cv2.imencode('.jpg', display_frame, encode_param)
+                # if not ret:
+                #     self.queue.task_done()
+                #     continue
+                if self.handler is None:  # or not self.handler.active:
+                    self.queue.task_done()
+                    continue
+
+                if frame_num > self.handler.shared_details["last_id"]:
+                    frame_bytes = get_display_frame_in_bytes(
+                        display_frame,
+                        display_size=(self.disp_w, self.disp_h),
+                        quality=self.quality,
+                        return_bytes=True,
+                    )
+                    if not frame_bytes:
+                        self.queue.task_done()
+                        continue
+
+                    # frame_bytes = jpeg_buf.tobytes()
+                    frame_len = len(frame_bytes)
+                    num_shms = len(self.handler.shms)
+
+                    # Locate alternative ring memory locations away from browser client read operations
+                    forbidden_idx = [
+                        self.handler.ready_buffer_idx.value,
+                        self.handler.reader_active_idx.value,
+                    ]
+                    available_idx = [
+                        i for i in range(num_shms) if i not in forbidden_idx
+                    ]
+
+                    if not available_idx:
+                        # Fallback to structural ring increments if locks collide
+                        write_idx = (self.handler.ready_buffer_idx.value + 1) % num_shms
+                    else:
+                        write_idx = available_idx[0]
+
+                    # Direct zero-copy commit straight to volatile RAM mappings
+                    shm_block = self.handler.shms[write_idx]
+                    shm_block.buf[:frame_len] = memoryview(frame_bytes)
+
+                    # Update pipeline sync trackers across worker contexts
+                    self.handler.shm_frame_lengths[write_idx] = frame_len
+                    self.handler.ready_buffer_idx.value = write_idx
+
+                    # Assign atomic sequence token identifiers safely
+                    self.handler.shared_details["last_id"] = frame_num
+
+                    # Fire threading synchronization barriers to release blocked generator loops
+                    # self.handler.frame_ready_event.set()
+                    if hasattr(self.handler, "loop") and self.handler.loop is not None:
+                        self.handler.loop.call_soon_threadsafe(
+                            self.handler.frame_ready_event.set
+                        )
+                    else:
+                        # Fallback guard if the frame context hasn't registered a loop hook yet
+                        self.handler.frame_ready_event.set()
+
+                    self.queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[ASYNC-DISPLAY-ERROR] Silent pool worker drop: {e}")
+                traceback.print_exc()
+                continue
+
+    def _write_loopv1(self):
+        """Background daemon consumer that compresses matrices directly to /dev/shm."""
+        # Performance parameters to maintain strict BT.709 encoding constraints
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
+
+        while self.running or not self.queue.empty():
+            try:
+                item = self.queue.get(timeout=0.05)
+                if item is None:
+                    break
+
+                display_frame, frame_num = item
+                if self.handler is None or not self.handler.active:
+                    self.queue.task_done()
+                    continue
+
+                # Ensure image sizes perfectly correspond with standard API expectations
+                if (
+                    display_frame.shape[1] != self.disp_w
+                    or display_frame.shape[0] != self.disp_h
+                ):
+                    display_frame = cv2.resize(
+                        display_frame,
+                        (self.disp_w, self.disp_h),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+
+                # Compress to highly packable, network-ready JPEG byte streams
+                ret, jpeg_buf = cv2.imencode(".jpg", display_frame, encode_param)
+                if not ret:
+                    self.queue.task_done()
+                    continue
+
+                frame_bytes = jpeg_buf.tobytes()
+                frame_len = len(frame_bytes)
+                num_shms = len(self.handler.shms)
+
+                # Locate alternative ring memory locations away from browser client read operations
+                forbidden_idx = [
+                    self.handler.ready_buffer_idx.value,
+                    self.handler.reader_active_idx.value,
+                ]
+                available_idx = [i for i in range(num_shms) if i not in forbidden_idx]
+
+                if not available_idx:
+                    # Fallback to structural ring increments if locks collide
+                    write_idx = (self.handler.ready_buffer_idx.value + 1) % num_shms
+                else:
+                    write_idx = available_idx[0]
+
+                # Direct zero-copy commit straight to volatile RAM mappings
+                shm_block = self.handler.shms[write_idx]
+                shm_block.buf[:frame_len] = frame_bytes
+
+                # Update pipeline sync trackers across worker contexts
+                self.handler.shm_frame_lengths[write_idx] = frame_len
+                self.handler.ready_buffer_idx.value = write_idx
+
+                # Assign atomic sequence token identifiers safely
+                self.handler.shared_details["last_id"] = frame_num
+
+                # Fire threading synchronization barriers to release blocked generator loops
+                # self.handler.frame_ready_event.set()
+                if hasattr(self.handler, "loop") and self.handler.loop is not None:
+                    self.handler.loop.call_soon_threadsafe(
+                        self.handler.frame_ready_event.set
+                    )
+                else:
+                    # Fallback guard if the frame context hasn't registered a loop hook yet
+                    self.handler.frame_ready_event.set()
+
+                self.queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[ASYNC-DISPLAY-ERROR] Failed streaming injection: {e}")
+                continue
+
+    def write_frame(self, display_frame, frame_num):
+        """Thread-safe entry hook to stash processed canvas items into the workspace."""
+        # if not self.active:
+        #     return
+        # try:
+        #     # Drop structural allocations under pressure if the worker falls behind
+        #     self.queue.put_nowait((display_frame, frame_num))
+        # except queue.Full:
+        #     pass
+        self.queue.put((display_frame, frame_num))
+
+    def release(self):
+        """Terminates internal consumers gracefully to ensure process convergence."""
+        # self.active = False
+        self.running = False
+        self.queue.put(None)
+        if self.thread.is_alive():
+            self.thread.join(timeout=1.0)
 
 
 ERR_KEYWORDS = [
@@ -705,7 +966,7 @@ def merge_boxes_gpu(raw_boxes, gap_limit=10, size_limit=1000):
     return torch.stack(merged)
 
 
-def merge_boxes_cpu(boxes, gap_limit=10):
+def merge_boxes_cpuv1(boxes, gap_limit=10):
     """
     Greedy merge in 640x640 space to consolidate swarm fragments.
     Input: List of [x1, y1, x2, y2] within [0, 640]
@@ -738,6 +999,69 @@ def merge_boxes_cpu(boxes, gap_limit=10):
                 ]
                 boxes.pop(i)
                 i = 0  # Re-check boundaries
+            else:
+                i += 1
+        merged.append(curr)
+    return merged
+
+
+def merge_boxes_cpu(boxes, gap_limit=10, size_limit=800):
+    """
+    Greedy merge in 640x640 space to consolidate swarm fragments.
+    Preserves original boxes larger than size_limit, merging others where possible.
+    Input: List of [x1, y1, x2, y2] within [0, 640]
+    """
+    if not boxes:
+        return []
+
+    # O(N log N) sort by X for early exit optimization
+    boxes = sorted(boxes, key=lambda x: x[0])
+    merged = []
+
+    while boxes:
+        curr = boxes.pop(0)
+
+        # --- PRESERVE OVERSIZED CROPS ---
+        # If the current bounding box is already larger than the size limit,
+        # skip merging it with anything else and save it directly to the output pool.
+        if (curr[2] - curr[0]) > size_limit or (curr[3] - curr[1]) > size_limit:
+            merged.append(curr)
+            continue
+
+        i = 0
+        while i < len(boxes):
+            test = boxes[i]
+
+            # If the test candidate box is already larger than the size limit,
+            # do not attempt to merge it into the current tracking cluster.
+            if (test[2] - test[0]) > size_limit or (test[3] - test[1]) > size_limit:
+                i += 1
+                continue
+
+            # Early exit: horizontal gap exceeds limit
+            if test[0] - curr[2] > gap_limit:
+                break
+
+            # Check vertical gap
+            y_dist = max(0, test[1] - curr[3], curr[3] - test[1])
+            if y_dist <= gap_limit:
+                # Calculate proposed expanded dimensions if merged
+                new_x1 = min(curr[0], test[0])
+                new_y1 = min(curr[1], test[1])
+                new_x2 = max(curr[2], test[2])
+                new_y2 = max(curr[3], test[3])
+
+                # --- BOUNDARY EXPANSION GUARD ---
+                # Reject the merge if combining these small boxes would push
+                # the resulting macro patch past the maximum allowed size limit.
+                if (new_x2 - new_x1) > size_limit or (new_y2 - new_y1) > size_limit:
+                    i += 1
+                    continue
+
+                # Expand current tracking box safely
+                curr = [new_x1, new_y1, new_x2, new_y2]
+                boxes.pop(i)
+                i = 0  # Re-check updated boundaries against remaining boxes
             else:
                 i += 1
         merged.append(curr)
@@ -812,7 +1136,7 @@ def find_contours_gpu_equivalent(
     return merge_boxes_gpu(raw_boxes, gap_limit=grid_size * 2, size_limit=limit_640)
 
 
-def find_contours_gpu_equivalentv1(mask_gpu_mat, stream=None):
+def find_contours_gpu_equivalentv1(mask_gpu_mat, stream=None, limit_640=None):
     """
     GPU equivalent to cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     Returns: torch.Tensor [N, 4] containing (x1, y1, x2, y2) in analysis space.
@@ -977,7 +1301,7 @@ def format_df_value(value):
     return value
 
 
-def get_display_frame_in_bytes(
+def get_display_frame_in_bytesv1(
     foi, display_size=(960, 540), quality=50, return_bytes=True, device="CPU"
 ):  # Expects BGR
     H, W = foi.shape[:2]
@@ -1001,6 +1325,50 @@ def get_display_frame_in_bytes(
         frame_bytes = None
 
     return frame_bytes
+
+
+def get_display_frame_in_bytes(
+    foi, display_size=(960, 540), quality=50, return_bytes=True, device="CPU"
+):
+    """
+    Safely formats and compresses video frames for browser distribution.
+    Accepts packed BGR array layouts directly.
+    """
+    if foi is None:
+        return None
+
+    # Defensive Guard: If a raw PyTorch CUDA tensor accidentally leaks into this
+    # context path, instantly bring it down safely to a standard contiguous numpy array
+    if torch.is_tensor(foi):
+        if foi.is_cuda:
+            foi = foi.detach().cpu()
+        foi = foi.numpy()
+
+    # CRITICAL SIZING FIX: Explicitly parse display_size as (Width, Height)
+    # to perfectly match OpenCV's internal spatial coordinate expectations
+    target_w, target_h = display_size
+    current_h, current_w = foi.shape[:2]
+
+    # Check matching structural criteria correctly
+    if current_h == target_h and current_w == target_w:
+        display_frame = foi
+    else:
+        # Resize safely without slipping strides or inverting height/width constraints
+        display_frame = cv2.resize(
+            foi, (target_w, target_h), interpolation=cv2.INTER_NEAREST
+        )
+
+    # Encode to crisp, valid JPEG compression matrices
+    ret, buffer = cv2.imencode(
+        ".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+    )
+
+    if ret and return_bytes:
+        return buffer.tobytes()
+    elif ret:
+        return buffer
+
+    return None
 
 
 # Manual FPS calculation if OpenCV reports 0
