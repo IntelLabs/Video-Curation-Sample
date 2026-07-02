@@ -5,16 +5,14 @@ import queue
 import sys
 import threading
 import time
-import traceback
+from multiprocessing import Process, Value
+from multiprocessing.shared_memory import SharedMemory
 
 import av
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 from ultralytics.utils.checks import check_imgsz
-
-# from fastapi import FastAPI
 
 # ----- SETUP LOGGING -----
 logging.basicConfig(
@@ -32,18 +30,9 @@ av.logging.set_level(av.logging.PANIC)
 
 main_app_logger = logging.getLogger(__name__)
 
-
 # ----- PIPELINE CONFIGURATION -----
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-# Force OpenCV to use a single thread for its operations.
-# This prevents internal OpenCV threads from "racing" against AI logic.
-# cv2.setNumThreads(1)
-
-# Force OpenCV to run sequentially to prevent context-switching overhead
 cv2.setNumThreads(0)
-
-# DEVICE = os.getenv("DEVICE", "CPU")
-# device_input = DEVICE.lower() if DEVICE == "CPU" else "cuda"
 
 from include.default_configs import ENABLE_QUERYING_DEFAULT
 from include.utils import PipelineConfig, manual_fps_calculation, str2bool
@@ -58,7 +47,6 @@ BASE_PIPELINE_CONFIG = PipelineConfig(
     INGESTION=os.getenv("INGESTION", "object"),
     MODEL_NAME=os.getenv("MODEL_NAME", "yolo11n"),
     OMIT_DETECTIONS_FLAG=str2bool(os.getenv("OMIT_DETECTIONS_FLAG", False)),
-    # RESIZE_FLAG=str2bool(os.getenv("RESIZE_FLAG", False)),
     SHARED_MODEL=os.getenv("SHARED_MODEL", False),
     SHARED_OUTPUT=os.getenv("SHARED_OUTPUT", "/var/www/mp4"),
     TEST_MODE=str2bool(os.getenv("TEST_MODE", False)),
@@ -67,59 +55,203 @@ BASE_PIPELINE_CONFIG = PipelineConfig(
     UDF_PORT=5011,
 )
 
-# Placeholder for dynamic import for PyNvVideoCodec (GPU package)
-nvc = None
+# def capture_shared_memory_worker(source_input, shm_name, frame_shape, running_flag):
+#     """Isolated background process bypassing the GIL to update raw uncompressed RAM."""
+#     if str(source_input).lower().startswith("rtsp://"):
+#         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp;buffer_size;15728640;threads;16"
+#     elif "OPENCV_FFMPEG_CAPTURE_OPTIONS" in os.environ:
+#         del os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"]
+
+#     cap = cv2.VideoCapture(source_input, cv2.CAP_FFMPEG)
+#     if not cap.isOpened():
+#         running_flag.value = False
+#         return
+
+#     existing_shm = SharedMemory(name=shm_name)
+#     shared_array = np.ndarray(frame_shape, dtype=np.uint8, buffer=existing_shm.buf)
+
+#     try:
+#         while running_flag.value:
+#             ret, frame = cap.read()
+#             if not ret or frame is None:
+#                 running_flag.value = False
+#                 break
+#             shared_array[:] = frame[:]
+#     except Exception:
+#         running_flag.value = False
+#     finally:
+#         cap.release()
+#         existing_shm.close()
+
+import sys
+
+# Self-contained worker script executed in an isolated process shell to prevent global CUDA import pollution
+# WORKER_SCRIPT = """
+# import os
+# import sys
+# import cv2
+# import numpy as np
+# from multiprocessing.shared_memory import SharedMemory
+# source_input = sys.argv[1]
+# shm_name = sys.argv[2]
+# h, w, c = map(int, sys.argv[3].split(','))
+# frame_shape = (h, w, c)
+# retry_cnt = 0
+# max_retries = 5
+# cap = None
+# if str(source_input).lower().startswith("rtsp://"):
+#     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp;buffer_size;15728640;threads;16"
+# while retry_cnt < max_retries:
+#     cap = cv2.VideoCapture(source_input, cv2.CAP_FFMPEG)
+#     if cap.isOpened():
+#         break
+#     retry_cnt += 1
+#     # Exit immediately if it's a local file path layout to save CPU cycles
+#     if not str(source_input).lower().startswith("rtsp://"):
+#         break
+#     wait_time = retry_cnt * 2
+#     # Standard string stdout message to pass back to the tracking shell logs
+#     print(f"RTSP background channel pending... Retry ({retry_cnt}/{max_retries}) in {wait_time}s.")
+#     import time
+#     time.sleep(wait_time)
+# if cap is None or not cap.isOpened():
+#     import sys
+#     sys.exit(1)
+# try:
+#     shm = SharedMemory(name=shm_name)
+#     shared_array = np.ndarray(frame_shape, dtype=np.uint8, buffer=shm.buf)
+#     # Read continuously until stdin is closed by the parent process
+#     while sys.stdin.read(1) == '1':
+#         ret, frame = cap.read()
+#         if not ret or frame is None:
+#             break
+#         shared_array[:] = frame[:]
+# except Exception:
+#     pass
+# finally:
+#     cap.release()
+# """
+from multiprocessing import Condition
 
 
-# ----- VIDEO READERS -----
+def capture_shared_memory_worker(
+    source_input,
+    shm_names,
+    frame_shape,
+    running_flag,
+    raw_frame_counter,
+    latest_idx,
+    reader_idx,
+    frame_condition,
+    buffer_occupancy,
+    target_fps,
+):
+    """Isolated background process using triple-buffering pointer rotation to eliminate memcpy."""
+    if str(source_input).lower().startswith("rtsp://"):
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            "rtsp_transport;tcp;buffer_size;33554432;threads;32;max_delay;500000"
+        )
+    # "rtsp_transport;tcp;buffer_size;52428800;fifo_size;500000;max_delay;100000;stimeout;2000000"
+    # "rtsp_transport;tcp;buffer_size;15728640;threads;16"
+    elif "OPENCV_FFMPEG_CAPTURE_OPTIONS" in os.environ:
+        del os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"]
+
+    retry_cnt = 0
+    max_retries = 5
+    cap = None
+    is_rtsp_stream = str(source_input).lower().startswith("rtsp://")
+
+    while retry_cnt < max_retries:
+        cap = cv2.VideoCapture(
+            source_input,
+            cv2.CAP_FFMPEG,
+            [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY],
+        )
+        if cap.isOpened():
+            break
+
+        retry_cnt += 1
+        if not is_rtsp_stream or retry_cnt >= max_retries:
+            main_app_logger.error(
+                f"Critical: Could not open/connect to video resource: {source_input}"
+            )
+            running_flag.value = False
+            return
+
+        wait_time = retry_cnt * 2
+        main_app_logger.warning(
+            f"RTSP process connection pending... Retry ({retry_cnt}/{max_retries}) in {wait_time} seconds."
+        )
+        time.sleep(wait_time)
+
+    # existing_shm = SharedMemory(name=shm_name)
+    # shared_array = np.ndarray(frame_shape, dtype=np.uint8, buffer=existing_shm.buf)
+    # Map all 3 shared memory regions simultaneously
+    shm_blocks = [SharedMemory(name=name) for name in shm_names]
+    # from multiprocessing import resource_tracker
+    # for shm in shm_blocks:
+    #     resource_tracker.unregister(shm._name, "shared_memory")
+    arrays = [
+        np.ndarray(frame_shape, dtype=np.uint8, buffer=shm.buf) for shm in shm_blocks
+    ]
+
+    write_idx = 0
+    worker_frame_num = 0.0
+    worker_next_process_idx = 0.0
+    native_fps = cap.get(cv2.CAP_PROP_FPS)
+    step_size = float(native_fps) / float(target_fps)
+
+    try:
+        while running_flag.value:
+            # 1. Check if this frame is a targeted frame before running heavy decode operations
+            is_target_frame = worker_frame_num >= worker_next_process_idx
+            worker_frame_num += 1.0
+
+            if not is_target_frame:
+                # Fast metadata-only skip: Zero heavy decode compute or CPU/GPU overhead
+                if not cap.grab():
+                    running_flag.value = False
+                    break
+                continue
+
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                running_flag.value = False
+                break
+
+            worker_next_process_idx += step_size
+
+            # Prevent local files from overwriting unread ring buffer slots ---
+            if not str(source_input).lower().startswith("rtsp://"):
+                while buffer_occupancy.value >= 2 and running_flag.value:
+                    pass
+
+            # Dynamic Ring Buffer Selection: Identify free block
+            curr_latest = latest_idx.value
+            curr_reader = reader_idx.value
+            for idx in (0, 1, 2):
+                if idx != curr_latest and idx != curr_reader:
+                    write_idx = idx
+                    break
+
+            arrays[write_idx][:] = frame[:]
+
+            # Notify waiting processing loops without any polling latency
+            with frame_condition:
+                latest_idx.value = write_idx
+                raw_frame_counter.value += 1
+                buffer_occupancy.value += 1
+                frame_condition.notify_all()  # Wake up all waiting reader threads instantly!
+
+    except Exception:
+        running_flag.value = False
+    finally:
+        cap.release()
+        for shm in shm_blocks:
+            shm.close()
+
+
 class BaseReader:
-    def __init__(
-        self,
-        source,
-        target_fps=BASE_PIPELINE_CONFIG.TARGET_FPS,
-        clip_duration=BASE_PIPELINE_CONFIG.CLIP_DURATION,
-        queue_size=2,
-    ):
-        self.source = source
-        self.is_rtsp = str(self.source).startswith("rtsp://")
-        self.frame_idx = 0
-        self.frame_queue = queue.Queue(maxsize=queue_size)  # 2)  # 5
-        self.stopped = False
-        self.reconnect_failed = False
-        self.init_error = None
-        self.target_fps = (
-            float(target_fps) if target_fps not in [None, 0] else target_fps
-        )
-        self.clip_duration = (
-            float(clip_duration) if clip_duration not in [None, 0] else clip_duration
-        )
-
-    def start(self):
-        threading.Thread(target=self.stream_frames, daemon=True).start()
-        return self
-
-    def stop(self):
-        """Cleanly stop the reader and release resources."""
-        self.stopped = True
-        self.release()
-
-    def read(self):
-        try:
-            # If the reader is stopped, don't wait a full second;
-            # check immediately to speed up the "Draining" phase.
-            wait_time = 0.1 if self.stopped else 2.0
-            return self.frame_queue.get(timeout=wait_time)
-        except Exception:
-            return None, None
-
-
-class CPUHybridReader(BaseReader):
-    """
-    Decouples frame acquisition from processing.
-    Uses a background thread to ingest frames into a small deque,
-    preventing OpenCV buffer lag.
-    """
-
     def __init__(
         self,
         source,
@@ -128,77 +260,72 @@ class CPUHybridReader(BaseReader):
         MODEL_W=BASE_PIPELINE_CONFIG.MODEL_W,
         MODEL_H=BASE_PIPELINE_CONFIG.MODEL_H,
         queue_size=2,
-        # as_tensor=False,
     ):
-        super().__init__(
-            source,
-            target_fps=target_fps,
-            clip_duration=clip_duration,
-            queue_size=queue_size,
-        )
-        # self.as_tensor = as_tensor
-        target_fps, clip_duration = (self.target_fps, self.clip_duration)
-        # options = (
-        #     {"rtsp_transport": "tcp", "stimeout": "5000000"}
-        #     if str(self.source).startswith("rtsp")
-        #     else {}
-        # )
+        self.source = source
+        self.is_rtsp = str(self.source).startswith("rtsp://")
+        self.frame_queue = queue.Queue(maxsize=queue_size)
+        self.stopped = False
+        self.total_input_frames = 0  # Increments by step size (Physical frames)
+        self.target_frames_passed = 0  # Increments sequentially (Target space frames)
+        # self.frame_idx = 0.0
+        self.total_shm_copy_time = 0.0
+        self.total_h2d_time = 0.0
+        self.total_gpu_resize_time = 0.0
+        self.total_d2h_time = 0.0
+        self.total_queue_wait_time = 0.0
         self.MODEL_H = MODEL_H
         self.MODEL_W = MODEL_W
-        self.device = "CPU"  # Global from include.utils
-        self.target_frame_idx = 0
-        self.cap = None
 
+        self.target_fps = (
+            float(target_fps) if target_fps not in [None, 0] else target_fps
+        )
+        self.clip_duration = (
+            float(clip_duration) if clip_duration not in [None, 0] else clip_duration
+        )
+
+        probe_cap = None
         max_retries = 5
         retry_cnt = 0
         connected = False
 
+        # while probe_retry < max_retries:
+        #     probe_cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
+        #     if probe_cap.isOpened():
+        #         break
+        #     probe_retry += 1
+        #     if not self.is_rtsp:
+        #         break
+        #     wait_time = probe_retry * 2
+        #     main_app_logger.warning(
+        #         f"Connection pending... Retry ({probe_retry}/{max_retries}) in {wait_time} seconds."
+        #     )
+        #     time.sleep(wait_time)
+
         while not connected and not self.stopped:
             try:
-                # Clean up stale capture descriptors safely to clear sockets
-                if self.cap is not None:
-                    try:
-                        self.cap.release()
-                    except Exception:
-                        pass
-                    self.cap = None
-
-                # Safely intercept capture context extraction layers
-                # Note: We pass self.source instead of recreating string evaluations
-                if not isinstance(self.source, cv2.VideoCapture):
-                    params = [cv2.CAP_PROP_N_THREADS, 1]
-                    test_cap = cv2.VideoCapture(
-                        str(self.source), cv2.CAP_FFMPEG, params=params
-                    )
-                else:
-                    test_cap = self.source
-
-                if test_cap and test_cap.isOpened():
-                    # Validate that we can extract safe telemetry properties
+                probe_cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
+                if probe_cap.isOpened():
                     self.get_fps_and_framecnt(
-                        test_cap, self.target_fps, self.clip_duration
+                        probe_cap, self.target_fps, self.clip_duration
                     )
-                    self.frame_width = int(test_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                    self.frame_height = int(test_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    self.numFrames = int(test_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    self.frame_width = int(probe_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    self.frame_height = int(probe_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    self.numFrames = int(probe_cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
                     if self.input_fps <= 0 or self.frame_width <= 0:
                         raise RuntimeError(
                             "VideoCapture opened but returned invalid stream properties."
                         )
-
-                    self.cap = test_cap
                     self.get_frameWH()
                     connected = True
+                    probe_cap.release()
                 else:
                     raise RuntimeError(
                         "OpenCV VideoCapture failed to open target URI resource context."
                     )
-
             except Exception as e:
                 retry_cnt += 1
                 self.init_error = str(e)
-
                 # Exit if local file resource or retry count exceeded
                 if not self.is_rtsp or retry_cnt >= max_retries:
                     main_app_logger.error(
@@ -208,56 +335,125 @@ class CPUHybridReader(BaseReader):
                     self.stopped = True
                     # Halt and exit the server immediately
                     raise RuntimeError(
-                        f"Critical CPU stream reader initialization failure: {self.init_error}"
+                        f"Critical stream reader initialization failure: {self.init_error}"
                     )
                     return
 
                 wait_time = retry_cnt * 2
                 main_app_logger.warning(
-                    f"CPU connection pending... Retry ({retry_cnt}/{max_retries}) in {wait_time} seconds."
+                    f"Connection pending... Retry ({retry_cnt}/{max_retries}) in {wait_time} seconds."
                 )
                 time.sleep(wait_time)
 
-        # self.cap = self._create_capture(target_fps, clip_duration)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Force low latency
-        self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+        # if probe_cap is None or not probe_cap.isOpened():
+        #     self.reconnect_failed = True
+        #     self.stopped = True
+        #     raise RuntimeError(f"OpenCV failed to open target resource: {self.source}")
 
-        # self.frame_queue = deque(maxlen=5)  # Keep queue small to stay "real-time"
-        # self.frame_queue = queue.Queue(maxsize=5)
-        # self.stopped = False
-        # self.device = "CPU"  # Global from include.utils
-        # self.frame_idx = 0
-        # self.target_frame_idx = 0
-        # self.frame_queue = queue.Queue(maxsize=30)
-
-    def _create_capture(self, target_fps, clip_duration):
-        """Creates a VideoCapture with stable RTSP options."""
-        # if not isinstance(self.source, cv2.VideoCapture):
-        #     self.source = str(self.source)
-        #     params = [cv2.CAP_PROP_N_THREADS, 1]
-        #     cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG, params=params)
-        # else:
-        #     cap = self.source
-        # self.get_fps_and_framecnt(cap, target_fps, clip_duration)
-        # self.frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        # self.frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        # self.numFrames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # self.get_fps_and_framecnt(probe_cap, self.target_fps, self.clip_duration)
+        # self.frame_width = int(probe_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        # self.frame_height = int(probe_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # self.numFrames = int(probe_cap.get(cv2.CAP_PROP_FRAME_COUNT))
         # self.get_frameWH()
-        # return cap
+        # probe_cap.release()
 
-        if isinstance(self.source, cv2.VideoCapture):
-            return self.source
-        params = [cv2.CAP_PROP_N_THREADS, 1]
-        return cv2.VideoCapture(str(self.source), cv2.CAP_FFMPEG, params=params)
+        self.frame_shape = (self.frame_height, self.frame_width, 3)
+        self.frame_bytes = self.frame_width * self.frame_height * 3
+
+        num_shm_slots = 3
+        self.shms = [
+            SharedMemory(create=True, size=self.frame_bytes)
+            for _ in range(num_shm_slots)
+        ]
+
+        # Unregister slots in the main process to eliminate leak warnings and KeyErrors cleanly
+        # from multiprocessing import resource_tracker
+        # for shm in self.shms:
+        #     resource_tracker.unregister(shm._name, "shared_memory")
+
+        self.running_flag = Value("b", True)
+        self.raw_frame_counter = Value("i", 0)
+        self.latest_idx = Value("i", 0)  # Tracks the newest complete frame index
+        self.reader_idx = Value("i", -1)  # Locks the frame currently being processed
+        shm_names = [shm.name for shm in self.shms]
+        # atomic counter to track unread slot density ---
+        self.buffer_occupancy = Value("i", 0)
+
+        # Create a shared cross-process condition lock variable
+        self.frame_condition = Condition()
+
+        self.worker = Process(
+            target=capture_shared_memory_worker,
+            args=(
+                self.source,
+                shm_names,
+                self.frame_shape,
+                self.running_flag,
+                self.raw_frame_counter,
+                self.latest_idx,
+                self.reader_idx,
+                self.frame_condition,
+                self.buffer_occupancy,
+                self.target_fps,
+            ),
+            daemon=True,
+        )
+        self.worker.start()
+        time.sleep(2.5 if self.is_rtsp else 0.05)
+
+        if not self.running_flag.value:
+            for shm in self.shms:
+                shm.close()
+                shm.unlink()
+            raise RuntimeError(
+                "Background worker process failed to map the stream link."
+            )
+
+        # self.shared_array_view = np.ndarray(self.frame_shape, dtype=np.uint8, buffer=self.shms.buf)
+        # self.static_buffer_numpy = np.empty(self.frame_shape, dtype=np.uint8)
+
+        # self.thread = threading.Thread(target=self._processing_loop, daemon=True)
+        # self.thread.start()
+
+    def read(self):
+        try:
+            wait_time = 0.1 if self.stopped else 2.0
+            return self.frame_queue.get(timeout=wait_time)
+        except Exception:
+            return None, None, None
+
+    def start(self):
+        self.thread = threading.Thread(target=self._processing_loop, daemon=True)
+        self.thread.start()
+        return self
+
+    def stop(self):
+        self.stopped = True
+        if hasattr(self, "thread"):
+            self.thread.join(timeout=1.0)
+        for shm in self.shms:
+            try:
+                shm.close()
+                shm.unlink()
+            except Exception:
+                pass
+
+        if hasattr(self, "bridge_thread"):
+            self.bridge_thread.join(timeout=1.0)
+
+        if hasattr(self, "worker"):
+            self.worker.join(timeout=1.0)
 
     # Gets video details
     def get_fps_and_framecnt(self, cap, target_fps, clip_duration):
-        self.input_fps = int(cap.get(cv2.CAP_PROP_FPS))  # hardware fps
+        self.input_fps = cap.get(cv2.CAP_PROP_FPS)  # hardware fps
         # print(f"in fps: {self.input_fps} target fps: {target_fps}")
         if self.input_fps == 0:  # Case when FPS isn't available
             self.input_fps = manual_fps_calculation(cap, num_frames=10)
             print(f"new in fps: {self.input_fps}")
-
+        self.numFrames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not self.is_rtsp:
+            self.total_input_frames = self.numFrames
         # If the stream can't connect, stop immediately instead of calculating.
         if self.input_fps <= 0:
             raise RuntimeError(
@@ -304,773 +500,427 @@ class CPUHybridReader(BaseReader):
         self.scale_x = self.frame_width / self.MODEL_W
         self.scale_y = self.frame_height / self.MODEL_H
 
-    def stream_frames(self):
-        """
-        Continuously grabs frames. Throttles local files to maintain
-        the target FPS and manages RTSP reconnections.
-        """
-        is_rtsp = str(self.source).startswith("rtsp")
-        max_retries = 5
-        retry_cnt = 0
 
-        while not self.stopped:
-            try:
-                if self.cap is None or not self.cap.isOpened():
-                    if not is_rtsp:
-                        self.stopped = True
-                        break
-                    try:
-                        # Logic to recreate the VideoCapture
-                        # self.cap = self._create_capture(
-                        #     self.target_fps, self.clip_duration
-                        # )
-                        # self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                        params = [cv2.CAP_PROP_N_THREADS, 1]
-                        self.cap = cv2.VideoCapture(
-                            str(self.source), cv2.CAP_FFMPEG, params=params
-                        )
-                        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                        retry_cnt = 0
-                    except Exception:
-                        retry_cnt += 1
-                        if retry_cnt >= max_retries:
-                            self.stopped = True
-                            break
-
-                        wait_time = retry_cnt * 2
-                        main_app_logger.warning(
-                            f"CPU reconnect failed. Retry {retry_cnt} in {wait_time}s"
-                        )
-                        time.sleep(wait_time)
-                        continue
-
-                # Fully decode this frame
-                ret, frame = self.cap.read()
-                if not ret:
-                    if not is_rtsp:
-                        self.stopped = True
-                        break
-
-                    # If a live stream returns No Frame, don't just die—trigger a reconnect
-                    main_app_logger.warning("No frame received. Attempting reconnect.")
-                    if self.cap:
-                        self.cap.release()
-                    self.cap = None
-                    continue
-
-                # if self.as_tensor:
-                #     frame_tensor = torch.from_numpy(frame)
-
-                #     # 3. Push to GPU memory immediately
-                #     # non_blocking=True speeds up the host-to-device transfer
-                #     frame_tensor = frame_tensor.to("cuda", non_blocking=True)
-
-                #     # 4. Rearrange dimensions to PyTorch format: [H, W, C] -> [C, H, W]
-                #     # .permute() changes layout; .float() converts uint8 to float32 for interpolation
-                #     frame_tensor = frame_tensor.permute(2, 0, 1).float()
-
-                #     # 5. Add Batch dimension: [C, H, W] -> [1, C, H, W]
-                #     frame_tensor = frame_tensor.unsqueeze(0)
-
-                #     # 6. Normalize pixel values to [0.0, 1.0] if required by your model
-                #     frame = frame_tensor / 255.0
-
-                # self.frame_queue.put((frame, self.frame_idx))
-                try:
-                    self.frame_queue.put((frame, self.frame_idx), timeout=1.0)
-                except queue.Full:
-                    try:
-                        # Non-blocking pop to gracefully evict the oldest stale frame token
-                        self.frame_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    self.frame_queue.put((frame, self.frame_idx))
-                self.target_frame_idx += 1
-                self.frame_idx += 1
-            except Exception as e:
-                main_app_logger.error(f"CPU Reader error: {e}")
-                time.sleep(1)
-
-    def release(self):
-        print("Closing HybridReader...")
-        self.stopped = True
-
-        time.sleep(0.2)
-        if self.cap is not None and self.cap.isOpened():
-            self.cap.release()
-
-
-class GPUHybridReader(BaseReader):
-    """
-    Encapsulates a Zero-Copy 8K video pipeline.
-    Bridges PyAV (Demuxing) and NVDEC (Hardware Decoding) directly to PyTorch.
-    """
+class CPUReader(BaseReader):
+    """Asynchronous CPU frame reader and processor utilizing AVX2 optimized OpenCV routines."""
 
     def __init__(
         self,
         source,
-        gpu_id=0,
         target_fps=BASE_PIPELINE_CONFIG.TARGET_FPS,
         clip_duration=BASE_PIPELINE_CONFIG.CLIP_DURATION,
         MODEL_W=BASE_PIPELINE_CONFIG.MODEL_W,
         MODEL_H=BASE_PIPELINE_CONFIG.MODEL_H,
         queue_size=2,
     ):
-        global nvc
+        # self.source_input = source_input
+        # self.frame_queue = queue.Queue(maxsize=30)
+        # self.stopped = False
+        # self.total_shm_copy_time = 0.0
+        # self.total_h2d_time = 0.0
+        # self.total_gpu_resize_time = 0.0
+        # self.total_d2h_time = 0.0
         super().__init__(
             source,
             target_fps=target_fps,
             clip_duration=clip_duration,
+            MODEL_W=MODEL_W,
+            MODEL_H=MODEL_H,
             queue_size=queue_size,
         )
 
-        if "PyNvVideoCodec" not in sys.modules:
-            try:
-                import PyNvVideoCodec as nvc
+        # self.MODEL_H = MODEL_H
+        # self.MODEL_W = MODEL_W
+        self.device = "CPU"
 
-                globals()["nvc"] = nvc
+        # self.shm = SharedMemory(create=True, size=self.frame_bytes)
+        # self.running_flag = Value('b', True)
 
-            except ImportError:
-                raise ImportError(
-                    "GPUHybridReader requires PyNvVideoCodec. Please install."
-                )
-
-        self.gpu_id = gpu_id
-        self.container = None
-        self.nv_dec = None
-        self.bsf = None
-
-        # --- Initialize CUDA Context & Bridge ---
-        torch.cuda.set_device(self.gpu_id)
-        torch.cuda.init()
-        _ = torch.zeros(1).cuda()  # Force context creation
-
-        # self.is_opened = self.open(target_fps, clip_duration)
-        self.cuda_lib = ctypes.CDLL("libcuda.so.1")
-        ctx = ctypes.c_void_p()
-        self.cuda_lib.cuCtxGetCurrent(ctypes.byref(ctx))
-        self.cuda_ctx_handle = ctx.value if ctx.value is not None else 0
-
-        self.cuda_lib.cuCtxSetCurrent(ctypes.c_void_p(self.cuda_ctx_handle))
-        target_fps, clip_duration = (self.target_fps, self.clip_duration)
-        self.av_options = (
-            {
-                # "rtsp_transport": "tcp",
-                # "stimeout": "2000000",  # 2s
-                # "probesize": "10000000",  # "32000000",  # 32MB for 8K
-                # "analyzeduration": "5000000",
-                # "buffer_size": "10240000",  # 10MB socket buffer
-                "rtsp_transport": "tcp",
-                "stimeout": "2000000",
-                "timeout": "2000000",
-                "rw_timeout": "2000000",
-                "err_detect": "explode",
-                "flags": "discardcorrupt",
-                "probesize": "32000000",
-                "analyzeduration": "32000000",
-            }
-            if str(self.source).startswith("rtsp")
-            else {}
-        )
-
-        # try:
-        # self.container = av.open(
-        #     self.source,
-        #     options={
-        #         **self.av_options,
-        #         "err_detect": "ignore_err",  # Don't stop demuxing on minor packet errors
-        #         "flags": "low_delay",  # Reduce internal buffering
-        #     },
+        # self.worker = Process(
+        #     target=capture_shared_memory_worker,
+        #     args=(self.source_input, self.shm.name, self.frame_shape, self.running_flag),
+        #     daemon=True
         # )
-        # self.container.streams.video[0].thread_type = 'AUTO'
-        # streams = self.container.streams.get(video=0)
-        # self.stream = streams[0] if isinstance(streams, list) else streams
+        # # self.worker.start()
+        # time.sleep(2.5)  # Warm up wait window
 
-        self.get_stream()
+        # if not self.running_flag.value:
+        #     self.shm.close()
+        #     self.shm.unlink()
+        #     raise RuntimeError("Background worker process failed to map the stream link.")
 
-        # Map Codec
-        codec_map = {"hevc": nvc.cudaVideoCodec.HEVC, "h264": nvc.cudaVideoCodec.H264}
-        self.nvc_codec = codec_map.get(
-            self.stream.codec_context.name, nvc.cudaVideoCodec.HEVC
-        )
+        # self.shared_array_view = np.ndarray(self.frame_shape, dtype=np.uint8, buffer=self.shm.buf)
+        self.static_buffer_numpy = np.empty(self.frame_shape, dtype=np.uint8)
 
-        # self.stream_width = self.stream.width
-        # self.stream_height = self.stream.height
+        # self.thread = threading.Thread(target=self._processing_loop, daemon=True)
+        # self.thread.start()
 
-        self.frame_width = self.true_width
-        self.frame_height = self.true_height
+    def _processing_loop(self):
+        # target_fps = 15.0
+        # frame_num = 0.0
+        # next_process_idx = 0.0
+        # step_size = float(self.input_fps) / float(self.target_fps)
+        # # self.total_queue_wait_time = 0.0
 
-        self.input_fps = self.metadata_fps
+        # # Base loop pacing on the native camera interval (e.g., 33.3ms for 30 FPS)
+        # inbound_frame_interval = 1.0 / float(self.input_fps)
+        last_processed_shm_idx = -1
+        while not self.stopped:  # and self.running_flag.value:
+            # loop_start = time.perf_counter()
+            # is_target_frame = (frame_num >= next_process_idx)
 
-        self.target_fps = (
-            target_fps
-            if target_fps not in [None, 0] and self.input_fps > target_fps
-            else self.input_fps
-        )
-        if self.input_fps > 0 and self.target_fps > 0:
-            self.frame_skip = max(1, int(self.input_fps / self.target_fps))
-        else:
-            self.frame_skip = 1
-        self.max_frames_per_clip = (
-            None
-            if clip_duration is None
-            else int(self.target_fps * float(clip_duration))
-        )
-        self.frame_interval = 1.0 / self.target_fps
+            # frame_num += 1.0
 
-        self.numFrames = self.total_frames
+            # if not is_target_frame:
+            #     continue
 
-        self.raw_input = torch.empty(
-            (self.frame_height, self.frame_width, 3), dtype=torch.uint8, device="cuda"
-        )
-        self.sync_locked = True
-
-    def get_stream(self):
-        max_retries = 5
-        retry_cnt = 0
-        connected = False
-        is_rtsp = str(self.source).startswith("rtsp")
-
-        while not connected:
-            try:
-                self.container = av.open(
-                    self.source,
-                    options={
-                        **self.av_options,
-                        "err_detect": "ignore_err",  # Don't stop demuxing on minor packet errors
-                        "flags": "low_delay",  # Reduce internal buffering
-                    },
-                )
-                self.container.streams.video[0].thread_type = "AUTO"
-                streams = self.container.streams.get(video=0)
-                self.stream = streams[0] if isinstance(streams, list) else streams
-
-                if self.stream:
-                    self.stream_width = self.stream.width
-                    self.stream_height = self.stream.height
-                    connected = True
-
-            except Exception as e:
-                retry_cnt += 1
-                self.init_error = str(e)
-
-                if not is_rtsp or retry_cnt >= max_retries:
-                    main_app_logger.error(
-                        f"Critical: Could not open/connect to {self.source}"
-                    )
-                    self.reconnect_failed = True
-                    self.stopped = True
-                    # Halt and exit the server immediately
-                    raise RuntimeError(
-                        f"Critical GPU stream reader initialization failure: {self.init_error}"
-                    )
-                    return
-
-                wait_time = retry_cnt * 2
-                main_app_logger.warning(
-                    f"GPU connection pending... Retry ({retry_cnt}/{max_retries}) in {wait_time} seconds."
-                )
-                time.sleep(wait_time)
-
-    def stream_frames(self):
-        """
-        Universal background thread for 8K video.
-        - RTSP: Reconnects automatically if the stream drops.
-        - Files: Processes until EOF and then stops cleanly.
-        """
-        is_rtsp = str(self.source).startswith("rtsp")
-        max_retries = 5
-        retry_cnt = 0
-
-        # The outer while loop allows RTSP to recover from network hiccups
-        while not self.stopped:
-            try:
-                # Ensure the container and decoder are active
-                # For RTSP, if the demuxer loop below exits, we re-verify the connection here
-                if self.container is None:
-                    try:
-                        self.container = av.open(
-                            self.source,
-                            options={
-                                **self.av_options,
-                                "err_detect": "explode",  # Don't stop demuxing on minor packet errors
-                                "flags": "low_delay",  # Reduce internal buffering
-                            },
-                        )
-                        retry_cnt = 0
-                    except Exception as e:
-                        retry_cnt += 1
-                        if retry_cnt >= max_retries:
-                            # Catch the 404 and stop the thread instead of retrying
-                            main_app_logger.info(
-                                f"Stream {self.source} ended or not found. Closing reader."
-                            )
+            with self.frame_condition:
+                # Thread sleeps instantly until the background worker calls notify_all()
+                # self.frame_condition.wait(timeout=1.0)
+                # Only wait if the background worker hasn't delivered a new index yet
+                while (
+                    self.latest_idx.value == last_processed_shm_idx and not self.stopped
+                ):
+                    if not self.frame_condition.wait(timeout=0.05):
+                        if (
+                            not self.running_flag.value
+                            and self.latest_idx.value == last_processed_shm_idx
+                        ):
                             self.stopped = True
                             break
-                        wait_time = retry_cnt * 2
-                        main_app_logger.warning(
-                            f"Connection failed ({e}). Retry {retry_cnt}/{max_retries} in {wait_time}s..."
-                        )
-                        time.sleep(wait_time)
                         continue
-
-                    streams = self.container.streams.get(video=0)
-                    self.stream = streams[0] if isinstance(streams, list) else streams
-
-                # INITIALIZE DECODER if missing (Fixes the NoneType Error)
-                if self.nv_dec is None:
-                    # Sync with PyTorch
-                    self.cuda_lib.cuCtxSetCurrent(ctypes.c_void_p(self.cuda_ctx_handle))
-                    torch_stream = torch.cuda.current_stream().cuda_stream
-
-                    # Detect Codec
-                    codec_map = {
-                        "hevc": nvc.cudaVideoCodec.HEVC,
-                        "h264": nvc.cudaVideoCodec.H264,
-                    }
-                    nvc_codec = codec_map.get(
-                        self.stream.codec_context.name, nvc.cudaVideoCodec.HEVC
-                    )
-
-                    # Professional cards often support 8K HEVC but are capped at 4K for H.264
-                    if nvc_codec == nvc.cudaVideoCodec.HEVC:
-                        # Use 8K limits for HEVC
-                        hw_max_w, hw_max_h = 8192, 4320
-                    else:
-                        # Safely default to 4K limits for H.264 and other codecs
-                        hw_max_w, hw_max_h = 4096, 4096
-
-                    # Ensure max dimensions are at least as large as current stream
-                    hw_max_w = max(hw_max_w, self.stream_width)
-                    hw_max_h = max(hw_max_h, self.stream_height)
-
-                    # Determine if the library build supports Ultra Low Latency enums.
-                    try:
-                        latency_mode = nvc.DisplayDecodeLatencyType.ULTRA_LOW_LATENCY
-                    except AttributeError:
-                        latency_mode = nvc.DisplayDecodeLatencyType.NATIVE
-
-                    self.nv_dec = nvc.CreateDecoder(
-                        gpuid=self.gpu_id,
-                        codec=nvc_codec,
-                        cudacontext=int(self.cuda_ctx_handle),
-                        cudastream=int(torch_stream),
-                        usedevicememory=1,
-                        maxwidth=hw_max_w,  # Force 8K profile support
-                        maxheight=hw_max_h,
-                        latency=latency_mode,
-                    )
-
-                # Re-initialize BitStream Filter for this session
-                bsf_map = {"hevc": "hevc_mp4toannexb", "h264": "h264_mp4toannexb"}
-                bsf_name = bsf_map.get(self.stream.codec_context.name)
-                local_bsf = (
-                    av.BitStreamFilterContext(bsf_name, self.stream)
-                    if bsf_name
-                    else None
-                )
-
-                target_fps, clip_duration = (self.target_fps, self.clip_duration)
-                self.stream_width = self.stream.width
-                self.stream_height = self.stream.height
-                self.frame_width = self.true_width
-                self.frame_height = self.true_height
-                self.input_fps = self.metadata_fps
-                self.target_fps = (
-                    target_fps
-                    if target_fps not in [None, 0] and self.input_fps > target_fps
-                    else self.input_fps
-                )
-                if self.input_fps > 0 and self.target_fps > 0:
-                    self.frame_skip = max(1, int(self.input_fps / self.target_fps))
-                else:
-                    self.frame_skip = 1
-                self.max_frames_per_clip = (
-                    None
-                    if clip_duration is None
-                    else int(self.target_fps * float(clip_duration))
-                )
-                self.frame_interval = 1.0 / self.target_fps
-                self.numFrames = self.total_frames
-
-                self.is_h264_8k = (
-                    self.stream.codec_context.name == "h264"
-                    and self.stream_width > 4096
-                )
-
-                # --- PATH A: H.264 8K CPU Fallback ---
-                if self.is_h264_8k:
-                    print(
-                        f"[INFO] Starting CPU-Decode Fallback for {self.source}",
-                        flush=True,
-                    )
-                    for frame in self.container.decode(video=0):
-                        # if self.stopped:
-                        #     break
-
-                        # img_array = frame.to_ndarray(format="rgb24")
-                        img_array = frame.to_ndarray(format="bgr24")
-                        # gpu_tensor = (
-                        #     torch.from_numpy(img_array).to("cuda").permute(2, 0, 1)
-                        # )
-                        self.raw_input.copy_(torch.from_numpy(img_array))
-                        gpu_tensor = self.raw_input.permute(2, 0, 1)
-
-                        # CRITICAL FIX: Break the shared buffer pointer!
-                        # Clones the frame to a private memory block before queueing it.
-                        safe_frame = gpu_tensor.clone().contiguous()
-
-                        self.frame_queue.put((safe_frame, self.frame_idx))
-                        self.frame_idx += 1
-
-                        # if not is_rtsp and self.frame_idx >= 500:
-                        #     break  # File test limit
-
-                # --- PATH B: HEVC Hardware Acceleration (15 FPS Path) ---
-                else:
-                    print(
-                        f"[INFO] Starting HW-Accelerated Pump for {self.source}",
-                        flush=True,
-                    )
-                    # Create an explicit stream packet extractor to isolate bitstream errors
-                    packet_iterator = self.container.demux(self.stream)
-
-                    while not self.stopped:
-                        try:
-                            packet = next(packet_iterator)
-                        except (ValueError, OSError, StopIteration):
-                            break
-
-                        # Check for corruption/validity safely
-                        is_broken = packet.size == 0 or packet.dts is None
-                        # is_broken = (
-                        #     is_broken
-                        #     or getattr(packet, "corrupt", False)
-                        #     or getattr(packet, "is_corrupt", False)
-                        # )
-
-                        if is_broken:
-                            # main_app_logger.warning("[WARNING] Corrupt packet detected. Locking sync.")
-                            # self.sync_locked = True
-                            continue
-
-                        # ─── OPTIMIZED HARDWARE SYNCHRONIZATION BARRIER ──────────────────
-                        if self.sync_locked:
-                            # Rely explicitly on PyAV header flag definitions instead of packet.size
-                            if getattr(packet, "is_keyframe", False):
-                                main_app_logger.info(
-                                    "[SYNC] Valid hardware keyframe intercepted. Unlocking decoder track."
-                                )
-                                self.sync_locked = False
-                            else:
-                                # Drop incomplete frames to prevent hardware canvas corruption
-                                continue
-                        # ─────────────────────────────────────────────────────────────────
-                        # if self.stopped:
-                        #     break
-                        if packet.size == 0 or packet.dts is None:
-                            continue
-
-                        # Apply Annex B filter
-                        filtered_packets = (
-                            local_bsf.filter(packet) if local_bsf else [packet]
-                        )
-
-                        for filtered_packet in filtered_packets:
-                            if self.sync_locked:
-                                continue
-
-                            if filtered_packet.size < 10:
-                                continue
-
-                            pkt_bytes = bytes(filtered_packet)
-                            # Extract raw memory address from the numpy tuple
-                            ptr_info = np.frombuffer(
-                                pkt_bytes, dtype=np.uint8
-                            ).__array_interface__["data"]
-                            addr = (
-                                ptr_info[0]
-                                if isinstance(ptr_info, (tuple, list))
-                                else ptr_info
-                            )
-                            nvc_packet = nvc.PacketData()
-                            nvc_packet.bsl_data = int(addr)
-                            nvc_packet.bsl = filtered_packet.size
-
-                            try:
-                                for decoded_frame in self.nv_dec.Decode(nvc_packet):
-                                    try:
-                                        # Zero-Copy Bridge: Hardware Surface -> PyTorch Tensor
-                                        gpu_tensor = torch.from_dlpack(decoded_frame)
-                                        # 2. CONVERSION: Turn NV12 [YUV] into BGR immediately
-                                        converted_bgr = self.nv12_to_bgr_reader(
-                                            gpu_tensor
-                                        )
-
-                                        # CRITICAL FIX: Force a brand-new, isolated memory block allocation
-                                        # on the GPU so the decoder cannot overwrite this frame's pixels
-                                        # while downstream threads are analyzing the mask.
-                                        safe_frame = converted_bgr.clone().contiguous()
-
-                                        while not self.stopped:
-                                            try:
-                                                self.frame_queue.put(
-                                                    (
-                                                        safe_frame,
-                                                        self.frame_idx,
-                                                    ),
-                                                    timeout=0.1,
-                                                )
-                                                break
-                                            except queue.Full:
-                                                try:
-                                                    self.frame_queue.get_nowait()
-                                                except queue.Empty:
-                                                    pass
-                                        torch.cuda.current_stream().synchronize()
-                                        self.frame_idx += 1
-                                    except (
-                                        av.FFmpegError,
-                                        av.InvalidDataError,
-                                        RuntimeError,
-                                    ) as decode_fault:
-                                        main_app_logger.warning(
-                                            f"Isolating corrupt video packet fragment: {decode_fault}"
-                                        )
-                                        if hasattr(decoded_frame, "Unlock"):
-                                            decoded_frame.Unlock()
-                                        continue
-                                    finally:
-                                        # Immediate VRAM Cleanup
-                                        if "gpu_tensor" in locals():
-                                            del gpu_tensor
-                                        if hasattr(decoded_frame, "Unlock"):
-                                            decoded_frame.Unlock()
-                                        del decoded_frame
-
-                            except Exception as e:
-                                self.sync_locked = True
-                                if any(c in str(e) for c in ["700", "208"]):
-                                    self.nv_dec = None
-                                    break
-                        # if not is_rtsp and self.frame_idx >= 500:
-                        #     break  # File test limit
-
-                # --- UNIVERSAL EXIT LOGIC ---
-                if not is_rtsp:
-                    print(
-                        f"[DEBUG] Reached End of File: {self.source}. Exiting thread.",
-                        flush=True,
-                    )
-                    self.stopped = True
-                    break
-                else:
-                    # If we reach here and it's RTSP, the demuxer stopped yielding
-                    print(
-                        "[WARNING] RTSP glitch detected. Closing container and retrying...",
-                        flush=True,
-                    )
-                    if self.container:
-                        # Explicitly flush streams before closing
-                        for s in self.container.streams:
-                            s.codec_context.flush_buffers()
-                        self.container.close()
-                    self.container = None
-
-                    if local_bsf:
-                        try:
-                            local_bsf.filter(None)
-                        except Exception:
-                            pass
-
-                    # Force close the C++ decoder context layer before resetting the pointer
-                    if self.nv_dec is not None:
-                        try:
-                            if hasattr(self.nv_dec, "Close"):
-                                self.nv_dec.Close()
-                        except Exception:
-                            pass
-                        del self.nv_dec
-
-                    torch.cuda.synchronize()
-                    torch.cuda.empty_cache()
-                    self.nv_dec = None
-                    while not self.frame_queue.empty():
-                        try:
-                            self.frame_queue.get_nowait()
-                        except Exception:
-                            break
-                    time.sleep(0.5)  # Wait before reconnection attempt
-
-            except Exception as e:
-                print(f"[EXCEPTION] Reader Thread Failure: {e}", flush=True)
-                traceback.print_exc()
-                if not is_rtsp:
-                    self.stopped = True
+                if self.stopped:
                     break
 
-                self.sync_locked = True
-                if self.nv_dec is not None:
-                    try:
-                        # Force a hardware surface close step to release hardware rings instantly
-                        if hasattr(self.nv_dec, "Close"):
-                            self.nv_dec.Close()
-                    except Exception:
-                        pass
-                    del self.nv_dec
+                active_idx = self.latest_idx.value
+                self.reader_idx.value = active_idx
+                last_processed_shm_idx = active_idx
 
-                # Force CUDA to synchronize and clear driver error state flags safely
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-                self.nv_dec = None
-                time.sleep(1.0)  # Backoff for RTSP reconnection
+                # Signal the worker that a slot has cleared up losslessly ---
+                self.buffer_occupancy.value = max(0, self.buffer_occupancy.value - 1)
 
-        self.stopped = True
+                # is_target_frame = (frame_num >= next_process_idx)
+                # Reconstruct source frame position using step spacing ratio
+                # if self.numFrames != 0:
+                # self.total_input_frames = int(
+                #     self.target_frames_passed * getattr(self, "frame_skip", 1)
+                # )
+                if self.is_rtsp:
+                    self.total_input_frames = int(self.raw_frame_counter.value)
 
-    def release(self):
-        """Safely flushes the decoder and closes the connection."""
-        print("Closing HybridReader...")
-        self.stopped = True  # Signal thread to stop
-        time.sleep(0.5)
+                # Update counters inside target_fps space loop execution
+                self.target_frames_passed += 1
 
-        if self.nv_dec and self.frame_idx > 0:
-            try:
-                self.nv_dec.Decode(nvc.PacketData())  # Flush
-                del self.nv_dec
-                self.nv_dec = None
-            except Exception:
-                pass
-        if self.container:
-            self.container.close()
-            self.container = None
+            # if not is_target_frame:
+            #     continue
 
-    # def nv12_to_bgr_reader(self, nv12_tensor):  # , h, w, is_8k=False):
-    #     """Internal reader helper to convert raw hardware surfaces to BGR."""
-    #     h, w = self.frame_height, self.frame_width
-    #     is_8k = self.is_h264_8k
-    #     with torch.no_grad():
-    #         if is_8k:
-    #             # 8K Path: Extract and unzipper interleaved UV
-    #             y = nv12_tensor[0:1, :, :].half()
-    #             uv_raw = nv12_tensor[1:2, :, :].half()
-    #             u = uv_raw[:, :, 0::2]
-    #             v = uv_raw[:, :, 1::2]
-    #             u = F.interpolate(u.unsqueeze(0), size=(h, w), mode="nearest").squeeze(
-    #                 0
-    #             )
-    #             v = F.interpolate(v.unsqueeze(0), size=(h, w), mode="nearest").squeeze(
-    #                 0
-    #             )
-    #         else:
-    #             # Standard NV12 Path
-    #             y = nv12_tensor[:h, :w].unsqueeze(0).half()
+            # # Check if frame is a target frame before heavy operations
+            # # if frame_num >= next_process_idx:
+            # next_process_idx += step_size
 
-    #             uv = (
-    #                 nv12_tensor[h:, :w]
-    #                 .reshape(h // 2, w // 2, 2)
-    #                 .permute(2, 0, 1)
-    #                 .unsqueeze(0)
-    #                 .half()
-    #             )
-    #             uv_up = F.interpolate(uv, size=(h, w), mode="nearest")
-    #             u, v = uv_up[0, 0:1, :, :], uv_up[0, 1:2, :, :]
+            t_copy = time.perf_counter()
+            # np.copyto(self.static_buffer_numpy, self.shared_array_view)
+            # Zero-Copy Pointer Swap: lock the latest completed buffer index
+            # active_idx = self.latest_idx.value
+            # self.reader_idx.value = active_idx
+            # last_processed_shm_idx = active_idx
 
-    #         # BT.709 Math (Natural Color)
-    #         y = (y - 16.0) * 1.164
-    #         u, v = u - 128.0, v - 128.0
+            # # Signal the worker that a slot has cleared up losslessly ---
+            # self.buffer_occupancy.value = max(0, self.buffer_occupancy.value - 1)
 
-    #         r = y + 1.793 * v
-    #         g = y - 0.213 * u - 0.533 * v
-    #         b = y + 2.112 * u
+            # Wrap an array view directly around the locked active SHM region
+            active_shm = self.shms[active_idx]
+            frame_view = np.ndarray(
+                self.frame_shape, dtype=np.uint8, buffer=active_shm.buf
+            )
+            self.total_shm_copy_time += time.perf_counter() - t_copy
 
-    #         # Stack as BGR [B, G, R] for OpenCV/Browser compatibility
-    #         return torch.cat([b, g, r], dim=0).clamp(0, 255).to(torch.uint8)
+            if not self.is_rtsp or not self.frame_queue.full():
+                t_queue_block = time.perf_counter()
+                # self.frame_queue.put((True, cpu_360p_frame))
+                self.frame_queue.put(
+                    (True, frame_view, self.target_frames_passed)
+                )  # self.static_buffer_numpy.copy()))
+                self.total_queue_wait_time += time.perf_counter() - t_queue_block
 
-    def nv12_to_bgr_reader(self, nv12_tensor):
-        """Internal reader helper to convert raw hardware surfaces to BGR."""
-        h, w = self.frame_height, self.frame_width
-        is_8k = self.is_h264_8k
+            # frame_num += 1.0
 
-        # EXTRACT TRUE STRIDE: Get the actual hardware allocation width
-        # which includes the hidden byte-alignment padding columns.
-        stride_w = nv12_tensor.shape[1]
+            # Keep the reader thread aligned with target ingestion speeds
+            # elapsed = time.perf_counter() - loop_start
+            # time_to_wait = inbound_frame_interval - elapsed
+            # if time_to_wait > 0:
+            #     time.sleep(time_to_wait)
 
-        with torch.no_grad():
-            if is_8k:
-                # 8K Path: Slice using stride_w, then strip padding out cleanly
-                y = nv12_tensor[0:1, :, :stride_w].half()
-                uv_raw = nv12_tensor[1:2, :, :stride_w].half()
-                u = uv_raw[:, :, 0::2]
-                v = uv_raw[:, :, 1::2]
-                u = F.interpolate(u.unsqueeze(0), size=(h, w), mode="nearest").squeeze(
-                    0
-                )
-                v = F.interpolate(v.unsqueeze(0), size=(h, w), mode="nearest").squeeze(
-                    0
-                )
-            else:
-                # Standard NV12 Path
-                # 1. Slice using the full hardware stride_w to preserve vertical row boundaries
-                y_padded = nv12_tensor[:h, :stride_w].half()
-                uv_padded = nv12_tensor[h:, :stride_w].half()
+        # self.frame_idx = frame_num
+        # self.running_flag.value = False
 
-                # 2. Crop out the hardware padding columns horizontally to get clean spatial grids
-                y = y_padded[:, :w].unsqueeze(0)
 
-                uv = (
-                    uv_padded[:, :w]
-                    .reshape(h // 2, w // 2, 2)
-                    .permute(2, 0, 1)
-                    .unsqueeze(0)
-                )
-                uv_up = F.interpolate(uv, size=(h, w), mode="nearest")
-                u, v = uv_up[0, 0:1, :, :], uv_up[0, 1:2, :, :]
+class GPUReader(BaseReader):
+    """Asynchronous GPU frame reader leveraging Pinned Host Memory and PyTorch CUDA tensors."""
 
-            # BT.709 Math (Natural Color)
-            y = (y - 16.0) * 1.164
-            u, v = u - 128.0, v - 128.0
+    def __init__(
+        self,
+        source,
+        gpu_id=1,  # 0,
+        target_fps=BASE_PIPELINE_CONFIG.TARGET_FPS,
+        clip_duration=BASE_PIPELINE_CONFIG.CLIP_DURATION,
+        MODEL_W=BASE_PIPELINE_CONFIG.MODEL_W,
+        MODEL_H=BASE_PIPELINE_CONFIG.MODEL_H,
+        queue_size=2,
+    ):
+        # self.source_input = source_input
+        # self.frame_queue = queue.Queue(maxsize=30)
+        # self.stopped = False
+        # self.total_shm_copy_time = 0.0
+        # self.total_h2d_time = 0.0
+        # self.total_gpu_resize_time = 0.0
+        # self.total_d2h_time = 0.0
+        super().__init__(
+            source,
+            target_fps=target_fps,
+            clip_duration=clip_duration,
+            MODEL_W=MODEL_W,
+            MODEL_H=MODEL_H,
+            queue_size=queue_size,
+        )
 
-            r = y + 1.793 * v
-            g = y - 0.213 * u - 0.533 * v
-            b = y + 2.112 * u
+        self.gpu_id = gpu_id
+        self.device = torch.device(f"cuda:{gpu_id}")
 
-            # Stack as BGR [B, G, R]
-            out_tensor = torch.cat([b, g, r], dim=0).clamp(0, 255).to(torch.uint8)
+        # self.shm = SharedMemory(create=True, size=self.frame_bytes)
+        # self.running_flag = Value('b', True)
 
-            # CRITICAL PIECE: Force memory to be completely linear and sequentially packed
-            # before it enters the queue or gets sliced by the sub-frame window pipeline
-            return out_tensor.contiguous()
+        # self.worker = Process(
+        #     target=capture_shared_memory_worker,
+        #     args=(self.source_input, self.shm.name, self.frame_shape, self.running_flag),
+        #     daemon=True
+        # )
+        # self.worker.start()
+        # time.sleep(2.5)  # Warm up wait window
 
-    @property
-    def true_height(self):
-        """
-        Returns the logical video height.
-        Handles cases where metadata might report the 1.5x NV12 buffer height.
-        """
-        # if self.nv_dec:
-        #     return int(self.nv_dec.Height()) # Get from decoder instead of stream
-        # return int(self.stream.height)  # / 1.5)
-        return self.stream.height if self.stream else 0
+        # if not self.running_flag.value:
+        #     self.shm.close()
+        #     self.shm.unlink()
+        #     raise RuntimeError("Background worker process failed to map the stream link.")
 
-    @property
-    def true_width(self):
-        # if self.nv_dec:
-        #     return self.nv_dec.Width()
-        # return self.stream.width
-        return self.stream.width if self.stream else 0
+        # self.shared_array_view = np.ndarray(self.frame_shape, dtype=np.uint8, buffer=self.shm.buf)
 
-    @property
-    def metadata_fps(self):
-        """Returns the FPS defined in the video metadata/header."""
-        if self.stream and self.stream.average_rate:
-            return float(self.stream.average_rate)
-        return 0.0
+        # Reusable hardware space optimizations
+        # self.static_buffer_tensor = torch.empty(self.frame_shape, dtype=torch.uint8, pin_memory=True)
+        # self.static_buffer_numpy = self.static_buffer_tensor.numpy()
+        # Reusable double-buffered hardware space optimizations
+        # self.static_buffer_tensors = [
+        #     torch.empty(self.frame_shape, dtype=torch.uint8, pin_memory=True),
+        #     torch.empty(self.frame_shape, dtype=torch.uint8, pin_memory=True)
+        # ]
+        # self.static_buffer_numpys = [t.numpy() for t in self.static_buffer_tensors]
+        # self.buffer_selector = 0  # Alternates between 0 and 1
+        self.upload_stream = torch.cuda.Stream(device=self.device)
 
-    @property
-    def total_frames(self):
-        """Returns the total number of frames defined in the file metadata."""
-        if self.stream:
-            # Check nb_frames first
-            if self.stream.frames > 0:
-                return self.stream.frames
-        return 0  # Returns 0 for live streams or files with missing metadata
+        self.download_stream = torch.cuda.Stream(device=self.device)
+        self.d2h_buffers = [
+            torch.empty((360, 640, 3), dtype=torch.uint8, pin_memory=True),
+            torch.empty((360, 640, 3), dtype=torch.uint8, pin_memory=True),
+        ]
+        self.d2h_numpys = [b.numpy() for b in self.d2h_buffers]
+        self.d2h_selector = 0
+
+        # Reusable hardware space optimizations using OS-level Page-Locking
+        try:
+            self.cudart = ctypes.CDLL("libcudart.so")  # Linux
+        except OSError:
+            self.cudart = ctypes.CDLL("cudart64_120.dll")  # Windows
+
+        self.pinned_views = []
+        cudaHostRegisterPortable = 0x01  # Visible to all CUDA contexts
+
+        # Permanently register and create zero-copy tensor views over all 3 SHM allocations
+        for shm in self.shms:
+            # 1. Create a ctypes character array mapping directly onto the memoryview buffer
+            ctypes_array = (ctypes.c_char * self.frame_bytes).from_buffer(shm.buf)
+
+            # 2. Extract the true virtual memory address pointer from the ctypes overlay
+            shm_ptr = ctypes.c_void_p(ctypes.addressof(ctypes_array))
+
+            # 3. Pin the raw memory chunk inside the OS page tracking tables
+            res = self.cudart.cudaHostRegister(
+                shm_ptr, self.frame_bytes, cudaHostRegisterPortable
+            )
+            if res != 0:
+                raise RuntimeError(f"cudaHostRegister failed with status code: {res}")
+
+            # 4. Create a high-speed zero-copy NumPy -> Torch wrapper view over that allocation
+            shm_numpy = np.ndarray(self.frame_shape, dtype=np.uint8, buffer=shm.buf)
+            shm_tensor = torch.from_numpy(shm_numpy)
+            self.pinned_views.append(shm_tensor)
+
+        # self.thread = threading.Thread(target=self._processing_loop, daemon=True)
+        # self.thread.start()
+
+    def _processing_loop(self):
+        # target_fps = 15.0
+        # frame_num = 0.0
+        # next_process_idx = 0.0
+        # step_size = float(self.input_fps) / float(self.target_fps)
+        # # self.total_queue_wait_time = 0.0
+
+        # # Base loop pacing on the native camera interval (e.g., 33.3ms for 30 FPS)
+        # inbound_frame_interval = 1.0 / float(self.input_fps)
+        last_processed_shm_idx = -1
+        torch.cuda.synchronize(self.device)
+
+        while not self.stopped:  # and self.running_flag.value:
+            # loop_start = time.perf_counter()
+            # is_target_frame = (frame_num >= next_process_idx)
+
+            # # Central timeline step tracking
+            # frame_num += 1.0
+
+            # if not is_target_frame:
+            #     continue
+
+            with self.frame_condition:
+                # Thread sleeps instantly until the background worker calls notify_all()
+                # self.frame_condition.wait(timeout=1.0)
+                # Only wait if the background worker hasn't delivered a new index yet
+                while (
+                    self.latest_idx.value == last_processed_shm_idx and not self.stopped
+                ):
+                    if not self.frame_condition.wait(timeout=0.05):
+                        if (
+                            not self.running_flag.value
+                            and self.latest_idx.value == last_processed_shm_idx
+                        ):
+                            self.stopped = True
+                            break
+                        continue
+                if self.stopped:
+                    break
+
+                active_idx = self.latest_idx.value
+                self.reader_idx.value = active_idx
+                last_processed_shm_idx = active_idx
+
+                # Update counters inside target_fps space loop execution
+                self.target_frames_passed += 1
+
+                # Reconstruct source frame position using step spacing ratio
+                # if self.numFrames != 0:
+                # self.total_input_frames = int(
+                #     self.target_frames_passed * getattr(self, "frame_skip", 1)
+                # )
+                if self.is_rtsp:
+                    self.total_input_frames = int(self.raw_frame_counter.value)
+
+                # Signal the worker that a slot has cleared up losslessly ---
+                self.buffer_occupancy.value = max(0, self.buffer_occupancy.value - 1)
+
+                # is_target_frame = (frame_num >= next_process_idx)
+
+            # if not is_target_frame:
+            #     continue
+
+            # # Check if frame is a target frame before heavy operations
+            # # if frame_num >= next_process_idx:
+            # next_process_idx += step_size
+
+            t_copy = time.perf_counter()
+            # np.copyto(self.static_buffer_numpy, self.shared_array_view)
+            # Zero-Copy Pointer Swap: lock the latest completed buffer index
+            # active_idx = self.latest_idx.value
+            # self.reader_idx.value = active_idx
+            # last_processed_shm_idx = active_idx
+
+            # # Signal the worker that a slot has cleared up losslessly ---
+            # self.buffer_occupancy.value = max(0, self.buffer_occupancy.value - 1)
+
+            # Wrap an array view directly around the locked active SHM region
+            # active_shm = self.shms[active_idx]
+            # frame_view = np.ndarray(self.frame_shape, dtype=np.uint8, buffer=active_shm.buf)
+
+            # Select the current active buffer slot
+            # buf_idx = self.buffer_selector
+            # current_numpy_buf = self.static_buffer_numpys[buf_idx]
+            # current_tensor_buf = self.static_buffer_tensors[buf_idx]
+
+            # np.copyto(current_numpy_buf, frame_view)
+            current_tensor_view = self.pinned_views[active_idx]
+            self.total_shm_copy_time += time.perf_counter() - t_copy
+
+            # if self.frame_queue.full() and self.is_rtsp:
+            #     # If the consumer loop is dragging, discard this frame instantly
+            #     # without allocating any memory or touching the PCIe bus.
+            #     return
+
+            # ASYNCHRONOUS PCIe UPLOAD (Only runs for target frames)
+            t_h2d = time.perf_counter()
+
+            # Isolate the PCIe upload onto its own dedicated side hardware stream
+            # with torch.cuda.stream(self.upload_stream):
+            # compute_tensor = self.static_buffer_tensor.to(self.device, non_blocking=True)
+            # Upload directly from the selected zero-copy host view area
+            # compute_tensor = torch.from_numpy(frame_view).to(self.device, non_blocking=True)
+            # compute_tensor = current_tensor_buf.to(self.device, non_blocking=True)
+
+            # Transfer the raw [H, W, 3] uint8 tensor to VRAM via DMA copy
+            compute_tensor = current_tensor_view.to(self.device, non_blocking=True)
+            bgr_tensor = compute_tensor[:, :, [2, 1, 0]].contiguous()
+            # torch.cuda.synchronize(self.device)
+            self.total_h2d_time += time.perf_counter() - t_h2d
+
+            # self.buffer_selector = 1 - self.buffer_selector
+
+            # if not self.is_rtsp or not self.frame_queue.full():
+            t_queue_block = time.perf_counter()
+            # Record an event on the stream and make the main thread wait for it asynchronously
+            current_event = torch.cuda.Event()
+            current_event.record(self.upload_stream)
+            # current_event.wait()
+            torch.cuda.current_stream().wait_event(current_event)
+
+            # self.frame_queue.put((True, cpu_360p_frame))
+            self.frame_queue.put(
+                (True, bgr_tensor.detach(), self.target_frames_passed)
+            )  # .clone()))
+            self.total_queue_wait_time += time.perf_counter() - t_queue_block
+
+            # frame_num += 1.0
+            # self.frame_idx += 1
+
+            # Keep the reader thread aligned with target ingestion speeds
+            # elapsed = time.perf_counter() - loop_start
+            # time_to_wait = inbound_frame_interval - elapsed
+            # if time_to_wait > 0:
+            #     time.sleep(time_to_wait)
+            # Explicitly delete frame variables to free their references
+            if "compute_tensor" in locals():
+                del compute_tensor
+
+            # Force PyTorch's internal allocator to release cached segments back to the OS
+            # torch.cuda.empty_cache()
+            # torch.cuda.ipc_collect()
+
+        # self.frame_idx = frame_num
+        # self.running_flag.value = False
+
+    def stop(self):
+        """Cleanly unregisters the locked memory mapping blocks from the OS page table."""
+        if hasattr(self, "cudart") and hasattr(self, "shms"):
+            import ctypes
+
+            for shm in self.shms:
+                # 1. Safely bind ctypes to the underlying memory view structure
+                ctypes_array = (ctypes.c_char * self.frame_bytes).from_buffer(shm.buf)
+
+                # 2. Extract the address pointer
+                shm_ptr = ctypes.c_void_p(ctypes.addressof(ctypes_array))
+
+                # 3. Unregister the address safely from the OS tables
+                self.cudart.cudaHostUnregister(shm_ptr)
+
+                try:
+                    shm.close()
+                    shm.unlink()
+                except Exception:
+                    pass
+        super().stop()

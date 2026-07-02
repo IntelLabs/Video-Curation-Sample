@@ -5,6 +5,21 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Python Debugger: test_detections",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tests/test_detections.py",
+      "cwd": "${workspaceFolder}/tests",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": false,
+      "args": [
+        "--type", "object",
+        // "--source", "<TEST_VIDEO>.mp4",
+        // "-m", "yolo11n", "--no-custom",
+      ]
+    },
+    {
       "name": "Python Debugger: Pipeline",
       "type": "debugpy",
       "request": "launch",
@@ -60,20 +75,5 @@
         // "--source", "<TEST_VIDEO>.mp4",
       ]
     },
-    {
-      "name": "Python Debugger: test_detections",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/tests/test_detections.py",
-      "cwd": "${workspaceFolder}/tests",
-      "console": "integratedTerminal",
-      "justMyCode": false,
-      "subProcess": false,
-      "args": [
-        "--type", "object",
-        // "--source", "<TEST_VIDEO>.mp4",
-        // "-m", "yolo11n", "--no-custom",
-      ]
-    }
   ]
 }

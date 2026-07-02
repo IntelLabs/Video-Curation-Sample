@@ -206,7 +206,7 @@ class TestSmartFilteringDetections:
         results = self.model.predict(
             source=self.source,
             conf=self.config.DETECTION_THRESHOLD,
-            # iou=self.config.IOU_THRESHOLD,
+            iou=self.config.IOU_THRESHOLD,
             show=False,
             imgsz=(self.frame_height, self.frame_width),
             save=True,

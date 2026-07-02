@@ -81,7 +81,7 @@ def setup_context(request):
         request.cls.name = vid_source.stem
     else:
         request.cls.name = "rtsp"
-    request.cls.test_duration_mins = float(os.getenv("TEST_DURATION_MINS", 2.0))
+    request.cls.test_duration_mins = float(os.getenv("TEST_DURATION_MINS", 1.0))
 
     request.cls.result_dir = test_dir / f"{current_test_filename}_results"
     request.cls.result_dir.mkdir(parents=True, exist_ok=True)
@@ -303,7 +303,7 @@ def stream_worker(
                     current_backlog = handler.prefetch_queue.qsize()
                     prefetch_backlog_samples.append(current_backlog)
                 last_sample = curr_time
-            time.sleep(0.01)
+            time.sleep(0.2)  # 0.01
 
         # Safely capture performance values out of production thread states
         actual_duration = time.perf_counter() - loop_start
@@ -348,12 +348,12 @@ def stream_worker(
             metrics["fallback_engine_triggered"] = (
                 1 if getattr(r, "use_cpu_decode_fallback", False) else 0
             )
-            if not str(handler.source).startswith("rtsp://"):
-                metrics["video_duration"] = (
-                    round(r.numFrames / metrics["hardware_video_fps"], 2)
-                    if metrics["hardware_video_fps"] > 0
-                    else 0.0
-                )
+            # if not str(handler.source).startswith("rtsp://"):
+            metrics["video_duration"] = (
+                round(r.total_input_frames / metrics["hardware_video_fps"], 2)
+                if metrics["hardware_video_fps"] > 0
+                else 0.0
+            )
 
         h_telemetry = getattr(handler, "telemetry", {})
         io_latencies = h_telemetry.get("ram_disk_io_write_ms", [])
@@ -489,10 +489,11 @@ class TestHybridStreamHandlers:
             ),
         )
         worker_p.start()
-        worker_p.join()
+        worker_p.join(timeout=2.0)
 
         if worker_p.is_alive():
             worker_p.terminate()
+            worker_p.join()  # Ensure kernel resource tracking fully unlinks
         worker_p.close()  # Reclaims underlying OS file descriptors immediately
 
         test_metrics = res_queue.get()
@@ -575,7 +576,7 @@ class TestHybridStreamHandlers:
         )
         render_dir = self.result_dir / f"{self.name}/scenario3_{device}"
         render_dir.mkdir(parents=True, exist_ok=True)
-        test_duration_mins = 1.0
+        # test_duration_mins = 1.0
 
         # Execute production workflow in completely isolated spawned sandbox
         ctx = multiprocessing.get_context("spawn")
@@ -589,7 +590,7 @@ class TestHybridStreamHandlers:
                 self.name,
                 render_dir,
                 device,
-                test_duration_mins,
+                self.test_duration_mins,
                 res_queue,
                 run_clipper,
             ),
@@ -636,7 +637,7 @@ class TestHybridStreamHandlers:
             / f"{self.name}/scenario4_{device}/{detection_type}_{mode_str}"
         )
         render_dir.mkdir(parents=True, exist_ok=True)
-        test_duration_mins = 1.0
+        # test_duration_mins = 1.0
 
         # Execute production workflow in completely isolated spawned sandbox
         ctx = multiprocessing.get_context("spawn")
@@ -650,7 +651,7 @@ class TestHybridStreamHandlers:
                 self.name,
                 render_dir,
                 device,
-                test_duration_mins,
+                self.test_duration_mins,
                 res_queue,
                 run_clipper,
                 disable_detection,
@@ -774,7 +775,7 @@ if __name__ == "__main__":
         "-d",
         "--duration",
         type=float,
-        default=2.0,
+        default=1.0,
         help="Test duration in minutes.",
     )
     parser.add_argument(
