@@ -88,10 +88,7 @@ from include.utils import (
     PipelineMapping,
     draw_label,
     get_detection_color,
-    get_display_frame_in_bytes,
     metadata2vdms_with_retry,
-    # AsyncVideoWriter,
-    # AsyncDisplayWriter,
 )
 
 
@@ -123,510 +120,6 @@ class AsyncVideoWriter:
         self.running = False
         self.thread.join()
         self.writer.release()
-
-
-class AsyncDisplayWriter:
-    """
-    Ultra-efficient frame-delivery client for live web streaming.
-    Pipes annotated BGR numpy matrices directly into matching Linux
-    POSIX Shared Memory allocation slots to prevent thread context-switching.
-    """
-
-    def __init__(self, target_fps, display_size, quality=60):
-        self.target_fps = float(target_fps)
-        self.disp_w, self.disp_h = display_size
-        self.quality = int(quality)
-
-        # Ingestion pipeline constructs
-        self.queue = queue.Queue(maxsize=10)
-        self.running = True
-
-        # State indicators requested by the FastAPI handler endpoints
-        self.handler = None
-
-    def start_worker(self):
-        self.thread = threading.Thread(target=self._write_loop, daemon=True)
-        self.thread.start()
-
-    def set_handler_context(self, handler_instance):
-        """Binds the active handler resource structures to secure index barriers."""
-        self.handler = handler_instance
-
-    def _write_loop(self):
-        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
-        print(
-            f"[DISPLAY-DEBUG] Background writer thread active for: {self.handler.name if self.handler else 'None'}",
-            flush=True,
-        )
-
-        while self.running or not self.queue.empty():
-            try:
-                item = self.queue.get(timeout=0.05)
-                if item is None:
-                    break
-
-                display_frame, frame_num = item
-
-                if self.handler is None:
-                    print(
-                        f"[DISPLAY-WARN] Missing handler context on Frame #{frame_num}",
-                        flush=True,
-                    )
-                    self.queue.task_done()
-                    continue
-
-                # --- TRACKING DIAGNOSTIC ASSERTION ---
-                current_last_id = (
-                    self.handler.mp_last_id.value
-                )  # self.handler.shared_details.get("last_id", -1)
-                if frame_num <= current_last_id:
-                    print(
-                        f"[DISPLAY-DROP] Skipping Frame #{frame_num} because it is older or equal to last_id ({current_last_id})",
-                        flush=True,
-                    )
-                    self.queue.task_done()  # 🔄 CRITICAL: Prevent queue thread starvation
-                    continue
-
-                frame_bytes = get_display_frame_in_bytes(
-                    display_frame,
-                    display_size=(self.disp_w, self.disp_h),
-                    quality=self.quality,
-                    return_bytes=True,
-                )
-
-                if not frame_bytes:
-                    print(
-                        f"[DISPLAY-ERROR] Compression failed on Frame #{frame_num}",
-                        flush=True,
-                    )
-                    self.queue.task_done()
-                    continue
-
-                frame_len = len(frame_bytes)
-                num_shms = len(self.handler.shms)
-
-                forbidden_idx = [
-                    self.handler.ready_buffer_idx.value,
-                    self.handler.reader_active_idx.value,
-                ]
-                available_idx = [i for i in range(num_shms) if i not in forbidden_idx]
-
-                if not available_idx:
-                    write_idx = (self.handler.ready_buffer_idx.value + 1) % num_shms
-                else:
-                    write_idx = available_idx[0]
-
-                # Zero-copy memory map transaction
-                shm_block = self.handler.shms[write_idx]
-                shm_block.buf[:frame_len] = frame_bytes  # memoryview(frame_bytes)
-
-                # Secure metrics tracking parameters
-                self.handler.shm_frame_lengths[write_idx] = frame_len
-                self.handler.ready_buffer_idx.value = write_idx
-                # self.handler.shared_details["last_id"] = frame_num
-                self.handler.mp_last_id.value = frame_num
-
-                # Signal FastAPI async engine handles safely
-                # if hasattr(self.handler, "loop") and self.handler.loop is not None:
-                #     self.handler.loop.call_soon_threadsafe(self.handler.frame_ready_event.set)
-                # else:
-                #     self.handler.frame_ready_event.set()
-                self.handler.mp_frame_ready_flag.value = True
-
-                self.queue.task_done()
-
-            except queue.Empty:
-                continue
-            except Exception as e:
-                print(f"[DISPLAY-FATAL-ERROR] Execution crashed: {e}", flush=True)
-                traceback.print_exc()
-                if "item" in locals():
-                    self.queue.task_done()
-                continue
-
-    # def _write_loopv2(self):
-    #     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
-    #     while self.running or not self.queue.empty():
-    #         try:
-    #             item = self.queue.get(timeout=0.05)
-    #             if item is None:
-    #                 break
-    #             display_frame, frame_num = item
-    #             # self.writer.write(frame)
-    #             # Compress to highly packable, network-ready JPEG byte streams
-    #             # ret, jpeg_buf = cv2.imencode('.jpg', display_frame, encode_param)
-    #             # if not ret:
-    #             #     self.queue.task_done()
-    #             #     continue
-    #             if self.handler is None:  # or not self.handler.active:
-    #                 self.queue.task_done()
-    #                 continue
-
-    #             if frame_num > self.handler.shared_details["last_id"]:
-    #                 frame_bytes = get_display_frame_in_bytes(
-    #                     display_frame,
-    #                     display_size=(self.disp_w, self.disp_h),
-    #                     quality=self.quality,
-    #                     return_bytes=True,
-    #                 )
-    #                 if not frame_bytes:
-    #                     self.queue.task_done()
-    #                     continue
-
-    #                 # frame_bytes = jpeg_buf.tobytes()
-    #                 frame_len = len(frame_bytes)
-    #                 num_shms = len(self.handler.shms)
-
-    #                 # Locate alternative ring memory locations away from browser client read operations
-    #                 forbidden_idx = [self.handler.ready_buffer_idx.value, self.handler.reader_active_idx.value]
-    #                 available_idx = [i for i in range(num_shms) if i not in forbidden_idx]
-
-    #                 if not available_idx:
-    #                     # Fallback to structural ring increments if locks collide
-    #                     write_idx = (self.handler.ready_buffer_idx.value + 1) % num_shms
-    #                 else:
-    #                     write_idx = available_idx[0]
-
-    #                 # Direct zero-copy commit straight to volatile RAM mappings
-    #                 shm_block = self.handler.shms[write_idx]
-    #                 shm_block.buf[:frame_len] = memoryview(frame_bytes)
-
-    #                 # Update pipeline sync trackers across worker contexts
-    #                 self.handler.shm_frame_lengths[write_idx] = frame_len
-    #                 self.handler.ready_buffer_idx.value = write_idx
-
-    #                 # Assign atomic sequence token identifiers safely
-    #                 self.handler.shared_details["last_id"] = frame_num
-
-    #                 # Fire threading synchronization barriers to release blocked generator loops
-    #                 # self.handler.frame_ready_event.set()
-    #                 if hasattr(self.handler, "loop") and self.handler.loop is not None:
-    #                     self.handler.loop.call_soon_threadsafe(self.handler.frame_ready_event.set)
-    #                 else:
-    #                     # Fallback guard if the frame context hasn't registered a loop hook yet
-    #                     self.handler.frame_ready_event.set()
-
-    #                 self.queue.task_done()
-    #         except queue.Empty:
-    #             continue
-    #         except Exception as e:
-    #             print(f"[ASYNC-DISPLAY-ERROR] Silent pool worker drop: {e}")
-    #             traceback.print_exc()
-    #             continue
-
-    # def _write_loopv1(self):
-    #     """Background daemon consumer that compresses matrices directly to /dev/shm."""
-    #     # Performance parameters to maintain strict BT.709 encoding constraints
-    #     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
-
-    #     while self.running or not self.queue.empty():
-    #         try:
-    #             item = self.queue.get(timeout=0.05)
-    #             if item is None:
-    #                 break
-
-    #             display_frame, frame_num = item
-    #             if self.handler is None or not self.handler.active:
-    #                 self.queue.task_done()
-    #                 continue
-
-    #             # Ensure image sizes perfectly correspond with standard API expectations
-    #             if display_frame.shape[1] != self.disp_w or display_frame.shape[0] != self.disp_h:
-    #                 display_frame = cv2.resize(display_frame, (self.disp_w, self.disp_h), interpolation=cv2.INTER_NEAREST)
-
-    #             # Compress to highly packable, network-ready JPEG byte streams
-    #             ret, jpeg_buf = cv2.imencode('.jpg', display_frame, encode_param)
-    #             if not ret:
-    #                 self.queue.task_done()
-    #                 continue
-
-    #             frame_bytes = jpeg_buf.tobytes()
-    #             frame_len = len(frame_bytes)
-    #             num_shms = len(self.handler.shms)
-
-    #             # Locate alternative ring memory locations away from browser client read operations
-    #             forbidden_idx = [self.handler.ready_buffer_idx.value, self.handler.reader_active_idx.value]
-    #             available_idx = [i for i in range(num_shms) if i not in forbidden_idx]
-
-    #             if not available_idx:
-    #                 # Fallback to structural ring increments if locks collide
-    #                 write_idx = (self.handler.ready_buffer_idx.value + 1) % num_shms
-    #             else:
-    #                 write_idx = available_idx[0]
-
-    #             # Direct zero-copy commit straight to volatile RAM mappings
-    #             shm_block = self.handler.shms[write_idx]
-    #             shm_block.buf[:frame_len] = frame_bytes
-
-    #             # Update pipeline sync trackers across worker contexts
-    #             self.handler.shm_frame_lengths[write_idx] = frame_len
-    #             self.handler.ready_buffer_idx.value = write_idx
-
-    #             # Assign atomic sequence token identifiers safely
-    #             self.handler.shared_details["last_id"] = frame_num
-
-    #             # Fire threading synchronization barriers to release blocked generator loops
-    #             # self.handler.frame_ready_event.set()
-    #             if hasattr(self.handler, "loop") and self.handler.loop is not None:
-    #                 self.handler.loop.call_soon_threadsafe(self.handler.frame_ready_event.set)
-    #             else:
-    #                 # Fallback guard if the frame context hasn't registered a loop hook yet
-    #                 self.handler.frame_ready_event.set()
-
-    #             self.queue.task_done()
-    #         except queue.Empty:
-    #             continue
-    #         except Exception as e:
-    #             print(f"[ASYNC-DISPLAY-ERROR] Failed streaming injection: {e}")
-    #             continue
-
-    def write_frame(self, display_frame, frame_num):
-        """Thread-safe entry hook to stash processed canvas items into the workspace."""
-        # if not self.active:
-        #     return
-        # try:
-        #     # Drop structural allocations under pressure if the worker falls behind
-        #     self.queue.put_nowait((display_frame, frame_num))
-        # except queue.Full:
-        #     pass
-        self.queue.put((display_frame, frame_num))
-
-    def release(self):
-        """Terminates internal consumers gracefully to ensure process convergence."""
-        # self.active = False
-        self.running = False
-        self.queue.put(None)
-        if self.thread.is_alive():
-            self.thread.join(timeout=1.0)
-
-
-# class AsyncDisplayVideoWriter:
-#     """
-#     Modified streaming writer based on AsyncVideoWriter layout.
-#     Sequentially pipes annotated matrices directly into Linux POSIX
-#     Shared Memory allocations without frame drop filters.
-#     """
-#     def __init__(self, target_fps, display_size, quality=60):
-#         self.target_fps = float(target_fps)
-#         self.disp_w, self.disp_h = display_size
-#         self.quality = int(quality)
-
-#         # Ingestion pipeline constructs mirroring AsyncVideoWriter
-#         self.queue = queue.Queue(maxsize=2)
-#         self.running = True
-#         self.handler = None
-
-#         # Start the sequential background thread
-#         self.thread = threading.Thread(target=self._write_loop, daemon=True)
-#         self.thread.start()
-
-#     def set_handler_context(self, handler_instance):
-#         """Binds the parent handler resource structures."""
-#         self.handler = handler_instance
-
-#     def _write_loop(self):
-#         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
-
-#         while self.running:  # or not self.queue.empty():
-#             try:
-#                 item = self.queue.get(timeout=0.05)
-#                 if item is None:
-#                     break
-
-#                 display_frame, frame_num = item
-#                 if self.handler is None or not self.handler.active:
-#                     self.queue.task_done()
-#                     continue
-
-#                 # Ensure image matches standard spatial expectations layout safely
-#                 if display_frame.shape[1] != self.disp_w or display_frame.shape[0] != self.disp_h:
-#                     display_frame = cv2.resize(
-#                         display_frame, (self.disp_w, self.disp_h), interpolation=cv2.INTER_NEAREST
-#                     )
-
-#                 # Compress to network-ready JPEG byte streams
-#                 ret, jpeg_buf = cv2.imencode('.jpg', display_frame, encode_param)
-#                 if not ret:
-#                     self.queue.task_done()
-#                     continue
-
-#                 frame_bytes = jpeg_buf.tobytes()
-#                 frame_len = len(frame_bytes)
-#                 num_shms = len(self.handler.shms)
-
-#                 # Sequential Ring Buffer Allocation Step
-#                 write_idx = (self.handler.ready_buffer_idx.value + 1) % num_shms
-
-#                 # Commit straight to the volatile shared RAM mapping
-#                 shm_block = self.handler.shms[write_idx]
-#                 shm_block.buf[:frame_len] = memoryview(frame_bytes)
-
-#                 # Update lengths and index pointers first so the reader has data
-#                 self.handler.shm_frame_lengths[write_idx] = frame_len
-#                 self.handler.ready_buffer_idx.value = write_idx
-#                 self.handler.mp_last_id.value = frame_num
-
-#                 # Flip the shared IPC flag to wake up the FastAPI generator
-#                 self.handler.mp_frame_ready_flag.value = True
-
-#                 self.queue.task_done()
-
-#                 # if self.queue.empty():
-#                 #     self.handler.mp_frame_ready_flag.value = False
-#             except queue.Empty:
-#                 continue
-#             except Exception as e:
-#                 print(f"[STREAM-WRITER-ERROR] Failed streaming injection: {e}")
-#                 if 'item' in locals():
-#                     self.queue.task_done()
-#                 continue
-
-#     # def write_frame(self, frame, frame_num):
-#     #     """Appends frames to the background delivery thread queue."""
-#     #     if self.running:
-#     #         self.queue.put((frame, frame_num))
-
-#     # def release(self):
-#     #     """Gracefully terminates and joins the background thread loop."""
-#     #     self.running = False
-#     #     self.queue.put(None)
-#     #     if self.thread.is_alive():
-#     #         self.thread.join()
-
-#     def write_frame(self, frame, frame_num):
-#         """Thread-safe lossy queue ingestion."""
-#         if not self.running:
-#             return
-#         try:
-#             # 2. 🔄 FIX: Use non-blocking insertions to prevent ThreadPool starvation
-#             self.queue.put_nowait((frame, frame_num))
-#         except queue.Full:
-#             try:
-#                 # Evict the old, stale frame to ensure real-time rendering continuity
-#                 self.queue.get_nowait()
-#                 self.queue.task_done()
-#                 self.queue.put_nowait((frame, frame_num))
-#             except Exception:
-#                 pass
-
-#     def release(self):
-#         self.running = False
-#         try:
-#             while not self.queue.empty():
-#                 self.queue.get_nowait()
-#                 self.queue.task_done()
-#         except Exception:
-#             pass
-#         self.queue.put(None)
-
-# class AsyncDisplayVideoWriter:
-#     """
-#     Lock-free sequential frame streaming bridge optimized for 8K pipelines.
-#     Directly targets the reverted FastAPI main.py frame_generator loop structures.
-#     """
-#     def __init__(self, target_fps, display_size, quality=60):
-#         self.target_fps = float(target_fps)
-#         self.disp_w, self.disp_h = display_size
-#         self.quality = int(quality)
-
-#         # Enforce a tight bounded queue to eliminate memory leaks and thread pool starvation
-#         self.queue = queue.Queue(maxsize=1)
-#         self.running = True
-#         self.handler = None
-
-#         self.thread = threading.Thread(target=self._write_loop, daemon=True)
-#         self.thread.start()
-
-#     def set_handler_context(self, handler_instance):
-#         """Binds the stream handler context to pass parameters across memory spaces."""
-#         self.handler = handler_instance
-
-#     def _write_loop(self):
-#         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
-
-#         while self.running:
-#             try:
-#                 # Controlled timeout prevents zombie threads during service re-engineering
-#                 item = self.queue.get(timeout=0.02)
-#                 if item is None:
-#                     break
-
-#                 display_frame, frame_num = item
-#                 if self.handler is None or not self.handler.active:
-#                     self.queue.task_done()
-#                     continue
-
-#                 # Enforce spatial aspect resolution constraints
-#                 if display_frame.shape[1] != self.disp_w or display_frame.shape[0] != self.disp_h:
-#                     display_frame = cv2.resize(
-#                         display_frame, (self.disp_w, self.disp_h), interpolation=cv2.INTER_NEAREST
-#                     )
-
-#                 # Compress matrix to network-ready JPEGs
-#                 ret, jpeg_buf = cv2.imencode('.jpg', display_frame, encode_param)
-#                 if not ret:
-#                     self.queue.task_done()
-#                     continue
-
-#                 frame_bytes = jpeg_buf.tobytes()
-#                 frame_len = len(frame_bytes)
-#                 num_shms = len(self.handler.shms)
-
-#                 # Lockless round-robin step selection across the pre-allocated POSIX buffers
-#                 write_idx = (self.handler.ready_buffer_idx.value + 1) % num_shms
-
-#                 # Commit bytes directly into volatile Linux shared RAM (/dev/shm)
-#                 shm_block = self.handler.shms[write_idx]
-#                 shm_block.buf[:frame_len] = memoryview(frame_bytes)
-
-#                 # --- ATOMIC METRICS UPDATES ALIGNED WITH REVERTED main.py ---
-#                 self.handler.shm_frame_lengths[write_idx] = frame_len
-#                 self.handler.ready_buffer_idx.value = write_idx
-
-#                 # Synchronize the Manager dict proxy that main.py parses on line 197!
-#                 self.handler.shared_details["last_id"] = frame_num
-#                 self.handler.mp_last_id.value = frame_num
-
-#                 # Thread-safely fire the asyncio.Event to wake up the web generator loop
-#                 if hasattr(self.handler, "loop") and self.handler.loop is not None:
-#                     self.handler.loop.call_soon_threadsafe(self.handler.frame_ready_event.set)
-#                 else:
-#                     self.handler.frame_ready_event.set()
-
-#                 self.queue.task_done()
-#             except queue.Empty:
-#                 continue
-#             except Exception as e:
-#                 print(f"[STREAM-WRITER-ERROR] Frame streaming execution failed: {e}", flush=True)
-#                 if 'item' in locals():
-#                     self.queue.task_done()
-#                 continue
-
-#     def write_frame(self, frame, frame_num):
-#         """Appends frames to the background delivery thread using non-blocking evictions."""
-#         if not self.running:
-#             return
-#         try:
-#             self.queue.put_nowait((frame, frame_num))
-#         except queue.Full:
-#             try:
-#                 # Evict the old, stale frame slot to prioritize fresh real-time matrices
-#                 self.queue.get_nowait()
-#                 self.queue.task_done()
-#                 self.queue.put_nowait((frame, frame_num))
-#             except Exception:
-#                 pass
-
-#     def release(self):
-#         """Gracefully drains workers and joins the tracking daemon loops."""
-#         self.running = False
-#         try:
-#             while not self.queue.empty():
-#                 self.queue.get_nowait()
-#                 self.queue.task_done()
-#         except Exception:
-#             pass
-#         self.queue.put(None)
 
 
 class AsyncDisplayVideoWriter:
@@ -1209,90 +702,90 @@ def get_bb_overlay(display_frame, metadata_or_bbs, scale_display, disp_size):
     return display_frame
 
 
-def test_rendering_worker(queue, display_size, out_path, target_fps):
-    """
-    Ultra-efficient video saver for TEST_MODE.
-    Pipes raw BGR frames directly into an internal FFmpeg engine subshell.
-    """
-    disp_w, disp_h = display_size
+# def test_rendering_worker(queue, display_size, out_path, target_fps):
+#     """
+#     Ultra-efficient video saver for TEST_MODE.
+#     Pipes raw BGR frames directly into an internal FFmpeg engine subshell.
+#     """
+#     disp_w, disp_h = display_size
 
-    # Construct optimized MPEG-4 parameters to match main pipeline architecture
-    ffmpeg_cmd = [
-        "ffmpeg",
-        "-y",
-        "-probesize",
-        "32",
-        "-analyzeduration",
-        "0",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "bgr24",
-        "-s",
-        f"{disp_w}x{disp_h}",
-        "-r",
-        str(int(target_fps)),
-        "-i",
-        "-",
-        "-c:v",
-        "libx264",
-        "-crf",
-        "23",
-        # "-c:v", "mpeg4",  # Or "libx264" if you prefer H.264
-        # "-qscale:v", "4",  # Quality scale (use -crf 23 if using libx264)
-        str(out_path),
-    ]
+#     # Construct optimized MPEG-4 parameters to match main pipeline architecture
+#     ffmpeg_cmd = [
+#         "ffmpeg",
+#         "-y",
+#         "-probesize",
+#         "32",
+#         "-analyzeduration",
+#         "0",
+#         "-f",
+#         "rawvideo",
+#         "-pix_fmt",
+#         "bgr24",
+#         "-s",
+#         f"{disp_w}x{disp_h}",
+#         "-r",
+#         str(int(target_fps)),
+#         "-i",
+#         "-",
+#         "-c:v",
+#         "libx264",
+#         "-crf",
+#         "23",
+#         # "-c:v", "mpeg4",  # Or "libx264" if you prefer H.264
+#         # "-qscale:v", "4",  # Quality scale (use -crf 23 if using libx264)
+#         str(out_path),
+#     ]
 
-    # Spawn background daemon process
-    proc = subprocess.Popen(
-        ffmpeg_cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        bufsize=10**7,
-    )
+#     # Spawn background daemon process
+#     proc = subprocess.Popen(
+#         ffmpeg_cmd,
+#         stdin=subprocess.PIPE,
+#         stdout=subprocess.DEVNULL,
+#         stderr=subprocess.DEVNULL,
+#         bufsize=10**7,
+#     )
 
-    try:
-        while True:
-            item = queue.get()
-            if item is None:  # Sentinel value to drain and close the process
-                break
+#     try:
+#         while True:
+#             item = queue.get()
+#             if item is None:  # Sentinel value to drain and close the process
+#                 break
 
-            display_frame, frameNum, metadata_or_bbs, class_list = item
-            # display_frame = np.ascontiguousarray(display_frame)
-            scale_display_x = disp_w / 640
-            scale_display_y = disp_h / 640
+#             display_frame, frameNum, metadata_or_bbs, class_list = item
+#             # display_frame = np.ascontiguousarray(display_frame)
+#             scale_display_x = disp_w / 640
+#             scale_display_y = disp_h / 640
 
-            # --- Draw Detection Overlays ---
-            if isinstance(metadata_or_bbs, dict):
-                # Object Mode (YOLO Structs)
-                display_frame = get_metadata_overlay(
-                    display_frame,
-                    metadata_or_bbs,
-                    class_list,
-                    (scale_display_x, scale_display_y),
-                    (disp_w, disp_h),
-                )
+#             # --- Draw Detection Overlays ---
+#             if isinstance(metadata_or_bbs, dict):
+#                 # Object Mode (YOLO Structs)
+#                 display_frame = get_metadata_overlay(
+#                     display_frame,
+#                     metadata_or_bbs,
+#                     class_list,
+#                     (scale_display_x, scale_display_y),
+#                     (disp_w, disp_h),
+#                 )
 
-            elif metadata_or_bbs is not None:
-                # # Motion / Smart Filtering Overlay Path
-                display_frame = get_bb_overlay(
-                    display_frame,
-                    metadata_or_bbs,
-                    (scale_display_x, scale_display_y),
-                    (disp_w, disp_h),
-                )
+#             elif metadata_or_bbs is not None:
+#                 # # Motion / Smart Filtering Overlay Path
+#                 display_frame = get_bb_overlay(
+#                     display_frame,
+#                     metadata_or_bbs,
+#                     (scale_display_x, scale_display_y),
+#                     (disp_w, disp_h),
+#                 )
 
-            # Pipe continuous raw contiguous memory block directly into kernel filesystem handles
-            proc.stdin.write(np.ascontiguousarray(display_frame).tobytes())
-            # queue.task_done()
+#             # Pipe continuous raw contiguous memory block directly into kernel filesystem handles
+#             proc.stdin.write(np.ascontiguousarray(display_frame).tobytes())
+#             # queue.task_done()
 
-    except Exception as e:
-        print(f"[TEST-WORKER-EXCEPTION] Video compilation error: {e}")
-    finally:
-        if proc.stdin:
-            proc.stdin.close()
-        proc.wait()
+#     except Exception as e:
+#         print(f"[TEST-WORKER-EXCEPTION] Video compilation error: {e}")
+#     finally:
+#         if proc.stdin:
+#             proc.stdin.close()
+#         proc.wait()
 
 
 class DeviceBaseHandler:
@@ -2423,7 +1916,7 @@ class DeviceBaseHandler:
             self.status = "DONE"
             self._is_stopped = True
             print(
-                "[TEST HARNESS] Teardown complete. Releasing session cleanly.\n",
+                "[STOPPING] Teardown complete. Releasing session cleanly.\n",
                 flush=True,
             )
 
@@ -3869,263 +3362,6 @@ class DeviceBaseHandler:
         except Exception:
             traceback.print_exc()
         # return
-
-    def frame2outputv3(self, display_frame, frame_num, metadata=None, class_list=None):
-        """Processes and delivers operational live-mode matrices safely down to POSIX shared memory slots."""
-
-        # Ensure memory formats are fully detached from internal VRAM contexts
-        if hasattr(display_frame, "is_cuda") and display_frame.is_cuda:
-            display_frame = display_frame.cpu().numpy()
-        elif isinstance(display_frame, torch.Tensor):
-            display_frame = display_frame.detach().cpu().numpy()
-
-        # 🔄 FIX: Invert colors from RGB to structural BGR layout to resolve the blue tint
-        try:
-            display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
-        except Exception:
-            pass  # Safety fallback guard if the tensor layout was already BGR format
-
-        if hasattr(display_frame, "copy"):
-            clean_canvas = display_frame.copy()
-        else:
-            clean_canvas = np.ascontiguousarray(display_frame)
-
-        if hasattr(self, "async_writer") and self.async_writer is not None:
-            self.async_writer.write_frame(clean_canvas, frame_num)
-
-    def frame2outputv2(
-        self,
-        device_frame,
-        frameNum,
-        metadata_or_bbs,
-        class_list,
-        metrics,
-    ):
-        scale_display_x = self.disp_w / 640
-        scale_display_y = self.disp_h / 640
-
-        if self.device_input == "cuda" and torch.is_tensor(device_frame):
-            # 2. Fast Inline VRAM Downscaling into our static memory slot
-            # Reshape to (Batch, Channel, Height, Width) seamlessly without duplicating data
-            gpu_tensor = device_frame[None, :].permute(0, 3, 1, 2).float()
-
-            resized_tensor = torch.nn.functional.interpolate(
-                gpu_tensor,
-                size=(self.disp_h, self.disp_w),
-                mode="nearest",
-            )
-
-            # CONVERTS TO CPU EARLIER (WORKS but lowers fps)
-            # hwc_byte_tensor = resized_tensor.squeeze(0).permute(1, 2, 0).byte()
-            # cpu_tensor = hwc_byte_tensor.cpu()
-            # bgr_contiguous = cpu_tensor.contiguous()
-
-            # Using copy_() avoids creating any runtime allocations or memory-stride drift.
-            self.static_gpu_byte_bchw.copy_(resized_tensor.byte())
-
-            # Safely reshape the pre-allocated, locked GPU memory layout back to standard HWC array topology.
-            # Since the underlying array layout is strictly contiguous, this permute is guaranteed
-            # to be zero-copy on the GPU and free from memory race stalls.
-            bgr_contiguous = self.static_gpu_byte_bchw.squeeze(0).permute(1, 2, 0)
-
-            # 1. Grab the current free pinned slot tracking variables from your reader
-            d2h_idx = self.reader.d2h_selector
-            pinned_tensor_buf = self.reader.d2h_buffers[d2h_idx]
-
-            # c_idx = self.canvas_selector
-            # current_canvas = self.static_host_canvases[c_idx]
-
-            # host_tensor_view = torch.as_tensor(current_canvas, device="cpu")
-
-            # 3. Non-blocking asynchronous PCIe DMA Download directly into our page-locked canvas
-            with torch.cuda.stream(self.reader.download_stream):
-                # pinned_tensor = torch.from_numpy(current_canvas).cuda()
-                pinned_tensor_buf.copy_(bgr_contiguous, non_blocking=True)
-
-            # Synchronize only the side download stream layout channel
-            self.reader.download_stream.synchronize()
-
-            cpu_360p_frame = self.reader.d2h_numpys[d2h_idx]
-
-            # 5. Non-Blocking Push straight to your background AsyncVideoWriter thread pool
-            # We pass a direct .copy() slice so the hot loop can instantly reuse the pinned ring buffer
-            display_frame = np.array(cpu_360p_frame, copy=True, order="C")
-
-            if display_frame is not None and display_frame.shape[-1] == 3:
-                display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
-
-            # --- Draw Detection Overlays ---
-            if isinstance(metadata_or_bbs, dict):
-                # Object Mode (YOLO Structs)
-                display_frame = get_metadata_overlay(
-                    display_frame,
-                    metadata_or_bbs,
-                    class_list,
-                    (scale_display_x, scale_display_y),
-                    (self.disp_w, self.disp_h),
-                    is_bgr=True,
-                )
-
-            elif metadata_or_bbs is not None:
-                # # Motion / Smart Filtering Overlay Path
-                display_frame = get_bb_overlay(
-                    display_frame,
-                    metadata_or_bbs,
-                    (scale_display_x, scale_display_y),
-                    (self.disp_w, self.disp_h),
-                )
-            if hasattr(display_frame, "copy"):
-                clean_canvas = display_frame.copy()
-            else:
-                clean_canvas = np.ascontiguousarray(display_frame)
-            self.async_writer.write_frame(clean_canvas, frameNum)
-            # self.canvas_selector = 1 - self.canvas_selector
-            self.reader.d2h_selector = 1 - self.reader.d2h_selector
-
-        else:
-            # Reusable baseline track for CPU execution mappings
-            display_frame = cv2.resize(
-                device_frame,
-                (self.disp_w, self.disp_h),
-                interpolation=cv2.INTER_NEAREST,
-            )
-            # if metrics["bbs"] is not None:
-            #     for box in metrics["bbs"]:
-            #         cv2.rectangle(cpu_resized, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 255, 0), 2)
-            # --- Draw Detection Overlays ---
-            if isinstance(metadata_or_bbs, dict):
-                # Object Mode (YOLO Structs)
-                display_frame = get_metadata_overlay(
-                    display_frame,
-                    metadata_or_bbs,
-                    class_list,
-                    (scale_display_x, scale_display_y),
-                    (self.disp_w, self.disp_h),
-                    is_bgr=True,
-                )
-
-            elif metadata_or_bbs is not None:
-                # # Motion / Smart Filtering Overlay Path
-                display_frame = get_bb_overlay(
-                    display_frame,
-                    metadata_or_bbs,
-                    (scale_display_x, scale_display_y),
-                    (self.disp_w, self.disp_h),
-                )
-            self.async_writer.write_frame(display_frame, frameNum)
-
-        return
-
-    def frame2outputv1(
-        self,
-        device_frame,
-        frameNum,
-        data_to_draw,
-        class_list,
-    ):
-        # scale_display_x = self.disp_w / 640
-        # scale_display_y = self.disp_h / 640
-
-        if self.device_input == "cuda" and torch.is_tensor(device_frame):
-            # 2. Fast Inline VRAM Downscaling into our static memory slot
-            # Reshape to (Batch, Channel, Height, Width) seamlessly without duplicating data
-            gpu_tensor = device_frame[None, :].permute(0, 3, 1, 2).float()
-
-            resized_tensor = torch.nn.functional.interpolate(
-                gpu_tensor,
-                size=(self.disp_h, self.disp_w),
-                mode="nearest",
-            )
-
-            # CONVERTS TO CPU EARLIER (WORKS but lowers fps)
-            # hwc_byte_tensor = resized_tensor.squeeze(0).permute(1, 2, 0).byte()
-            # cpu_tensor = hwc_byte_tensor.cpu()
-            # bgr_contiguous = cpu_tensor.contiguous()
-
-            # Using copy_() avoids creating any runtime allocations or memory-stride drift.
-            self.static_gpu_byte_bchw.copy_(resized_tensor.byte())
-
-            # Safely reshape the pre-allocated, locked GPU memory layout back to standard HWC array topology.
-            # Since the underlying array layout is strictly contiguous, this permute is guaranteed
-            # to be zero-copy on the GPU and free from memory race stalls.
-            bgr_contiguous = self.static_gpu_byte_bchw.squeeze(0).permute(1, 2, 0)
-
-            # 1. Grab the current free pinned slot tracking variables from your reader
-            d2h_idx = self.reader.d2h_selector
-            pinned_tensor_buf = self.reader.d2h_buffers[d2h_idx]
-
-            # c_idx = self.canvas_selector
-            # current_canvas = self.static_host_canvases[c_idx]
-
-            # host_tensor_view = torch.as_tensor(current_canvas, device="cpu")
-
-            # 3. Non-blocking asynchronous PCIe DMA Download directly into our page-locked canvas
-            with torch.cuda.stream(self.reader.download_stream):
-                # pinned_tensor = torch.from_numpy(current_canvas).cuda()
-                pinned_tensor_buf.copy_(bgr_contiguous, non_blocking=True)
-
-            # Synchronize only the side download stream layout channel
-            self.reader.download_stream.synchronize()
-
-            cpu_360p_frame = self.reader.d2h_numpys[d2h_idx]
-            print(
-                f"[FASTAPI-TRACE A] Frame #{frameNum} downloaded from GPU. Shape: {cpu_360p_frame.shape if cpu_360p_frame is not None else 'NONE'}",
-                flush=True,
-            )
-            # Explicitly update shared state indicators so main.py can map the buffer
-            self.ready_buffer_idx.value = d2h_idx
-            # self.shared_details["last_id"] = frameNum
-
-            # 5. Non-Blocking Push straight to your background AsyncVideoWriter thread pool
-            # We pass a direct .copy() slice so the hot loop can instantly reuse the pinned ring buffer
-            display_frame = np.array(cpu_360p_frame, copy=True, order="C")
-
-            if display_frame is not None and display_frame.shape[-1] == 3:
-                display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
-
-            self.reader.d2h_selector = 1 - self.reader.d2h_selector
-
-        else:
-            display_frame = cv2.resize(
-                device_frame,
-                (self.disp_w, self.disp_h),
-                interpolation=cv2.INTER_NEAREST,
-            )
-            # disp_frame = np.copy(
-            #     tensor2opencv(cpu_resized, self.config.device_input, is_bgr=True)
-            # )
-
-        # PUSH FRAME UNCONDITIONALLY: Ensures the test encoder gets raw frame tokens
-        try:
-            if (
-                hasattr(self, "render_queue")
-                and getattr(self, "render_queue", None) is not None
-                # and not self.render_queue.full()
-            ):
-                print(
-                    f"[FASTAPI-TRACE B] Frame #{frameNum} pushing to render_queue. Current Q Size: {self.render_queue.qsize()}",
-                    flush=True,
-                )
-                self.render_queue.put_nowait(  # put(  put_nowait
-                    (
-                        display_frame,
-                        frameNum,
-                        data_to_draw,
-                        class_list,
-                    )
-                )
-                print(
-                    f"[FASTAPI-TRACE C] Frame #{frameNum} successfully enqueued into render_queue.",
-                    flush=True,
-                )
-                if hasattr(self, "signal_queue") and self.signal_queue is not None:
-                    try:
-                        # Non-blocking push to unstick main.py
-                        self.signal_queue.put_nowait((True, frameNum))
-                    except queue.Full:
-                        pass
-        except queue.Full:
-            pass
 
     def pipeline_fn(
         self,

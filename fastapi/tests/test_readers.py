@@ -41,6 +41,7 @@ from include.default_configs import (
     THRESHOLD_VALUE,
 )
 from include.handlers import (
+    AsyncVideoWriter,
     CPUStreamHandler,
     DeviceBaseHandler,
     GPUStreamHandler,
@@ -103,34 +104,6 @@ def fps_comparison_chart(chart_path, results, fps_key="Pipeline FPS (Video frame
         print("Skipping chart generation: error occurred.")
 
 
-class AsyncVideoWriter:
-    """Handles disk saving operations asynchronously on a background thread."""
-
-    def __init__(self, path, fourcc, fps, size):
-        self.writer = cv2.VideoWriter(path, fourcc, fps, size)
-        self.queue = queue.Queue()
-        self.running = True
-        self.thread = threading.Thread(target=self._write_loop, daemon=True)
-        self.thread.start()
-
-    def _write_loop(self):
-        while self.running or not self.queue.empty():
-            try:
-                frame = self.queue.get(timeout=0.05)
-                self.writer.write(frame)
-                self.queue.task_done()
-            except queue.Empty:
-                continue
-
-    def write_frame(self, frame):
-        self.queue.put(frame)
-
-    def release(self):
-        self.running = False
-        self.thread.join()
-        self.writer.release()
-
-
 class DummyProcess:
     def start(self):
         pass
@@ -185,7 +158,7 @@ def setup_context(request):
     )
     request.cls.result_dir.mkdir(parents=True, exist_ok=True)
     request.cls.benchmarks = []
-    request.cls.csv_filename = f"pipeline_benchmarks_{request.cls.name}.csv"
+    request.cls.csv_filename = f"reader_benchmarks_{request.cls.name}.csv"
     request.cls.csv_path = request.cls.result_dir / request.cls.csv_filename
 
     request.cls.active = True
@@ -257,7 +230,7 @@ def each_test_setup(request):
     test_class_self._testMethodName = f"{device.upper()}Reader"
 
     # video_output_name = f"{test_class_self._testMethodName}_detections_output.mp4"
-    vid_dir = test_class_self.result_dir / "results"
+    vid_dir = test_class_self.result_dir / device
     vid_dir.mkdir(parents=True, exist_ok=True)
 
     # Handler.__init__ (remaining items)
@@ -746,7 +719,7 @@ class TestReader:
             short_name = "rtsp"
         else:
             short_name = Path(self.source).stem
-        video_output_name = f"{self._testMethodName}_{short_name}_{self.device}.mp4"
+        video_output_name = f"{self._testMethodName}_{short_name}.mp4"
         out_path = os.path.join(test_dir, video_output_name)
         self.output_path = (
             out_path  # f"{self.config.SHARED_OUTPUT}/{short_name}_{self.device}.mp4"

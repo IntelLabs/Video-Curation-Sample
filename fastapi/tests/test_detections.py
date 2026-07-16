@@ -41,6 +41,7 @@ from include.default_configs import (
     THRESHOLD_VALUE,
 )
 from include.handlers import (
+    AsyncVideoWriter,
     CPUStreamHandler,
     DeviceBaseHandler,
     GPUStreamHandler,
@@ -105,34 +106,6 @@ def fps_comparison_chart(chart_path, results, fps_key="Pipeline FPS (Video frame
         print("Skipping chart generation: error occurred.")
 
 
-class AsyncVideoWriter:
-    """Handles disk saving operations asynchronously on a background thread."""
-
-    def __init__(self, path, fourcc, fps, size):
-        self.writer = cv2.VideoWriter(path, fourcc, fps, size)
-        self.queue = queue.Queue()
-        self.running = True
-        self.thread = threading.Thread(target=self._write_loop, daemon=True)
-        self.thread.start()
-
-    def _write_loop(self):
-        while self.running or not self.queue.empty():
-            try:
-                frame = self.queue.get(timeout=0.05)
-                self.writer.write(frame)
-                self.queue.task_done()
-            except queue.Empty:
-                continue
-
-    def write_frame(self, frame):
-        self.queue.put(frame)
-
-    def release(self):
-        self.running = False
-        self.thread.join()
-        self.writer.release()
-
-
 class DummyProcess:
     def start(self):
         pass
@@ -179,25 +152,27 @@ def setup_context(request):
     else:
         request.cls.name = "rtsp"
         request.cls.is_rtsp = True
-    # request.cls.test_duration_mins = float(os.getenv("TEST_DURATION_MINS", 0.25))
 
     model_name = os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT)
     request.cls.result_dir = (
         test_dir / f"{current_test_filename}_results/{model_name}" / request.cls.name
     )
     request.cls.result_dir.mkdir(parents=True, exist_ok=True)
+
+    # Benchmark statistics
     request.cls.benchmarks = []
     request.cls.csv_filename = (
-        f"pipeline_benchmarks_{model_name}_{request.cls.name}.csv"
+        f"detections_benchmarks_{model_name}_{request.cls.name}.csv"
     )
     request.cls.csv_path = request.cls.result_dir / request.cls.csv_filename
 
     request.cls.active = True
     request.cls.active_streams = {}
 
+    # RUN ALL PARAMETERIZED TESTS ----------------------------------------
     yield
 
-    # Summarize Benchmarks
+    # FINAL CSV EXPORT  --------------------------------------------------
     if request.cls.benchmarks:
         # Filter and exclude rows that were interrupted or failed initialization due to an early pytest skip
         request.cls.benchmarks = [
@@ -221,6 +196,7 @@ def setup_context(request):
                 row["Pipeline Speedup vs CPU"] = "Baseline (CPU)"
 
         keys = results[0].keys()
+
         with open(str(request.cls.csv_path), "w", newline="") as f:
             dict_writer = csv.DictWriter(f, fieldnames=keys)
             dict_writer.writeheader()
@@ -270,6 +246,11 @@ def each_test_setup(request):
     detection_type = request.node.callspec.params.get("detection_type")
     sf_enabled = request.node.callspec.params.get("sf_enabled")
 
+    if detection_type == "motion" and not sf_enabled:
+        pytest.skip(
+            "Pure YOLO mode is structurally invalid for detection_type 'motion'.\n"
+        )
+
     test_class_self._testMethodName = (
         f"sf_{detection_type}_{device}"
         if sf_enabled
@@ -277,12 +258,13 @@ def each_test_setup(request):
     )
 
     # video_output_name = f"{test_class_self._testMethodName}_detections_output.mp4"
-    vid_dir = test_class_self.result_dir / "results"
+    vid_dir = test_class_self.result_dir / device
     vid_dir.mkdir(parents=True, exist_ok=True)
 
     # Handler.__init__ (remaining items)
     # 1. Re-initialize a fresh configuration object
     test_class_self.config = PipelineConfig(
+        SHARED_OUTPUT=str(test_class_self.result_dir),
         CUSTOM_MODEL_FLAG=os.getenv("CUSTOM_MODEL_FLAG", CUSTOM_MODEL_FLAG_DEFAULT),
         DEVICE=device.upper(),
         OMIT_DETECTIONS_FLAG=True,
@@ -298,7 +280,7 @@ def each_test_setup(request):
 
     # test_video_output_path = os.path.join(str(vid_dir), video_output_name)
     os.environ["TEST_SUITE_RENDER_DIR"] = str(vid_dir)
-    test_class_self.config.SHARED_OUTPUT = str(test_class_self.result_dir)
+    # test_class_self.config.SHARED_OUTPUT = str(test_class_self.result_dir)
     # test_class_self.disp_w, test_class_self.disp_h = (640, 360)
     test_class_self.disp_w, test_class_self.disp_h = (
         test_class_self.config.DISPLAY_FRAME_SIZE
@@ -598,10 +580,10 @@ class TestSmartFilteringDetections:
     @pytest.mark.parametrize("detection_type", ["motion", "object"])
     def test_detections(self, device, sf_enabled, detection_type):
         """Unified test runner for all configurations."""
-        if detection_type == "motion" and not sf_enabled:
-            pytest.skip(
-                "Pure YOLO mode is structurally invalid for detection_type 'motion'."
-            )
+        # if detection_type == "motion" and not sf_enabled:
+        #     pytest.skip(
+        #         "Pure YOLO mode is structurally invalid for detection_type 'motion'.\n"
+        #     )
 
         self.duration_target = 30
 
@@ -650,15 +632,15 @@ class TestSmartFilteringDetections:
             short_name = "rtsp"
         else:
             short_name = Path(self.source).stem
-        video_output_name = f"{self._testMethodName}_{short_name}_{self.device}.mp4"
+        video_output_name = f"{self._testMethodName}_{short_name}.mp4"
         out_path = os.path.join(test_dir, video_output_name)
         self.output_path = (
             out_path  # f"{self.config.SHARED_OUTPUT}/{short_name}_{self.device}.mp4"
         )
 
-        log_to_logger(
-            f"[TEST MODE] Detection results saved to: {out_path}", level="info"
-        )
+        # log_to_logger(
+        #     f"[TEST MODE] Detection results saved to: {out_path}", level="info"
+        # )
 
         # =====================================================================
         # DYNAMIC THREAD TARGET REDIRECTION
@@ -692,6 +674,9 @@ class TestSmartFilteringDetections:
             (self.disp_w, self.disp_h),
         )
         # self.async_writer = None
+        log_to_logger(
+            f"[TEST MODE] Detection results saved to: {self.output_path}", level="info"
+        )
 
     def start(self):
         """
