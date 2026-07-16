@@ -28,7 +28,16 @@
 		"no_proxy" : "${localEnv:no_proxy}",
 	},
 
-	"runArgs" : [ "--rm", "--gpus", "all", "--ipc=host", "--name", "pipeline_dev", "-p", "8011:8000","--cap-add=SYS_NICE", "--shm-size=8gb"],  //, "--net=host", "--privileged", "--shm-size=2gb"],
+	"runArgs" : [
+		"--rm",
+		"--gpus", "all",
+		"--ipc=host",
+		"--name", "pipeline_dev",
+		"-p", "8011:8000",
+		"--cap-add=SYS_NICE",
+		"--shm-size=8gb"
+	],
+	//, "--net=host", "--privileged", "--shm-size=2gb"],
 
 	"postStartCommand": "apt-get update -o Acquire::Check-Date=false -y && apt-get install -y gdb sudo && cp -rp /workspace/app/*.md /app/ && cp -rp /workspace/app/.vscode /app/ && cp -rp /workspace/app/.gitignore /app/ && cp -rp /workspace/app/.github /app/",
 	// "postAttachCommand": "sudo chown -R ${localEnv:USER} /workspaces",
@@ -51,7 +60,7 @@
 	},
 
 	"workspaceFolder": "/home",
-	"workspaceMount": "source=./,target=/workspace/app,type=bind,consistency=cached",
+	"workspaceMount": "source=${localWorkspaceFolder},target=/workspace/app,type=bind,consistency=cached",
 
 	// For training only
 	// "mounts": [
@@ -60,8 +69,8 @@
 
 	// For fastapi
 	"mounts": [
-		"source=./inputs,target=/watch_dir,type=bind",
-		"source=./fastapi,target=/home,type=bind"
+		"source=${localWorkspaceFolder}/inputs,target=/watch_dir,type=bind",
+		"source=${localWorkspaceFolder}/fastapi,target=/home,type=bind"
 		// "source=./fastapi/resources,target=/home/resources,type=bind",
 		// "source=./fastapi/tests,target=/home/tests,type=bind"
 	],

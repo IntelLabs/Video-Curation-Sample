@@ -5,75 +5,106 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Python Debugger: test_detections",
+      // Test the model for both CPU and GPU on provided RTSP URL or video file
+      "name": "Test Model",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tests/test_model.py",
+      "cwd": "${workspaceFolder}/tests",
+      "python": "/opt/venv/bin/python",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": false,
+      "args": [
+        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
+        // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
+        // "--source", "<TEST_VIDEO>.mp4",
+
+      ]
+    },
+    {
+      // Independently test the stream readers for both CPU and GPU on provided RTSP URL or video file
+      "name": "Test Readers (Independent)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tests/test_readers.py",
+      "cwd": "${workspaceFolder}/tests",
+      "python": "/opt/venv/bin/python",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": false,
+      "args": [
+        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
+        // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
+        // "--source", "<TEST_VIDEO>.mp4"
+
+      ]
+    },
+    {
+      // Independently test the detection pipeline (with and without Smart Filtering) only
+      "name": "Test Detections (Independent)",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/tests/test_detections.py",
       "cwd": "${workspaceFolder}/tests",
+      "python": "/opt/venv/bin/python",
       "console": "integratedTerminal",
       "justMyCode": false,
       "subProcess": false,
       "args": [
-        "--type", "object",
-        // "--source", "<TEST_VIDEO>.mp4",
-        // "-m", "yolo11n", "--no-custom",
+        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
+        // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
+        // "--source", "<TEST_VIDEO>.mp4"
+
       ]
     },
     {
-      "name": "Python Debugger: Pipeline",
+      // Test pipeline with various scenarios
+      "name": "Test Pipeline",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/tests/test_pipeline.py",
+      "cwd": "${workspaceFolder}/tests",
+      "python": "/opt/venv/bin/python",
       "console": "integratedTerminal",
       "subProcess": false,
       "justMyCode": false,
       "args": [
-        "--duration", "2",
+        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
+        // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
+        // "--source", "<TEST_VIDEO>.mp4",
 
         // AVAILABLE SCENARIO PARAMS
         // Use --scenario to specify tests by number (1 - 4)
         // 1 - 3: --device (cpu or gpu)
         // 4: --device, --sf, --type (object or motion)
 
-        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
-        // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
-        // "--source", "<TEST_VIDEO>.mp4",
-      ]
-    },
+        "--duration", "1",
 
-    {
-      "name": "Python Debugger: Model",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/tests/test_model.py",
-      "cwd": "${workspaceFolder}/tests",
-      "console": "integratedTerminal",
-      "justMyCode": false,
-      "subProcess": false,
-      "args": [
-        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
-        // "--source", "<TEST_VIDEO>.mp4",
       ]
     },
     {
-      "name": "Python Debugger: Smart filtering",
+      // Test Smart Filtering within pipeline to display the ROIs
+      "name": "Test Pipeline: Smart filtering Only",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/tests/test_pipeline.py",
+      "cwd": "${workspaceFolder}/tests",
+      "python": "/opt/venv/bin/python",
       "console": "integratedTerminal",
       "subProcess": false,
       "justMyCode": false,
       "args": [
+        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
+        // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
+        // "--source", "<TEST_VIDEO>.mp4",
+
         // SF SCENARIO PARAMS
         // 4: --device, --sf, --type (object or motion)
         "--scenario", "4",
         "--sf",
         "--type", "motion",
-
-        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
-        // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
-        // "--source", "<TEST_VIDEO>.mp4",
       ]
-    },
+    }
   ]
 }

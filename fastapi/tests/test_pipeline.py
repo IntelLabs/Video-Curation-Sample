@@ -83,15 +83,16 @@ def setup_context(request):
         request.cls.name = "rtsp"
     request.cls.test_duration_mins = float(os.getenv("TEST_DURATION_MINS", 1.0))
 
-    request.cls.result_dir = test_dir / f"{current_test_filename}_results"
+    model_name = os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT)
+    request.cls.result_dir = test_dir / f"{current_test_filename}_results" / model_name
     request.cls.result_dir.mkdir(parents=True, exist_ok=True)
 
     request.cls.benchmarks = []
     if is_rtsp:
-        request.cls.csv_filename = "reader_perf_results_rtsp.csv"
+        request.cls.csv_filename = "pipeline_benchmarks_rtsp.csv"
     else:
         vid_shortname = Path(request.cls.source).stem
-        request.cls.csv_filename = f"reader_perf_results_{vid_shortname}.csv"
+        request.cls.csv_filename = f"pipeline_benchmarks_{vid_shortname}.csv"
     request.cls.csv_path = request.cls.result_dir / request.cls.csv_filename
 
     yield
@@ -259,9 +260,9 @@ def stream_worker(
 
     if out_dir:
         if "Scenario_4_" in test_name:
-            result_dir = out_dir / "results"
-            result_dir.mkdir(parents=True, exist_ok=True)
-            os.environ["TEST_SUITE_RENDER_DIR"] = str(result_dir)
+            # result_dir = out_dir / "results"
+            # result_dir.mkdir(parents=True, exist_ok=True)
+            os.environ["TEST_SUITE_RENDER_DIR"] = str(out_dir)
         config.SHARED_OUTPUT = str(out_dir)
 
     import vdms
@@ -277,6 +278,8 @@ def stream_worker(
         HandlerClass = GPUStreamHandler
     else:
         HandlerClass = CPUStreamHandler
+
+    print("\t[STREAM_WORKER] Starting ...")
 
     last_sample = time.perf_counter()
     handler = None  # Explicit initializing tracking state pointer 🚀
@@ -450,7 +453,8 @@ def stream_worker(
         # Absolute kill switch safely reclaims orphaned third-party threads
         # at the kernel level without crashing the parent pytest framework
         time.sleep(0.1)
-        os._exit(0)
+        # os._exit(0)
+        print("\t[STREAM_WORKER] Processing complete. Exiting...")
 
 
 @pytest.mark.usefixtures("setup_context")
@@ -489,7 +493,9 @@ class TestHybridStreamHandlers:
             ),
         )
         worker_p.start()
-        worker_p.join(timeout=2.0)
+        print("[SCENARIO 1] Started processing ...")
+        worker_p.join()  # timeout=2.0)
+        print(f"[SCENARIO 1] Stopped cleanly with exit code: {worker_p.exitcode}")
 
         if worker_p.is_alive():
             worker_p.terminate()
@@ -541,7 +547,9 @@ class TestHybridStreamHandlers:
             ),
         )
         worker_p.start()
+        print("[SCENARIO 2] Started processing ...")
         worker_p.join()
+        print(f"[SCENARIO 2] Stopped cleanly with exit code: {worker_p.exitcode}")
 
         if worker_p.is_alive():
             worker_p.terminate()
@@ -596,7 +604,9 @@ class TestHybridStreamHandlers:
             ),
         )
         worker_p.start()
+        print("[SCENARIO 3] Started processing ...")
         worker_p.join()
+        print(f"[SCENARIO 3] Stopped cleanly with exit code: {worker_p.exitcode}")
 
         if worker_p.is_alive():
             worker_p.terminate()
@@ -660,7 +670,9 @@ class TestHybridStreamHandlers:
             ),
         )
         worker_p.start()
+        print("[SCENARIO 4] Started processing ...")
         worker_p.join()
+        print(f"[SCENARIO 4] Stopped cleanly with exit code: {worker_p.exitcode}")
 
         if worker_p.is_alive():
             worker_p.terminate()
@@ -733,14 +745,22 @@ def get_pytest_filter_expression(args, sorted_scenarios):
                 clause += f" and {args.detection_type}"
                 applied_subs.append(f"type={args.detection_type}")
 
-            sub_msg = (
-                f" with sub-filters: {', '.join(applied_subs)}" if applied_subs else ""
-            )
-            print(f"  ⚙️  Scenario {num}: Active compilation{sub_msg}")
+            if applied_subs:
+                applied_subs_str = ", ".join(applied_subs)
+                sub_msg = f" with sub-filters: {applied_subs_str}"
+                print(f"  ⚙️  Scenario {num}: Active compilation{sub_msg}")
+            else:
+                sub_msg = (
+                    f" with sub-filters: {', '.join(applied_subs)}"
+                    if applied_subs
+                    else ""
+                )
+                print(f"  🔹 Scenario {num}: Standard routing (ignoring sub-filters)")
             scenario_clauses.append(f"({clause})")
 
     # Safely join scenarios together with 'or' so they can execute side-by-side
-    filter_expression = f"test_scenario_ and ({' or '.join(scenario_clauses)})"
+    scenario_clauses_str = " or ".join(scenario_clauses)
+    filter_expression = f"test_scenario_ and ({scenario_clauses_str})"
 
     # Target hardware context selection filter applies globally across all test cases
     if args.device.lower() != "all":
