@@ -1,15 +1,79 @@
-import argparse
-import csv
-import gc
+# ==============================================================================
+# SUPPRESS WARNINGS
+# import warnings
+
+import pytest
+
+# warnings.filterwarnings(
+#     "ignore", category=FutureWarning, message=".*reduce_op` is deprecated.*"
+# )
+
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:.*anyio:_pytest.warning_types.PytestAssertRewriteWarning"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore:Context managers for TensorRT types are deprecated:DeprecationWarning"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore:Exception ignored in.*SharedMemory.__del__:UserWarning"
+    ),
+    # Global message fallback pattern captures local execution frames
+    pytest.mark.filterwarnings("ignore:.*reduce_op.*:FutureWarning"),
+]
+
+# ==============================================================================
+# LOGGING
 import logging
-import multiprocessing
 import os
 import sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    # format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d) - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+# Suppress low-delay reference block warnings from OpenCV/PyAV/FFmpeg
+# os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
+# os.environ["OPENCV_LOG_LEVEL"] = "OFF"
+logging.getLogger("libav").setLevel(logging.CRITICAL)
+logging.getLogger("libav.hevc").setLevel(logging.CRITICAL)
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
+logging.getLogger("ultralytics").setLevel(logging.WARNING)
+# logger = trt.Logger(trt.Logger.WARNING)
+# trt.init_libnvinfer_plugins(logger, "")
+main_app_logger = logging.getLogger(__name__)
+
+# ==============================================================================
+# IMPORTS
+
+# os.environ["OMP_NUM_THREADS"] = "2"
+# os.environ["MKL_NUM_THREADS"] = "2"
+# os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+# try:
+#     torch.set_num_interop_threads(2)  # 1)
+#     torch.set_num_threads(4)  # 2)
+# except RuntimeError:
+#     # Safe graceful fallback if a process-level fork duplicated context maps
+#     pass
+import argparse
+import csv
+import ctypes
+import faulthandler
+import gc
+import inspect
+import logging
+import multiprocessing
+import sys
+import threading
 import time
 import traceback
+import tracemalloc
 from datetime import datetime
 from pathlib import Path
 
+import cv2
 import psutil
 import pytest
 import torch
@@ -21,52 +85,67 @@ from include.default_configs import (
     MODEL_NAME_DEFAULT,
     THRESHOLD_VALUE,
 )
-
-# Import the exact core handlers to replace duplicate script code
-# from include.handlers import BASE_PIPELINE_CONFIG
+from include.handlers import (
+    CPUStreamHandler,
+    GPUStreamHandler,
+    log_to_logger,
+)
 from include.utils import (
     PipelineConfig,
+    ResourceTrackerFilter,
+    install_and_load_pip_package,
+    str2bool,
 )
 
+# torch.set_grad_enabled(False)
+
+# ==============================================================================
+# MONKEY PATCH
+# Cache the hardware availability state globally.
+# This prevents internal framework loops from triggering driver/NVML checks per frame.
+# _cuda_available = torch.cuda.is_available()
+
+
+# def _patched_is_available():
+#     return _cuda_available
+
+
+# torch.cuda.is_available = _patched_is_available
+
+# ==============================================================================
+# SETUP
+# Hooks directly into the OS kernel signals to force Python to print a full
+# stack traceback right before it dies, allowing you to see which line of
+# Python code caused the hard crash
+faulthandler.enable()
+
 try:
+    # Retain standard spawn mode to prevent CUDA context driver deadlocks
     torch.multiprocessing.set_start_method("spawn", force=True)
 except RuntimeError:
     pass
 
+force_export = False
+target_width, target_height = 7680, 4320
+STATE_CAPTURE = False
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
-# Suppress low-delay reference block warnings from OpenCV
-os.environ["OPENCV_LOG_LEVEL"] = "OFF"
-
-main_app_logger = logging.getLogger(__name__)
+# Force Python's multiprocessing layer to quiet tracking cleanup race conditions
+os.environ["PYTHONWARNINGS"] = "ignore"
+sys.warnoptions.append("ignore")
 
 
-def log_to_logger(message, level="info"):
-    try:
-        if level.lower() == "debug":
-            main_app_logger.debug(message)
-        elif level.lower() == "warning":
-            main_app_logger.warning(message)
-        else:
-            main_app_logger.info(message)
-    except Exception:
-        pass
-
-
+# ==============================================================================
+# TEST SETUP / FUNCTIONS
 @pytest.fixture(scope="class")
 def setup_context(request):
-    """Orchestrates test directories and configuration schemas."""
+    """Replaces setUpClass: Runs once per test class."""
     current_test_filename = Path(__file__).stem
     test_dir = Path(__file__).parent
     main_path = test_dir.parent
     video_dir = main_path / "inputs"
 
     # Resolve source from CLI/Environment parameters
-    request.cls.source = os.getenv("STREAM_SOURCE", "anduril_swarm_8K.mp4")
+    request.cls.source = os.getenv("VIDEO_FILENAME", "anduril_swarm_8K.mp4")
     is_rtsp = "rtsp://" in request.cls.source
     if not is_rtsp:
         VIDEO_FILENAME = request.cls.source
@@ -79,8 +158,10 @@ def setup_context(request):
         assert vid_source.exists()
         request.cls.source = str(vid_source)
         request.cls.name = vid_source.stem
+        request.cls.is_rtsp = False
     else:
         request.cls.name = "rtsp"
+        request.cls.is_rtsp = True
     request.cls.test_duration_mins = float(os.getenv("TEST_DURATION_MINS", 1.0))
 
     model_name = os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT)
@@ -88,15 +169,16 @@ def setup_context(request):
     request.cls.result_dir.mkdir(parents=True, exist_ok=True)
 
     request.cls.benchmarks = []
-    if is_rtsp:
-        request.cls.csv_filename = "pipeline_benchmarks_rtsp.csv"
-    else:
-        vid_shortname = Path(request.cls.source).stem
-        request.cls.csv_filename = f"pipeline_benchmarks_{vid_shortname}.csv"
+    request.cls.csv_filename = f"pipeline_benchmarks_{request.cls.name}.csv"
     request.cls.csv_path = request.cls.result_dir / request.cls.csv_filename
 
+    # request.cls.active = True
+    request.cls.active_streams = {}
+
+    # RUN ALL PARAMETERIZED TESTS ----------------------------------------
     yield
 
+    # FINAL CSV EXPORT  --------------------------------------------------
     if request.cls.benchmarks:
         ordered_headers = [
             "timestamp",
@@ -117,6 +199,7 @@ def setup_context(request):
             "total_frames_ingested",
             "total_target_frames_processed",
             "total_objects_detected",
+            "avg_detections_per_frame",
             "frames_dropped_or_skipped",
             "dropped_frame_sequences",
             "average_read_latency_ms",
@@ -132,7 +215,8 @@ def setup_context(request):
         ]
         # keys = {k for r in request.cls.benchmarks for k in r.keys()}
         keys = []
-        for r in request.cls.benchmarks:
+        results = request.cls.benchmarks
+        for r in results:
             for k in r.keys():
                 keys.append(k)
         sorted_keys = []
@@ -140,28 +224,46 @@ def setup_context(request):
             if c in keys:
                 sorted_keys.append(c)
         with open(str(request.cls.csv_path), "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(sorted_keys))
-            writer.writeheader()
-            writer.writerows(request.cls.benchmarks)
-        print(f"\n[FINAL] Telemetry saved to: {request.cls.csv_path}", flush=True)
+            dict_writer = csv.DictWriter(f, fieldnames=list(sorted_keys))
+            dict_writer.writeheader()
+            dict_writer.writerows(results)
+        main_app_logger.info(f"[FINAL] Telemetry saved to {request.cls.csv_path}")
 
 
 @pytest.fixture(autouse=True)
 def each_test_setup(request):
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-
     device = request.node.callspec.params.get("device")
     os.environ["DEVICE"] = device
 
-    yield
-
+    # Enforces a brief structural pause between execution sequences.
+    # This ensures old CUDA streams and file pointers are fully reclaimed by the OS
+    # before the next stage begins allocation.
+    with torch.inference_mode():
+        if device == "gpu" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.ipc_collect()
+            torch.cuda.empty_cache()
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-    time.sleep(0.2)
+
+    # Introduce a 250ms sub-slice delay to give Linux background
+    # resource tracking daemons time to complete unlinking procedures smoothly.
+    # time.sleep(0.25)
+
+    # RUN PARAMETERIZED TEST ----------------------------------------
+    try:
+        yield
+
+    except Exception as e:
+        traceback.print_exc()
+        main_app_logger.info(f"[TEST] Error: {e}")
+
+    # Evict the device cache pool entirely
+    gc.collect()
+    with torch.inference_mode():
+        if device == "gpu" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.memory._record_memory_history(enabled=False)
 
 
 def stream_worker(
@@ -186,6 +288,8 @@ def stream_worker(
     os.environ["OPENCV_LOG_LEVEL"] = "OFF"
     os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
     os.environ["FFMPEG_LOG_LEVEL"] = "quiet"
+
+    # Initialize test
     test_duration_secs = test_duration_mins * 60
     metrics = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -220,12 +324,12 @@ def stream_worker(
         "total_frames_ingested": 0,
         "total_target_frames_processed": 0,
         "total_objects_detected": 0,
+        "avg_detections_per_frame": 0,
         "detection_type": detection_type,
         "smart_filter_active": sf_enabled,
         "status": "INIT",
     }
 
-    loop_start = time.perf_counter()
     process = psutil.Process(os.getpid())
     cpu_samples, ram_samples, vram_samples = [], [], []
     prefetch_backlog_samples = []
@@ -236,7 +340,7 @@ def stream_worker(
         CUSTOM_MODEL_FLAG=os.getenv(
             "CUSTOM_MODEL_FLAG", CUSTOM_MODEL_FLAG_DEFAULT
         ),  # True,
-        DEVICE="GPU" if device_type.lower() == "gpu" else "CPU",
+        DEVICE=device_type.upper(),
         OMIT_DETECTIONS_FLAG=True,
         TEST_MODE=True,
         DEBUG=os.getenv("DEBUG", DEBUG_DEFAULT),
@@ -272,41 +376,206 @@ def stream_worker(
 
     vdms.vdms.connect = mock_connect
 
-    from include.handlers import CPUStreamHandler, GPUStreamHandler
-
     if device_type.lower() == "gpu":
         HandlerClass = GPUStreamHandler
     else:
         HandlerClass = CPUStreamHandler
 
-    print("\t[STREAM_WORKER] Starting ...")
+    # Establish an accurate post-initialization hardware baseline
+    if str2bool(os.getenv("ENABLE_PROFILING", "False")):
+        tracemalloc.start()
+
+        start_allocated, start_reserved = 0, 0
+        if device_type.lower() and torch.cuda.is_available():
+            torch.cuda.memory._record_memory_history(
+                enabled=True,
+                trace_alloc_max_entries=250000,
+                trace_alloc_record_context=True,
+            )
+
+            # This captures your baseline AFTER initialize_variables() is done
+            start_allocated = torch.cuda.memory_allocated(0)
+            start_reserved = torch.cuda.memory_reserved(0)
+
+            try:
+                cv2.cuda.setBufferPoolUsage(False)
+            except AttributeError:
+                pass
+        else:
+            gc.collect()
+            process = psutil.Process(os.getpid())
+            start_allocated = (
+                process.memory_info().rss
+            )  # Reuse start_allocated container for host memory baseline
+            start_reserved = 0
+    log_to_logger("[STREAM_WORKER] Starting ...", level="info")
 
     last_sample = time.perf_counter()
+    loop_start = last_sample
     handler = None  # Explicit initializing tracking state pointer 🚀
 
     try:
-        # Let handlers.py completely manage the reader, threads, ring buffers, and FFMPEG process
+        # Get Handler and start
         handler = HandlerClass(
             source=source, name=source_name, active_streams={}, config=config
-        )
-        handler.start()
+        )  # .start()
 
-        while (time.perf_counter() - loop_start) < test_duration_secs:
-            if not handler.active:
-                break
+        def profiler_fn():
+            profiler = None
+            try:
+                if str2bool(os.getenv("ENABLE_PROFILING", "False")):
+                    Profiler = install_and_load_pip_package(
+                        "pyinstrument", attribute_name="Profiler"
+                    )
 
-            curr_time = time.perf_counter()
-            if (curr_time - last_sample) >= 0.5:
-                cpu_samples.append(psutil.cpu_percent(interval=0))
-                ram_samples.append(process.memory_info().rss / (1024 * 1024))
-                if device_type.lower() == "gpu" and torch.cuda.is_available():
-                    vram_free, vram_total = torch.cuda.mem_get_info()
-                    vram_samples.append((vram_total - vram_free) / (1024 * 1024))
-                if getattr(handler, "prefetch_queue", None) is not None:
-                    current_backlog = handler.prefetch_queue.qsize()
-                    prefetch_backlog_samples.append(current_backlog)
-                last_sample = curr_time
-            time.sleep(0.2)  # 0.01
+                    profiler = Profiler(interval=0.005)  # 5ms sampling interval
+
+                    # Telling the statistical sampler to skip recording exception blocks completely
+                    # stops stack_sampler.py from ballooning RAM over long production runs.
+                    if hasattr(profiler, "_sampler") and profiler._sampler:
+                        profiler._sampler.trace_exceptions = False
+
+                    profiler.start()
+
+                # orig_fn(profiler)
+                handler.run_realtime_inference(
+                    sf_enabled=handler.config.sf_enabled,
+                    profiler=profiler,
+                )
+
+                if str2bool(os.getenv("ENABLE_PROFILING", "False")):
+                    # 2. Redirect standard error to the filter trap right before report compilation
+                    original_stderr = sys.stderr
+                    sys.stderr = ResourceTrackerFilter(original_stderr)
+
+                    try:
+                        # Force standard stdout to flush out any lingering teardown messages
+                        # BEFORE pyinstrument dumps its massive ASCII tree block.
+                        sys.stdout.flush()
+
+                        # main_app_logger.info(profiler.output_text(color=True))
+                        # profiler.main_app_logger.info(color=True)
+                        # prof_output = profiler.output_text(color=True)
+                        # main_app_logger.info(
+                        #     f"\n=== LATENCY BREAKDOWN FOR {self.name} ({device}) ===\n{prof_output}\n",
+                        #
+                        # )
+
+                        # Save a clean, interactive tree map for visual analysis
+                        output_html_path = handler.output_path.replace(
+                            ".mp4", "_profile.html"
+                        )
+                        # output_html_path = f"/tmp/profile_{video_name}_{device}.html"
+                        profiler.write_html(output_html_path)
+                        main_app_logger.info(
+                            f"[PROFILER] Performance tree map exported to {output_html_path}",
+                        )
+
+                    finally:
+                        sys.stderr = original_stderr
+                        if "profiler" in locals():
+                            try:
+                                # Force the Python interpreter to detach pyinstrument's sampling hooks
+                                sys.setprofile(None)
+
+                                # Completely decouple internal statistical sessions to drop C-heap frames
+                                if hasattr(profiler, "_last_session"):
+                                    profiler._last_session = None
+                                if hasattr(profiler, "last_session"):
+                                    profiler.last_session = None
+
+                                # Forcibly clear out internal memoryview strings caching tree metrics
+                                if (
+                                    hasattr(profiler, "session")
+                                    and profiler.session is not None
+                                ):
+                                    if hasattr(profiler.session, "frame_groups"):
+                                        profiler.session.frame_groups = None
+                                    if hasattr(profiler.session, "samples"):
+                                        profiler.session.samples = []
+
+                                    # Purge compiled tree metrics structures
+                                    profiler.session = None
+                                del profiler
+                            except Exception:
+                                pass
+
+                            # Trigger an immediate native Linux heap compression pass
+                            # This grabs the newly abandoned pyinstrument C-heap blocks and
+                            # flushes them to the OS before the fixture assessment snapshot fires!
+                            gc.collect()
+                            try:
+                                libc = ctypes.CDLL("libc.so.6")
+                                libc.malloc_trim(0)
+                            except Exception:
+                                pass
+
+            except Exception:
+                traceback.print_exc()
+
+        if str2bool(os.getenv("ENABLE_PROFILING", "False")) and hasattr(
+            handler, "process_thread"
+        ):
+            # Re-initialize the thread context using our safe profile wrapper proxy
+            handler.process_thread = threading.Thread(target=profiler_fn, daemon=True)
+
+        try:
+            handler.start()
+
+            exited = False
+            loop_start = time.perf_counter()
+            while (time.perf_counter() - loop_start) < test_duration_secs:
+                time.sleep(0.25)
+                if handler._is_stopped:  # not handler.active:
+                    exited = True
+                    break
+                if getattr(handler, "status", None) == "DONE":
+                    exited = True
+                    break
+
+                if (
+                    hasattr(handler, "process_thread")
+                    and handler.process_thread is not None
+                ):
+                    if not handler.process_thread.is_alive():
+                        main_app_logger.info(
+                            "[TEST HARNESS] Background worker exited. Breaking loop.",
+                        )
+                        break
+
+                # if (
+                #     hasattr(handler, "process_thread")
+                #     and handler.process_thread is not None
+                # ):
+                #     if not handler.process_thread.is_alive():
+                #         main_app_logger.info(
+                #             "[TEST HARNESS] Background worker exited. Breaking loop.",
+                #         )
+                #         break
+
+                curr_time = time.perf_counter()
+                if (curr_time - last_sample) >= 0.5:
+                    cpu_samples.append(psutil.cpu_percent(interval=0))
+                    ram_samples.append(process.memory_info().rss / (1024 * 1024))
+                    if device_type.lower() == "gpu" and torch.cuda.is_available():
+                        vram_free, vram_total = torch.cuda.mem_get_info()
+                        vram_samples.append((vram_total - vram_free) / (1024 * 1024))
+                    if getattr(handler, "prefetch_queue", None) is not None:
+                        current_backlog = handler.prefetch_queue.qsize()
+                        prefetch_backlog_samples.append(current_backlog)
+                    last_sample = curr_time
+                time.sleep(0.001)  # 0.01
+
+            handler.stop_threads(["process_thread"])
+            # Cleanup active thread worker contexts safely if they exist
+            if handler is not None and getattr(handler, "active", False) and not exited:
+                try:
+                    handler.stop()
+                except Exception:
+                    pass
+        except Exception as loop_e:
+            # traceback.print_exc()
+            main_app_logger.info(f"[LOOP ERROR]: {loop_e}")
 
         # Safely capture performance values out of production thread states
         actual_duration = time.perf_counter() - loop_start
@@ -327,7 +596,7 @@ def stream_worker(
         )  # Total target slices saved/evaluated
         metrics["total_objects_detected"] = handler.total_objects_detected
 
-        metrics["total_frames_read"] = getattr(handler, "frame_count", 0)
+        metrics["total_frames_read"] = handler.abs_frame_num
 
         metrics["smart_filter_active"] = sf_enabled
         metrics["device"] = device_type
@@ -352,11 +621,17 @@ def stream_worker(
                 1 if getattr(r, "use_cpu_decode_fallback", False) else 0
             )
             # if not str(handler.source).startswith("rtsp://"):
-            metrics["video_duration"] = (
-                round(r.total_input_frames / metrics["hardware_video_fps"], 2)
-                if metrics["hardware_video_fps"] > 0
-                else 0.0
-            )
+            # metrics["video_duration"] = (
+            #     round(r.total_input_frames / metrics["hardware_video_fps"], 2)
+            #     if metrics["hardware_video_fps"] > 0
+            #     else 0.0
+            # )
+
+        metrics["video_duration"] = (
+            round(handler.abs_frame_num / metrics["hardware_video_fps"], 2)
+            if metrics["hardware_video_fps"] > 0
+            else 0.0
+        )
 
         h_telemetry = getattr(handler, "telemetry", {})
         io_latencies = h_telemetry.get("ram_disk_io_write_ms", [])
@@ -381,6 +656,12 @@ def stream_worker(
             else 0.0
         )
 
+        metrics["avg_detections_per_frame"] = (
+            metrics["total_objects_detected"] / metrics["total_target_frames_processed"]
+        )
+
+        main_app_logger.info(metrics)
+
     except Exception as err:
         is_expected_fail = (
             "Scenario_1" in test_name
@@ -391,6 +672,7 @@ def stream_worker(
                     "could not open/connect",
                     "failed to initialize stream reader endpoint",
                     "stream reader initialization failure",
+                    "opencv videocapture failed to open",
                     "timed out",
                 ]
             )
@@ -408,6 +690,7 @@ def stream_worker(
                 level="warning",
             )
             metrics["status"] = f"CRASHED: {type(err).__name__}"
+
     finally:
         # Calculate system baseline averages across the sample tracking matrices safely
         if cpu_samples:
@@ -428,12 +711,12 @@ def stream_worker(
                 sum(prefetch_backlog_samples) / len(prefetch_backlog_samples), 2
             )
 
-        # Cleanup active thread worker contexts safely if they exist
-        if handler is not None and getattr(handler, "active", False):
-            try:
-                handler.stop()
-            except Exception:
-                pass
+        # # Cleanup active thread worker contexts safely if they exist
+        # if handler is not None and getattr(handler, "active", False) and not exited:
+        #     try:
+        #         handler.stop()
+        #     except Exception:
+        #         pass
 
         # Provide a 200ms cool-down window for OpenVINO/PyTorch C++ worker threads
         # to finish their internal teardown before Python destroys the process space.
@@ -450,11 +733,18 @@ def stream_worker(
 
         result_queue.put(metrics)
 
+        if str2bool(os.getenv("ENABLE_PROFILING", "False")):
+            handler.assess_memory(
+                handler.config.DEVICE.lower(),
+                handler.name,
+                start_allocated,
+                start_reserved,
+            )
         # Absolute kill switch safely reclaims orphaned third-party threads
         # at the kernel level without crashing the parent pytest framework
         time.sleep(0.1)
         # os._exit(0)
-        print("\t[STREAM_WORKER] Processing complete. Exiting...")
+        log_to_logger("[STREAM_WORKER] Processing complete. Exiting...", level="info")
 
 
 @pytest.mark.usefixtures("setup_context")
@@ -467,12 +757,11 @@ class TestHybridStreamHandlers:
         run_clipper = False
         time_limit_m = round(self.test_duration_mins, 1)
 
-        print(
+        main_app_logger.info(
             f"\n========================================\n"
             f"RUNNING TEST: {test_name} | Device: {device.upper()}\n"
             f"Source Destination: {bad_uri}\n"
             f"========================================",
-            flush=True,
         )
 
         # Execute production workflow in completely isolated spawned sandbox
@@ -493,9 +782,11 @@ class TestHybridStreamHandlers:
             ),
         )
         worker_p.start()
-        print("[SCENARIO 1] Started processing ...")
+        main_app_logger.info("[SCENARIO 1] Started processing ...")
         worker_p.join()  # timeout=2.0)
-        print(f"[SCENARIO 1] Stopped cleanly with exit code: {worker_p.exitcode}")
+        main_app_logger.info(
+            f"[SCENARIO 1] Stopped cleanly with exit code: {worker_p.exitcode}"
+        )
 
         if worker_p.is_alive():
             worker_p.terminate()
@@ -504,7 +795,7 @@ class TestHybridStreamHandlers:
 
         test_metrics = res_queue.get()
         self.__class__.benchmarks.append(test_metrics)
-        print(f"Test Status Result: {test_metrics.get('status')}\n", flush=True)
+        main_app_logger.info(f"Test Status Result: {test_metrics.get('status')}")
 
         # Explicitly tear down queue thread pools to prevent resource tracking leaks
         try:
@@ -521,12 +812,11 @@ class TestHybridStreamHandlers:
         test_name = "Scenario_2_Longevity_Throughput_Evaluation"
         run_clipper = False
 
-        print(
+        main_app_logger.info(
             f"\n========================================\n"
             f"RUNNING TEST: {test_name} | Device: {device.upper()}\n"
             f"Source Destination: {self.source}\n"
             f"========================================",
-            flush=True,
         )
 
         # Execute production workflow in completely isolated spawned sandbox
@@ -547,9 +837,11 @@ class TestHybridStreamHandlers:
             ),
         )
         worker_p.start()
-        print("[SCENARIO 2] Started processing ...")
+        main_app_logger.info("[SCENARIO 2] Started processing ...")
         worker_p.join()
-        print(f"[SCENARIO 2] Stopped cleanly with exit code: {worker_p.exitcode}")
+        main_app_logger.info(
+            f"[SCENARIO 2] Stopped cleanly with exit code: {worker_p.exitcode}"
+        )
 
         if worker_p.is_alive():
             worker_p.terminate()
@@ -557,7 +849,7 @@ class TestHybridStreamHandlers:
 
         test_metrics = res_queue.get()
         self.__class__.benchmarks.append(test_metrics)
-        print(f"Test Status Result: {test_metrics.get('status')}\n", flush=True)
+        main_app_logger.info(f"Test Status Result: {test_metrics.get('status')}")
 
         # Explicitly tear down queue thread pools to prevent resource tracking leaks
         try:
@@ -575,12 +867,11 @@ class TestHybridStreamHandlers:
         # test_name = "Scenario_3_Clip_Generation_Evaluation"
         run_clipper = True
 
-        print(
+        main_app_logger.info(
             f"\n========================================\n"
             f"RUNNING TEST: {test_name} | Device: {device.upper()}\n"
             f"Source Destination: {self.source}\n"
             f"========================================",
-            flush=True,
         )
         render_dir = self.result_dir / f"{self.name}/scenario3_{device}"
         render_dir.mkdir(parents=True, exist_ok=True)
@@ -604,9 +895,11 @@ class TestHybridStreamHandlers:
             ),
         )
         worker_p.start()
-        print("[SCENARIO 3] Started processing ...")
+        main_app_logger.info("[SCENARIO 3] Started processing ...")
         worker_p.join()
-        print(f"[SCENARIO 3] Stopped cleanly with exit code: {worker_p.exitcode}")
+        main_app_logger.info(
+            f"[SCENARIO 3] Stopped cleanly with exit code: {worker_p.exitcode}"
+        )
 
         if worker_p.is_alive():
             worker_p.terminate()
@@ -614,7 +907,7 @@ class TestHybridStreamHandlers:
 
         test_metrics = res_queue.get()
         self.__class__.benchmarks.append(test_metrics)
-        print(f"Test Status Result: {test_metrics.get('status')}\n", flush=True)
+        main_app_logger.info(f"Test Status Result: {test_metrics.get('status')}")
 
         # Explicitly tear down queue thread pools to prevent resource tracking leaks
         try:
@@ -635,12 +928,11 @@ class TestHybridStreamHandlers:
         run_clipper = True
         disable_detection = False
 
-        print(
+        main_app_logger.info(
             f"\n========================================\n"
             f"RUNNING TEST: {test_name} | Device: {device.upper()} | SF: {sf_enabled}\n"
             f"Source Name: {self.name} | Destination: {self.source}\n"
             f"========================================",
-            flush=True,
         )
         render_dir = (
             self.result_dir
@@ -670,9 +962,11 @@ class TestHybridStreamHandlers:
             ),
         )
         worker_p.start()
-        print("[SCENARIO 4] Started processing ...")
+        main_app_logger.info("[SCENARIO 4] Started processing ...")
         worker_p.join()
-        print(f"[SCENARIO 4] Stopped cleanly with exit code: {worker_p.exitcode}")
+        main_app_logger.info(
+            f"[SCENARIO 4] Stopped cleanly with exit code: {worker_p.exitcode}"
+        )
 
         if worker_p.is_alive():
             worker_p.terminate()
@@ -681,11 +975,10 @@ class TestHybridStreamHandlers:
         test_metrics = res_queue.get()
         self.__class__.benchmarks.append(test_metrics)
         if disable_detection:
-            print(f"Test Status Result: {test_metrics.get('status')}\n", flush=True)
+            main_app_logger.info(f"Test Status Result: {test_metrics.get('status')}")
         else:
-            print(
-                f"Test Status Result: {test_metrics.get('status')} w/ {test_metrics.get('total_objects_detected')} detections\n",
-                flush=True,
+            main_app_logger.info(
+                f"Test Status Result: {test_metrics.get('status')} w/ {test_metrics.get('total_objects_detected')} detections",
             )
 
         # Explicitly tear down queue thread pools to prevent resource tracking leaks
@@ -699,8 +992,6 @@ class TestHybridStreamHandlers:
 
 
 def get_available_scenarios():
-    import inspect
-
     available_scenarios = set()
     for attr_name, _ in inspect.getmembers(
         TestHybridStreamHandlers, predicate=inspect.isfunction
@@ -723,13 +1014,15 @@ def get_pytest_filter_expression(args, sorted_scenarios):
     target_scenarios = args.scenario if args.scenario else sorted_scenarios
 
     scenario_clauses = []
-    print("\n" + "=" * 50)
-    print("TARGET SELECTION PREVIEW")
-    print("=" * 50)
+    main_app_logger.info("=" * 50)
+    main_app_logger.info("TARGET SELECTION PREVIEW")
+    main_app_logger.info("=" * 50)
 
     for num in target_scenarios:
         if num in basic_ids:
-            print(f"  🔹 Scenario {num}: Standard routing (ignoring sub-filters)")
+            main_app_logger.info(
+                f"  🔹 Scenario {num}: Standard routing (ignoring sub-filters)"
+            )
             scenario_clauses.append(f"scenario_{num}")
         else:
             clause = f"scenario_{num}"
@@ -748,14 +1041,18 @@ def get_pytest_filter_expression(args, sorted_scenarios):
             if applied_subs:
                 applied_subs_str = ", ".join(applied_subs)
                 sub_msg = f" with sub-filters: {applied_subs_str}"
-                print(f"  ⚙️  Scenario {num}: Active compilation{sub_msg}")
+                main_app_logger.info(
+                    f"  ⚙️  Scenario {num}: Active compilation{sub_msg}"
+                )
             else:
                 sub_msg = (
                     f" with sub-filters: {', '.join(applied_subs)}"
                     if applied_subs
                     else ""
                 )
-                print(f"  🔹 Scenario {num}: Standard routing (ignoring sub-filters)")
+                main_app_logger.info(
+                    f"  🔹 Scenario {num}: Standard routing (ignoring sub-filters)"
+                )
             scenario_clauses.append(f"({clause})")
 
     # Safely join scenarios together with 'or' so they can execute side-by-side
@@ -764,14 +1061,14 @@ def get_pytest_filter_expression(args, sorted_scenarios):
 
     # Target hardware context selection filter applies globally across all test cases
     if args.device.lower() != "all":
-        print(f"  💻 Hardware Context Constraint: {args.device.upper()}")
+        main_app_logger.info(f"  💻 Hardware Context Constraint: {args.device.upper()}")
         filter_expression = f"({filter_expression}) and {args.device.lower()}"
     else:
-        print("  💻 Hardware Context Constraint: ALL AVAILABLE")
+        main_app_logger.info("  💻 Hardware Context Constraint: ALL AVAILABLE")
 
-    print("=" * 50)
-    print(f"COMPILED PYTEST KEYWORD EXPRESSION:\n   👉 {filter_expression}")
-    print("=" * 50 + "\n")
+    main_app_logger.info("=" * 50)
+    main_app_logger.info(f"COMPILED PYTEST KEYWORD EXPRESSION:  {filter_expression}")
+    main_app_logger.info("=" * 50)
 
     return filter_expression
 
@@ -859,13 +1156,22 @@ if __name__ == "__main__":
     #     dest="debug_frame_limit",
     #     help="Number of frames used for debugging [Default: 100]",
     # )
+
+    # PROFILING
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable profiling",
+    )
+
     args = parser.parse_args()
 
-    os.environ["STREAM_SOURCE"] = args.source
+    os.environ["VIDEO_FILENAME"] = args.source
     os.environ["TEST_DURATION_MINS"] = str(args.duration)
     os.environ["CUSTOM_MODEL_FLAG"] = "True" if args.custom_model_flag else "False"
     os.environ["MODEL_NAME"] = args.model_name
     os.environ["DEBUG"] = "1" if args.debug else "0"
+    os.environ["ENABLE_PROFILING"] = "True" if args.profile else "False"
 
     # filter_expression = "test_scenario_4_detection_and_clipper"
     # filter_expression = "test_scenario_3_video_clipper"
@@ -879,11 +1185,12 @@ if __name__ == "__main__":
         "-s",
         "-v",
         "--log-cli-level=DEBUG",
+        "-W",
+        "ignore::_pytest.warning_types.PytestAssertRewriteWarning",
         __file__,
     ]
 
-    print(
+    main_app_logger.info(
         f"Launching decoupled testing suite configurations for destination targets: {args.source}",
-        flush=True,
     )
     sys.exit(pytest.main(pytest_args))

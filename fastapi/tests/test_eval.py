@@ -49,15 +49,6 @@ main_app_logger = logging.getLogger(__name__)
 # ==============================================================================
 # IMPORTS
 
-# os.environ["OMP_NUM_THREADS"] = "2"
-# os.environ["MKL_NUM_THREADS"] = "2"
-# os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-# try:
-#     torch.set_num_interop_threads(2)  # 1)
-#     torch.set_num_threads(4)  # 2)
-# except RuntimeError:
-#     # Safe graceful fallback if a process-level fork duplicated context maps
-#     pass
 import argparse
 import asyncio
 import csv
@@ -83,6 +74,7 @@ REPO_DIR = str(Path(__file__).parent.parent)
 sys.path.insert(1, REPO_DIR)
 from base_test import (
     BaseTest,
+    download_eval_data,
     fps_comparison_chart,
 )
 from include.default_configs import (
@@ -100,22 +92,10 @@ from include.utils import (
     install_and_load_pip_package,
     str2bool,
 )
+from metrics import DeviceAgnosticOnTheFlyEvaluator
 
-# objgraph = install_and_load_pip_package("objgraph", attribute_name=None)
-# torch.set_grad_enabled(False)
+gdown = install_and_load_pip_package("gdown", attribute_name=None)
 
-# ==============================================================================
-# MONKEY PATCH
-# Cache the hardware availability state globally.
-# This prevents internal framework loops from triggering driver/NVML checks per frame.
-# _cuda_available = torch.cuda.is_available()
-
-
-# def _patched_is_available():
-#     return _cuda_available
-
-
-# torch.cuda.is_available = _patched_is_available
 
 # ==============================================================================
 # SETUP
@@ -148,6 +128,7 @@ def isolated_detection_worker(init_args, test_args, res_queue):
     device = test_args["device"]
     detection_type = test_args["detection_type"]
     sf_enabled = test_args["sf_enabled"]
+    video_name = test_args["video_name"]
     gt_enabled = test_args["gt_enabled"]
 
     if device == "gpu" and torch.cuda.is_available():
@@ -185,10 +166,17 @@ def isolated_detection_worker(init_args, test_args, res_queue):
             start_reserved = 0
 
     try:
-        instance, _ = get_test_handler(TestDetections(), device)
+        instance, _ = get_test_handler(TestEvalSmartFilteringDetections(), device)
 
-        instance.source = init_args["source"]
-        instance.name = init_args["name"]
+        test_dir = Path(__file__).parent
+        video_dir = test_dir / "eval_data/Anti-UAV-Tracking-V0-8K"
+        vid_source = video_dir / f"{video_name}/{video_name}.mp4"
+
+        if not vid_source.exists():
+            _ = download_eval_data([video_name])
+
+        instance.source = str(vid_source)
+        instance.name = vid_source.stem
         instance.result_dir = Path(init_args["result_dir"])
         instance.active_streams = init_args["active_streams"]
         instance.__class__.benchmarks = init_args["benchmarks"]  # Sandbox the metrics
@@ -197,10 +185,10 @@ def isolated_detection_worker(init_args, test_args, res_queue):
         vid_dir.mkdir(parents=True, exist_ok=True)
         os.environ["TEST_SUITE_RENDER_DIR"] = str(vid_dir)
 
-        if instance.source.startswith("rtsp"):
-            short_name = "rtsp"
-        else:
-            short_name = Path(instance.source).stem
+        # if instance.source.startswith("rtsp"):
+        #     short_name = "rtsp"
+        # else:
+        #     short_name = Path(instance.source).stem
 
         # config definition
         config = PipelineConfig(
@@ -219,17 +207,20 @@ def isolated_detection_worker(init_args, test_args, res_queue):
         )
 
         # INITIALIZE CLASS (mimic DeviceBaseHandler.__init__) ------------------------------
+        instance.evaluator = DeviceAgnosticOnTheFlyEvaluator(device=device)
+
         instance.is_rtsp = str(instance.source).startswith("rtsp:/")
         instance.active = True
         instance.config = config
 
         # kwarg definition
         instance._testMethodName = (
-            f"sf_{detection_type}_{device}"
+            f"{video_name}_sf_{detection_type}_{device}"
             if sf_enabled
-            else f"yolo_{detection_type}_{device}"
+            else f"{video_name}_yolo_{detection_type}_{device}"
         )
-        instance.video_output_name = f"{instance._testMethodName}_{short_name}.mp4"
+        instance.video_output_name = f"{instance._testMethodName}.mp4"
+        instance.gt_enabled = gt_enabled
 
         instance.loop = asyncio.get_event_loop()
         instance.frame_ready_event = asyncio.Event()
@@ -362,8 +353,10 @@ def isolated_detection_worker(init_args, test_args, res_queue):
             # Re-initialize the thread context using our safe profile wrapper proxy
             instance.process_thread = threading.Thread(target=profiler_fn, daemon=True)
 
-        instance.VIDEO_GT_DETAILS = None
-        instance.duration_target = 30
+        if gt_enabled:
+            instance.VIDEO_GT_DETAILS = download_eval_data([instance.name])
+        else:
+            instance.VIDEO_GT_DETAILS = None
 
         instance.start()
 
@@ -449,45 +442,59 @@ def isolated_detection_worker(init_args, test_args, res_queue):
 # =========================================================================
 # PYTEST TEST HARNESS
 # =========================================================================
+def pytest_generate_tests(metafunc):
+    """
+    Pytest Hook: Generates a complete cross-product matrix
+    of (video_name x device) dynamically during collection phase.
+    """
+    if (
+        "video_name" in metafunc.fixturenames
+        and "device" in metafunc.fixturenames
+        and "detection_type" in metafunc.fixturenames
+        and "sf_enabled" in metafunc.fixturenames
+    ):
+        # Define video targets explicitly during collection
+        video_names = [f"video{i:02d}" for i in range(9, 21)]
+        # video_names = ["video16", "video17", "video12"]  # , "video18"]
+        # video_names = ["video17"]  # DEBUG: worst perf
+        # video_names = ["video12"]  # DEBUG: worst perf
+        # video_names = ["video09"]
+
+        # Read device target filters passed from your CLI parser args block
+        # Falls back to both types if running globally via '--device all'
+        device_input = os.getenv("TEST_SUITE_DEVICE_FILTER", "all")
+        devices = ["cpu", "gpu"] if device_input == "all" else [device_input]
+
+        type_input = os.getenv("TEST_SUITE_DETECTION_FILTER", "all")
+        detection_types = ["motion", "object"] if type_input == "all" else [type_input]
+
+        sf_input = os.getenv("TEST_SUITE_SF_FILTER", "None")
+        sf_flags = [True, False] if sf_input == "None" else [str2bool(sf_input)]
+
+        # Tell Pytest to create an individual test instance for each discovered name
+        metafunc.parametrize("device", devices)
+        metafunc.parametrize("sf_enabled", sf_flags)
+        metafunc.parametrize("detection_type", detection_types)
+        metafunc.parametrize("video_name", video_names)
+
+
 @pytest.fixture(scope="class")
 def setup_context(request):
     """Replaces setUpClass: Runs once per test class."""
     current_test_filename = Path(__file__).stem
     test_dir = Path(__file__).parent
-    main_path = test_dir.parent
-    video_dir = main_path / "inputs"
 
     # model_name = os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT)
     # Handler.__init__ (main items)
-    request.cls.source = os.getenv("VIDEO_FILENAME", "anduril_swarm_8K.mp4")
-    is_rtsp = "rtsp://" in request.cls.source
-    if not is_rtsp:
-        VIDEO_FILENAME = request.cls.source
-        if video_dir.exists():
-            vid_source = video_dir / VIDEO_FILENAME
-        else:
-            video_dir = Path("/watch_dir")
-            vid_source = video_dir / VIDEO_FILENAME
+    request.cls.is_rtsp = False
 
-        assert vid_source.exists()
-        request.cls.source = str(vid_source)
-        request.cls.name = vid_source.stem
-        request.cls.is_rtsp = False
-    else:
-        request.cls.name = "rtsp"
-        request.cls.is_rtsp = True
-
-    model_name = os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT)
-    request.cls.result_dir = (
-        test_dir / f"{current_test_filename}_results/{model_name}" / request.cls.name
-    )
+    # model_name = os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT)
+    request.cls.result_dir = test_dir / f"{current_test_filename}_drone_results"
     request.cls.result_dir.mkdir(parents=True, exist_ok=True)
 
     # Benchmark statistics
     request.cls.benchmarks = []
-    request.cls.csv_filename = (
-        f"detections_benchmarks_{model_name}_{request.cls.name}.csv"
-    )
+    request.cls.csv_filename = "drone_eval.csv"
     request.cls.csv_path = request.cls.result_dir / request.cls.csv_filename
 
     # request.cls.active = True
@@ -532,15 +539,15 @@ def setup_context(request):
                 dict_writer.writerows(results)
             main_app_logger.info(f"[FINAL] Benchmarks saved to {request.cls.csv_path}")
 
-            main_app_logger.info("=" * 80)
+            main_app_logger.info("=" * 125)
             main_app_logger.info(
-                f"{'Test Name':<25} | {'Pipeline FPS (Target)':<21} | {'Avg Frame Reading (ms)':<22} | {'Pipeline Speedup vs CPU':<15}",
+                f"{'Test Name':<25} | {'mAP_10':<5} | {'mAP_10_95':<10} | {'Pipeline FPS (Target)':<21} | {'Avg Frame Reading (ms)':<22} | {'Pipeline Speedup vs CPU':<15}",
             )
-            main_app_logger.info("-" * 80)
+            main_app_logger.info("-" * 125)
 
             for r in results:
                 main_app_logger.info(
-                    f"{r['Test Name']:<25} | {r['Pipeline FPS (Target frames)']:<21} | {r['Avg Frame Reading (ms)']:<22} | {r.get('Pipeline Speedup vs CPU', 'N/A'):<10}",
+                    f"{r['Test Name']:<25} | {r['mAP_10']:0.4f} | {r['mAP_10_95']:0.4f}     | {r['Pipeline FPS (Target frames)']:<21} | {r['Avg Frame Reading (ms)']:<22} | {r.get('Pipeline Speedup vs CPU', 'N/A'):<10}"
                 )
             main_app_logger.info("=" * 125)
 
@@ -579,7 +586,7 @@ def setup_context(request):
 
 
 @pytest.mark.usefixtures("setup_context")
-class TestDetections(BaseTest):
+class TestEvalSmartFilteringDetections(BaseTest):
     """
     Pytest runner that spawns the isolated worker, waits for completion,
     and merges the returned metrics into the main class for CSV/Chart generation.
@@ -587,10 +594,12 @@ class TestDetections(BaseTest):
 
     benchmarks = []  # Class-level attribute required by _finalize_benchmarks
 
-    @pytest.mark.parametrize("device", ["gpu", "cpu"])
-    @pytest.mark.parametrize("sf_enabled", [True, False])
-    @pytest.mark.parametrize("detection_type", ["object", "motion"])
-    def test_detections(self, device, sf_enabled, detection_type, gt_enabled=False):
+    # @pytest.mark.parametrize("device", ["gpu", "cpu"])
+    # @pytest.mark.parametrize("sf_enabled", [True, False])
+    # @pytest.mark.parametrize("detection_type", ["object", "motion"])
+    def test_eval(
+        self, device, detection_type, sf_enabled, video_name, gt_enabled=True
+    ):
         if detection_type == "motion" and not sf_enabled:
             pytest.skip(
                 "Pure YOLO mode is structurally invalid for detection_type 'motion'.\n"
@@ -598,8 +607,8 @@ class TestDetections(BaseTest):
 
         # Pull the values dynamically assigned by the setup_context fixture
         init_args = {
-            "source": self.__class__.source,
-            "name": self.__class__.name,
+            # "source": self.__class__.source,
+            # "name": self.__class__.name,
             "result_dir": str(self.__class__.result_dir),
             "active_streams": {},
             "benchmarks": self.__class__.benchmarks,
@@ -609,12 +618,13 @@ class TestDetections(BaseTest):
             "device": device,
             "detection_type": detection_type,
             "sf_enabled": sf_enabled,
+            "video_name": video_name,
             "gt_enabled": gt_enabled,
         }
 
         main_app_logger.info(
             f"\n{'=' * 60}\n"
-            f"[TEST HARNESS] Spawning isolated high-speed process for {self.__class__.name} (SF: {sf_enabled})...\n"
+            f"[TEST HARNESS] Spawning isolated high-speed process for {video_name} (SF: {sf_enabled})...\n"
             f"{'=' * 60}"
         )
 

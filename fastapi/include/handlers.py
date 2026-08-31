@@ -1,9 +1,13 @@
+# ==============================================================================
+# IMPORTS
 import asyncio
 import gc
+import inspect
 import json
 import logging
 import multiprocessing as mp
 import os
+import pickle
 import queue
 import shutil
 import subprocess
@@ -11,19 +15,17 @@ import sys
 import threading
 import time
 import traceback
-from collections import deque
+import types
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime
-from multiprocessing import shared_memory
 from pathlib import Path
 
-import cupy
-import cupyx.scipy
-import cupyx.scipy.ndimage
 import cv2
 import numpy as np
+import psutil
 import torch
+import torch.cuda._memory_viz as memory_viz
 import torch.nn.functional as F
 from ultralytics import YOLO
 from ultralytics.utils.checks import check_imgsz
@@ -32,34 +34,73 @@ from fastapi import FastAPI
 
 sys.path.insert(1, str(Path(__file__).parent.parent))
 from include.default_configs import ENABLE_QUERYING_DEFAULT
-from include.models import get_model
+from include.detectors import GeneralObjectDetector, SmartFilteringObjectDetector
 from include.utils import (
-    BOUNDS_KERNEL,
-    DETECTION_ACCEL_KERNEL,
+    AsyncDisplayVideoWriter,
+    AsyncVideoWriter,
+    DummyProcess,
+    PipelineConfig,
     VDMSPool,
-    find_contours_gpu_equivalent,
-    merge_boxes_cpu,
-    merge_boxes_gpu,
+    # safe_unregister_shm,
+    analyze_tracemalloc_snapshot,
+    default_attr_keys,
+    get_bb_overlay,
+    get_metadata_overlay,
+    # find_contours_gpu_equivalent,
+    global_frame_prefetch_worker_v1,
+    metadata2vdms_with_retry,
+    release_native_linux_heap,
+    release_shared_memory,
 )
 
-# ----- SETUP LOGGING -----
+# Force OpenCV to run sequentially to prevent context-switching overhead
+cv2.setNumThreads(0)  # Forces OpenCV loops to run strictly sequentially
+
+# ==============================================================================
+# LOGGING
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    # format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d) - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 
 # Suppress low-delay reference block warnings from OpenCV/PyAV/FFmpeg
-os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
-os.environ["OPENCV_LOG_LEVEL"] = "OFF"
+# os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
+# os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 logging.getLogger("libav").setLevel(logging.CRITICAL)
 logging.getLogger("libav.hevc").setLevel(logging.CRITICAL)
-
 main_app_logger = logging.getLogger(__name__)
+
+# ==============================================================================
+# FUNCTIONS
+
 STREAM_ARG = False
+# PADDING_PX = 5  #25
+PADDING_SCALE = 0.5  # 0.2  #3  #0.05  # 0.045  # 0.05
+BASE_PIPELINE_CONFIG = PipelineConfig(
+    SHARED_MODEL=os.getenv("SHARED_MODEL", False),
+    ENABLE_QUERYING=os.getenv("ENABLE_QUERYING", ENABLE_QUERYING_DEFAULT),
+)
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+    "rtsp_transport;tcp;hwaccel;cuda;threads;auto;low_delay;1;probesize;5000000"
+)
+
+ffmpeg_cores = "4,5,6,7"  # Manually define cores
+
+# ----- GLOBAL VARIABLES -----
+all_metadata = {}
+
+# Queue for metadata being sent to vdms
+send_metadata_queue = queue.Queue()
+
+# Tracks if both components are finished:
+#   {"clip_name": {"video": bool, "meta": bool}}
+clip_completion_tracker = {}
 
 
 def log_to_logger(message, level="info"):
+    """Safely logs a message to the main application logger."""
     try:
         if level.lower() == "debug":
             main_app_logger.debug(message)
@@ -71,187 +112,143 @@ def log_to_logger(message, level="info"):
         pass
 
 
-# ----- PIPELINE CONFIGURATION -----
-# Force OpenCV to run sequentially to prevent context-switching overhead
-cv2.setNumThreads(0)  # Forces OpenCV loops to run strictly sequentially
-# cv2.setNumThreads(os.cpu_count() or 4)
-torch.set_num_threads(1)
-torch.set_num_interop_threads(1)
-# os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OMP_NUM_THREADS"] = str(mp.cpu_count())  # "1"
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+from multiprocessing.shared_memory import SharedMemory
 
 
-from include.utils import (
-    PipelineConfig,
-    PipelineMapping,
-    draw_label,
-    get_detection_color,
-    metadata2vdms_with_retry,
-)
-
-
-class AsyncVideoWriter:
-    """Handles disk saving operations asynchronously on a background thread."""
-
-    def __init__(self, path, fourcc, fps, size):
-        self.writer = cv2.VideoWriter(path, fourcc, fps, size)
-        self.queue = queue.Queue()
-        self.running = True
-        self.thread = threading.Thread(target=self._write_loop, daemon=True)
-        self.thread.start()
-
-    def _write_loop(self):
-        while self.running or not self.queue.empty():
-            try:
-                frame = self.queue.get(timeout=0.05)
-                if frame is None:
-                    break
-                self.writer.write(frame)
-                self.queue.task_done()
-            except queue.Empty:
-                continue
-
-    def write_frame(self, frame):
-        self.queue.put(frame)
-
-    def release(self):
-        self.running = False
-        self.thread.join()
-        self.writer.release()
-
-
-class AsyncDisplayVideoWriter:
+def video_writer_core_loop(
+    write_queue,
+    segment_pattern,
+    fps,
+    width,
+    height,
+    clip_duration,
+    shm_names,
+    frame_bytes,
+):
     """
-    Lock-free single-element buffer optimized for 8K pipelines.
-    Eliminates queue.Queue lock contention to preserve strict target frame rates.
+    Original core loop, now running in an isolated process.
+    It manages its own FFmpeg pipe and reads frames from the multiprocessing queue.
     """
+    # 1. Move your existing FFmpeg command creation here
+    # (Adapt these arguments if your original segment command differed slightly)
+    # command = [
+    #     'ffmpeg', '-y',
+    #     '-f', 'rawvideo', '-vcodec', 'rawvideo',
+    #     '-s', f'{width}x{height}', '-pix_fmt', 'bgr24', '-r', str(fps),
+    #     '-i', '-',
+    #     '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
+    #     '-f', 'segment', '-segment_time', '60', '-reset_timestamps', '1',
+    #     segment_pattern
+    # ]
+    # clip_duration = int(self.config.CLIP_DURATION)
+    # Attach to the existing shared memory blocks
+    shm_blocks = [SharedMemory(name=name) for name in shm_names]
 
-    def __init__(self, target_fps, display_size, quality=60):
-        self.target_fps = float(target_fps)
-        self.disp_w, self.disp_h = display_size
-        self.quality = int(quality)
+    frame_buffers = [
+        np.ndarray((height, width, 3), dtype=np.uint8, buffer=shm.buf)
+        for shm in shm_blocks
+    ]
+    # Example: Get the CPU core count and reserve the last few for FFmpeg
+    # core_count = os.cpu_count()
+    # ffmpeg_cores = "4,5,6,7"  # Manually define cores
+    command = [
+        "taskset",
+        "-c",
+        ffmpeg_cores,
+        "ffmpeg",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        str(fps),
+        "-i",
+        "-",
+        "-c:v",
+        "libx264",  # "mpeg4",  # Or "libx264" if you prefer H.264
+        "-crf",
+        "23",
+        "-f",
+        "mpegts",
+        "-movflags",
+        "faststart",
+        "-force_key_frames",
+        f"expr:gte(t,n_forced*{clip_duration})",
+        "-f",
+        "segment",
+        "-segment_time",
+        f"{clip_duration}",
+        "-reset_timestamps",
+        "1",
+        "-segment_format",
+        "mp4",
+        # CRITICAL: Force fragmented headers so every chunk has a valid moov atom instantly
+        "-segment_format_options",
+        "movflags=frag_keyframe+empty_moov+default_base_moof",
+        segment_pattern,
+    ]
 
-        # 1. 🔄 FIX: Use a lockless deque with maxlen=1 instead of queue.Queue
-        self.buffer = deque(maxlen=1)
-        self.running = True
-        self.handler = None
+    # 2. Start the FFmpeg pipe INSIDE the process
+    video_writer = subprocess.Popen(
+        command, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
 
-        self.thread = threading.Thread(target=self._write_loop, daemon=True)
-        self.thread.start()
+    try:
+        # while True:
+        #     # 3. Read the frame array directly from the queue
+        #     frame = write_queue.get()
 
-    def set_handler_context(self, handler_instance):
-        self.handler = handler_instance
+        #     # Poison pill to stop the process cleanly
+        #     if frame is None:
+        #         break
 
-    def _write_loop(self):
-        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
+        #     # =================================================================
+        #     # 🛠️ SAFE BYTE EXTRACTION
+        #     # =================================================================
+        #     if torch.is_tensor(frame):
+        #         # Move to CPU, convert to NumPy, and get bytes
+        #         raw_bytes = frame.detach().cpu().numpy().tobytes()
+        #     elif isinstance(frame, np.ndarray):
+        #         raw_bytes = frame.tobytes()
+        #     else:
+        #         raw_bytes = bytes(frame) # Fallback for raw byte strings
+        #     # =================================================================
 
-        while self.running:
-            try:
-                # 2. 🔄 FIX: Non-blocking pop from the single-element buffer
-                if not self.buffer:
-                    time.sleep(0.005)
-                    continue
+        #     # Write the raw bytes to the FFmpeg pipe
+        #     video_writer.stdin.write(raw_bytes)
 
-                display_frame, frame_num = self.buffer.popleft()
+        #     # Help garbage collection in the isolated process
+        #     del frame, raw_bytes
+        while True:
+            # Get the SLOT INDEX from the queue (not the full frame)
+            slot_idx = write_queue.get()
+            if slot_idx is None:
+                break
 
-                if self.handler is None or not self.handler.active:
-                    continue
+            # 3. Access the frame directly from the shared memory buffer
+            frame = frame_buffers[slot_idx]
+            video_writer.stdin.write(frame.tobytes())
 
-                if (
-                    display_frame.shape[1] != self.disp_w
-                    or display_frame.shape[0] != self.disp_h
-                ):
-                    display_frame = cv2.resize(
-                        display_frame,
-                        (self.disp_w, self.disp_h),
-                        interpolation=cv2.INTER_NEAREST,
-                    )
-
-                ret, jpeg_buf = cv2.imencode(".jpg", display_frame, encode_param)
-                if not ret:
-                    continue
-
-                frame_bytes = jpeg_buf.tobytes()
-                frame_len = len(frame_bytes)
-                num_shms = len(self.handler.shms)
-
-                write_idx = (self.handler.ready_buffer_idx.value + 1) % num_shms
-
-                shm_block = self.handler.shms[write_idx]
-                shm_block.buf[:frame_len] = memoryview(frame_bytes)
-
-                self.handler.shm_frame_lengths[write_idx] = frame_len
-                self.handler.ready_buffer_idx.value = write_idx
-                self.handler.shared_details["last_id"] = frame_num
-                self.handler.mp_last_id.value = frame_num
-
-                if hasattr(self.handler, "loop") and self.handler.loop is not None:
-                    self.handler.loop.call_soon_threadsafe(
-                        self.handler.frame_ready_event.set
-                    )
-                else:
-                    self.handler.frame_ready_event.set()
-
-            except Exception as e:
-                print(
-                    f"[STREAM-ERROR] Lock-free frame streaming dropped: {e}", flush=True
-                )
-                continue
-
-    def write_frame(self, frame, frame_num):
-        """Thread-safe lock-free atomic submission track."""
-        if self.running:
-            # 3. 🔄 FIX: Directly append to overwrite the old entry without thread locks
-            self.buffer.append((frame, frame_num))
-
-    def release(self):
-        self.running = False
-        self.buffer.clear()
-        if self.thread.is_alive():
-            self.thread.join(timeout=0.5)
-
-
-BASE_PIPELINE_CONFIG = PipelineConfig(
-    SHARED_MODEL=os.getenv("SHARED_MODEL", False),
-    ENABLE_QUERYING=os.getenv("ENABLE_QUERYING", ENABLE_QUERYING_DEFAULT),
-)
-
-
-# Optimizes RTSP ingestion with hardware acceleration and low-delay flags
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-    "rtsp_transport;tcp|hwaccel;cuda|threads;auto|low_delay;1|probesize;5000000"
-    # "rtsp_transport;tcp|hwaccel;cuda|threads;1|probesize;32|analyzeduration;0"
-    # "rtsp_transport;tcp|hwaccel;cuda|threads;2|probesize;32|analyzeduration;0"
-    # "rtsp_transport;tcp|hwaccel;cuda|threads;2|probesize;32|analyzeduration;0"
-    # "rtsp_transport;tcp|hwaccel;cuda|threads;4|probesize;5000000|analyzeduration;5000000"
-    #  "rtsp_transport;udp|hwaccel;cuda|threads;8|stimeout;5000000|listen_timeout;5000"
-)
-
-
-# ----- GLOBAL VARIABLES -----
-# ENABLE_QUERYING = os.getenv("ENABLE_QUERYING", ENABLE_QUERYING_DEFAULT)
-# if BASE_PIPELINE_CONFIG.ENABLE_QUERYING:
-# Tracks all metadata
-all_metadata = {}
-
-# Tracks clip_filename once video re-encoded
-# video_ready_list = {}
-
-# Queue for metadata being sent to vdms
-send_metadata_queue = queue.Queue()
-
-# Tracks if both components are finished:
-#   {"clip_name": {"video": bool, "meta": bool}}
-clip_completion_tracker = {}
-
-PADDING_PX = 10
+    except Exception as e:
+        logging.error(f"[VIDEO WRITER] Loop exception: {e}")
+    finally:
+        video_writer.stdin.close()
+        video_writer.wait()
+        # Clean up process-local attachments
+        for shm in shm_blocks:
+            shm.close()
 
 
 # ----- FASTAPI APPLICATION STARTUP/SHUTDOWN -----
 # The lifespan parameter handles startup and shutdown
 async def auto_cleanup_janitor(app):
+    """
+    A background task that runs periodically to find and clean up stale or inactive streams.
+    This acts as a safety net to prevent resource leaks from streams that do not terminate correctly.
+    """
     while True:
         await asyncio.sleep(10)
         now = time.time()
@@ -262,47 +259,92 @@ async def auto_cleanup_janitor(app):
             for name, streamer in list(app.state.active_streams.items()):
                 # streamer = app.state.active_streams.get(name)
                 if not streamer:
+                    app.state.active_streams.pop(name, None)
                     continue
 
-                ai_backlog = streamer.get_executor_backlog()
-                video_backlog = (
-                    streamer.write_queue.qsize()
-                    if streamer.config.ENABLE_QUERYING
-                    else 0
-                )
-                # io_backlog = (
-                #     streamer.io_executor._work_queue.qsize()
-                #     if hasattr(streamer, "io_executor")
-                #     else 0
-                # )
+                # If the stream handler marked itself inactive or stopped
+                # if getattr(streamer, "_is_stopped", False) or not getattr(streamer, "active", True):
+                #     main_app_logger.info(f"JANITOR: Removing dead stream {name}")
+                #     app.state.active_streams.pop(name, None)
+                #     if not streamer._is_stopped:
+                #         loop = asyncio.get_event_loop()
+                #         loop.run_in_executor(None, streamer.stop)
+                #     continue
 
-                # Check if the stream is marked inactive OR timed out
-                # streamer.active should be False when the video source ends
-                is_stale = now - streamer.last_heartbeat > 30
+                if hasattr(
+                    streamer, "last_heartbeat"
+                ):  # and (getattr(streamer, "active", False) == "RUNNING"):
+                    #     # Inactivity heartbeat check (e.g., 5 seconds with no new frames)
+                    #     if now - getattr(streamer, "last_heartbeat", now) > 15.0:
+                    #         main_app_logger.info(f"JANITOR: Stream {name} timed out. Evicting.")
+                    #         app.state.active_streams.pop(name, None)
+                    #         if not streamer._is_stopped:
+                    #             loop = asyncio.get_event_loop()
+                    #             loop.run_in_executor(None, streamer.stop)
+                    # continue
 
-                should_remove = False
+                    ai_backlog = streamer.get_executor_backlog()
+                    video_backlog = (
+                        streamer.write_queue.qsize()
+                        if streamer.config.ENABLE_QUERYING
+                        else 0
+                    )
+                    # io_backlog = (
+                    #     streamer.io_executor._work_queue.qsize()
+                    #     if hasattr(streamer, "io_executor")
+                    #     else 0
+                    # )
 
-                if not streamer.active and (
-                    ai_backlog == 0 and video_backlog == 0  # and io_backlog == 0
-                ):
-                    should_remove = True  # Video ended naturally
-                elif is_stale and (
-                    ai_backlog == 0 and video_backlog == 0  # io_backlog == 0
-                ):
-                    should_remove = True  # Browser tab closed/Network lost
-                elif now - streamer.last_heartbeat > 90:
-                    should_remove = True  # Hard timeout for hung processes
+                    # Check if the stream is marked inactive OR timed out
+                    # streamer.active should be False when the video source ends
+                    is_stale = now - streamer.last_heartbeat > 30  # No activity for 30s
+                    is_hung = (
+                        now - streamer.last_heartbeat > 90
+                    )  # Hard timeout after 90s
 
-                if should_remove:
-                    async with app.state.stream_lock:
-                        if BASE_PIPELINE_CONFIG.DEBUG == "1":
-                            print(f"CLEANUP: Removing {name} from active_streams")
-                        streamer.stop()
-                        app.state.active_streams.pop(name, None)
+                    should_remove = False
+                    reason = ""
+
+                    # Conditions to remove stream
+                    if streamer._is_stopped:
+                        should_remove, reason = True, "Handler already stopped"
+                    elif not streamer.active and (
+                        ai_backlog == 0 and video_backlog == 0  # and io_backlog == 0
+                    ):
+                        should_remove, reason = True, "Video ended naturally"
+                    elif is_stale and (
+                        ai_backlog == 0 and video_backlog == 0  # io_backlog == 0
+                    ):
+                        should_remove, reason = True, "Browser tab closed/Network lost"
+                    elif is_hung:
+                        should_remove, reason = True, "Hard timeout for hung processes"
+
+                    if should_remove:
+                        async with app.state.stream_lock:
+                            if BASE_PIPELINE_CONFIG.DEBUG == "1":
+                                main_app_logger.info(
+                                    f"CLEANUP: Removing {name} from active_streams: {reason}"
+                                )
+                            try:
+                                if not streamer._is_stopped:
+                                    streamer.stop()
+                                    streamer.stop_threads(["process_thread"])
+                                app.state.active_streams.pop(name, None)
+                            finally:
+                                del streamer
+
+            gc.collect()  # Final garbage collection
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Manages FastAPI startup and shutdown lifecycle.
+    Guarantees release on shutdown.
+    """
+
     # --- STARTUP ---
     if not hasattr(app.state, "classes"):
         app.state.classes = None
@@ -312,27 +354,31 @@ async def lifespan(app: FastAPI):
 
     app.state.status = "Ready"
     app.state.stream_lock = asyncio.Lock()
+
+    # Warmup shared model (if configured)
     if BASE_PIPELINE_CONFIG.SHARED_MODEL:
         app.state.model = YOLO(
             BASE_PIPELINE_CONFIG.model_path, verbose=False, task="detect"
         )
 
         device_input = "cuda" if BASE_PIPELINE_CONFIG.DEVICE == "GPU" else "cpu"
-        print("Starting shared model warmup...")
-        dummy_input = torch.zeros(
-            (1, 3, BASE_PIPELINE_CONFIG.MODEL_H, BASE_PIPELINE_CONFIG.MODEL_W)
-        ).to(device_input)
-        for _ in range(20):
-            _ = app.state.model(dummy_input, verbose=False)
-
-        del dummy_input
-        # torch.cuda.empty_cache()
-        print("Shared model warmup and VRAM purge complete.")
+        main_app_logger.info("Starting shared model warmup...")
+        try:
+            dummy_input = torch.zeros(
+                (1, 3, BASE_PIPELINE_CONFIG.MODEL_H, BASE_PIPELINE_CONFIG.MODEL_W)
+            ).to(device_input)
+            for _ in range(5):
+                _ = app.state.model(dummy_input, verbose=False)
+        finally:
+            del dummy_input
+            if "cuda" in device_input:
+                torch.cuda.empty_cache()
+        main_app_logger.info("Shared model warmup and VRAM purge complete.")
 
     janitor_task = asyncio.create_task(auto_cleanup_janitor(app))
 
     if BASE_PIPELINE_CONFIG.DEBUG == "1":
-        print(f"--- APP STARTUP | PID: {os.getpid()} | STATE READY ---")
+        main_app_logger.info(f"--- APP STARTUP | PID: {os.getpid()} | STATE READY ---")
 
     yield
 
@@ -340,79 +386,24 @@ async def lifespan(app: FastAPI):
     janitor_task.cancel()
     async with app.state.stream_lock:
         for name, streamer in list(app.state.active_streams.items()):
-            print(f"Shutting down stream: {name}")
+            main_app_logger.info(f"Shutting down stream: {name}")
             streamer.stop()  # Custom stop method defined below
+            streamer.stop_threads(["process_thread"])
             app.state.active_streams.pop(name, None)
+            del streamer
+
+    # Clear all application state
+    app.state.active_streams.clear()
+    if hasattr(app.state, "model"):
+        del app.state.model
+
+    gc.collect()  # Final garbage collection
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     app.state.status = "Stopped"
 
 
 # ----- INGESTION FUNCTIONS -----
-def nv12_to_rgb_torch(
-    nv12_tensor, h, w, is_h264_8k=False, out_buffer=None, is_bgr=True
-):
-    """
-    Highly optimized NV12/YUV to RGB/BGR conversion.
-    Fixes the 'Blue Frame' by applying proper YUV-to-RGB matrix math.
-    """
-    with torch.no_grad():
-        if is_h264_8k:
-            # 8K Planar Path: Map the channels directly
-            y = nv12_tensor[0:1, :, :].half()
-            u = nv12_tensor[1:2, :, :].half()
-            v = nv12_tensor[2:3, :, :].half()  # Use the 3rd channel!
-
-            # No column slicing (0::2) needed if it's already planar.
-            # But we must ensure U and V match Y dimensions if they were subsampled.
-            if u.shape[-1] != w or u.shape[-2] != h:
-                u = F.interpolate(u.unsqueeze(0), size=(h, w), mode="bilinear").squeeze(
-                    0
-                )
-                v = F.interpolate(v.unsqueeze(0), size=(h, w), mode="bilinear").squeeze(
-                    0
-                )
-        else:
-            # Standard NV12 Path: Image is [H*1.5, W]
-            y = nv12_tensor[:h, :w].unsqueeze(0).half()
-            uv = (
-                nv12_tensor[h:, :w]
-                .reshape(h // 2, w // 2, 2)
-                .permute(2, 0, 1)
-                .unsqueeze(0)
-                .half()
-            )
-            # Upsample Chroma (4:2:0 -> 4:4:4)
-            uv_up = F.interpolate(uv, size=(h, w), mode="nearest")
-            u = uv_up[0, 0:1, :, :]
-            v = uv_up[0, 1:2, :, :]
-
-        # --- YUV to RGB Conversion Math (BT.709) ---
-        # 1. Normalize Luma and center Chroma
-        y = (y - 16.0) * 1.164
-        u = u - 128.0
-        v = v - 128.0
-
-        # 2. Matrix Multiplication (Coefficients for natural color)
-        r = y + 1.793 * v
-        g = y - 0.213 * u - 0.533 * v
-        b = y + 2.112 * u
-
-        # 3. Stack into final order
-        if is_bgr:
-            colored_img = torch.cat([b, g, r], dim=0)
-        else:
-            colored_img = torch.cat([r, g, b], dim=0)
-
-        # 4. Final Clamp and Format
-        colored_img.clamp_(0, 255)
-        output = colored_img.to(torch.uint8)
-
-        if out_buffer is not None:
-            out_buffer.copy_(output)
-            return out_buffer
-
-        return output
-
-
 def send_metadata(
     VDMS_POOL=None,
     DEBUG_FLAG=BASE_PIPELINE_CONFIG.DEBUG_FLAG,
@@ -436,13 +427,17 @@ def send_metadata(
     clip_key = ""
     width = 0
     height = 0
+
     while True:
+        queue_details = None
+        clip_metadata = None
+
         try:
             queue_details = send_metadata_queue.get()
+            # send_metadata_queue.task_done()
             if queue_details is None:
-                print(
+                main_app_logger.info(
                     "[METADATA-DEBUG D-pill] Poison pill received. Terminating send_metadata thread loops cleanly.",
-                    flush=True,
                 )
                 break
 
@@ -492,7 +487,6 @@ def send_metadata(
                         f" [CRITICAL] Permanent VDMS failure. Data saved to: {error_path}"
                     )
 
-                send_metadata_queue.task_done()
             else:
                 main_app_logger.error(
                     f" [MISSING] Metadata for {clip_key} was lost before upload!"
@@ -500,292 +494,109 @@ def send_metadata(
 
         except Exception as e:
             # pass
-            print(f"[EXCEPTION] Exception occurred in send_metadata: {e}")
+            main_app_logger.info(
+                f"[EXCEPTION] Exception occurred in send_metadata: {e}"
+            )
             traceback.print_exc()
+        finally:
+            if "queue_details" in locals():
+                del queue_details
+            if "clip_metadata" in locals():
+                del clip_metadata
+            send_metadata_queue.task_done()
+
+
+_KNOWN_HANDLER_METHODS = {}
+
+
+def get_known_handler_methods(handler_class):
+    if handler_class not in _KNOWN_HANDLER_METHODS:
+        handler_methods = {}
+        for cls in [handler_class, DeviceBaseHandler]:
+            for name, attr in inspect.getmembers(cls, predicate=inspect.isfunction):
+                handler_methods[name] = attr
+        _KNOWN_HANDLER_METHODS[handler_class] = handler_methods
+    return _KNOWN_HANDLER_METHODS[handler_class]
+
+
+def standalone_writer_process(write_queue, fps, width, height, output_path):
+    """Runs completely isolated from the GIL and main AI loop."""
+    # 1. Initialize FFmpeg INSIDE the new process
+    command = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-vcodec",
+        "rawvideo",
+        "-s",
+        f"{width}x{height}",
+        "-pix_fmt",
+        "bgr24",
+        "-r",
+        str(fps),
+        "-i",
+        "-",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "28",
+        "-pix_fmt",
+        "yuv420p",
+        output_path,
+    ]
+
+    writer = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    try:
+        while True:
+            frame_data = write_queue.get()
+            if frame_data is None:  # Poison pill to stop
+                break
+
+            # Write the raw bytes directly to FFmpeg
+            writer.stdin.write(frame_data.tobytes())
+
+    except Exception as e:
+        logging.error(f"[WRITER PROCESS] Error: {e}")
+    finally:
+        writer.stdin.close()
+        writer.wait()
 
 
 # ----- STREAM HANDLERS -----
-def scale_clusters_to_8k(merged_640, frame_w=7680, frame_h=4320):
-    # Ratios for 8K projection
-    scale_x = frame_w / 640.0
-    scale_y = frame_h / 640.0
-    final_rois = []
+def get_test_handler(test_class_self, device):  # Resolve concrete handler class type
+    HandlerClass = GPUStreamHandler if device == "gpu" else CPUStreamHandler
+    # HandlerClass.pipeline_fn = test_class_self.__class__.pipeline_fn
 
-    for box in merged_640:
-        # Calculate centroid in 640p space
-        cx_640 = (box[0] + box[2]) / 2.0
-        cy_640 = (box[1] + box[3]) / 2.0
+    # Dynamically re-bind backend methods to this execution instance
+    handler_classes = [HandlerClass, DeviceBaseHandler]
+    handler_methods = get_known_handler_methods(HandlerClass)
+    for method_name, method_func in handler_methods.items():
+        if method_name in ["pipeline_fn", "config"]:  # "run_realtime_inference"
+            continue
 
-        # Map to 8K space with float precision to avoid offset drift
-        cx_8k = cx_640 * scale_x
-        cy_8k = cy_640 * scale_y
+        if not hasattr(test_class_self.__class__, method_name):
+            setattr(
+                test_class_self,
+                method_name,
+                types.MethodType(method_func, test_class_self),
+            )
 
-        # Center the 640x640 YOLO crop at the 8K centroid
-        half = 320
-        nx1 = max(0, int(cx_8k - half))
-        ny1 = max(0, int(cy_8k - half))
-        nx2 = min(frame_w, nx1 + 640)
-        ny2 = min(frame_h, ny1 + 640)
-
-        # Shift back if clamped at 8K boundaries
-        if nx2 == frame_w:
-            nx1 = max(0, frame_w - 640)
-        if ny2 == frame_h:
-            ny1 = max(0, frame_h - 640)
-
-        final_rois.append([nx1, ny1, nx1 + 640, ny1 + 640])
-
-    return final_rois
-
-
-# def rendering_worker(
-#     queue,
-#     shared_details,
-#     ready_idx,
-#     reader_active_idx,
-#     frame_lengths,
-#     signal_queue,
-#     display_size,
-#     quality,
-# ):
-#     disp_w, disp_h = display_size
-#     # Attach to both buffers
-#     shm_names = shared_details["shm_names"]
-#     worker_shms = [mp.shared_memory.SharedMemory(name=n) for n in shm_names]
-#     num_shms = len(shm_names)
-
-#     try:
-#         while True:
-#             print("[FASTAPI-TRACE D] rendering_worker child process waiting on queue.get()...", flush=True)
-#             item = queue.get()
-#             if item is None:  # Sentinel value to stop the worker
-#                 break
-
-#             # frame is display size
-#             # metadata in resized res
-#             display_frame, frameNum, metadata_or_bbs, class_list = item
-#             print(f"[FASTAPI-TRACE E] rendering_worker child dequeued Frame #{frameNum}.", flush=True)
-#             scale_display_x = disp_w / 640
-#             scale_display_y = disp_h / 640
-
-#             if isinstance(metadata_or_bbs, dict):
-#                 # Case: Object Detection
-#                 display_frame = get_metadata_overlay(
-#                     display_frame,
-#                     metadata_or_bbs,
-#                     class_list,
-#                     (scale_display_x, scale_display_y),
-#                     (disp_w, disp_h),
-#                 )
-
-#             elif metadata_or_bbs is not None:
-#                 # Case: Motion Detections Only (SF Path)
-#                 display_frame = get_bb_overlay(
-#                     display_frame,
-#                     metadata_or_bbs,
-#                     (scale_display_x, scale_display_y),
-#                     (disp_w, disp_h),
-#                 )
-
-#             # writer.write(display_frame)
-#             if frameNum > shared_details["last_id"]:  # self.last_delivered_frame_id:
-#                 frame_bytes = get_display_frame_in_bytes(
-#                     display_frame,
-#                     display_size=display_size,
-#                     quality=quality,
-#                     return_bytes=True,
-#                 )
-#                 if frame_bytes:
-#                     # THE HARD GUARD: If the reader is currently touching RAM, skip this write.
-#                     # This prevents the '1-minute' scramble by ensuring zero memory overlap.
-#                     # if signal_queue.full():
-#                     #     continue
-#                     frame_len = len(frame_bytes)
-
-#                     forbidden_idx = [ready_idx.value, reader_active_idx.value]
-#                     available_idx = [
-#                         i for i in range(num_shms) if i not in forbidden_idx
-#                     ]
-
-#                     # if not available_idx:
-#                     #     continue
-
-#                     # # Write to the buffer that is NOT currently 'ready'
-#                     # # write_idx = (shared_details["buffer_idx"] + 1) % 2
-#                     # # write_idx = 1 if ready_idx.value == 0 else 0
-#                     # # current_ready = ready_idx.value
-#                     # # write_idx = (current_ready + 1) % 3
-#                     # write_idx = available_idx[0]
-
-#                     if not available_idx:
-#                         # Instead of skipping completely and freezing, force a fallback
-#                         # to the next standard ring channel
-#                         write_idx = (ready_idx.value + 1) % num_shms
-#                     else:
-#                         write_idx = available_idx[0]
-
-#                     shm = worker_shms[write_idx]
-
-#                     # Zero-copy write to RAM
-#                     shm.buf[:frame_len] = frame_bytes
-
-#                     frame_lengths[write_idx] = frame_len
-#                     # shared_details["buffer_idx"] = write_idx
-#                     ready_idx.value = write_idx
-#                     # shared_details["last_id"] = frameNum
-#                     # self.last_frame_id = frameNum
-#                     # self.last_heartbeat = time.time()
-#                     # Signal the FastAPI generator that a new frame is ready
-#                     # self.loop.call_soon_threadsafe(self.frame_ready_event.set)
-#                     # self.mp_frame_ready_event.set()
-#                     # try:
-#                     #     signal_queue.put_nowait(True)
-#                     # except Exception:
-#                     #     pass
-#                     # signal_queue.put(True)
-#                     try:
-#                         print(f"[FASTAPI-TRACE F] Frame #{frameNum} written to SHM slot {write_idx} ({frame_len} bytes). Signaling parent...", flush=True)
-#                         signal_queue.put_nowait((True, frameNum))
-#                     except queue.Full:
-#                         print(f"[FASTAPI-TRACE WARN] signal_queue full on Frame #{frameNum}", flush=True)
-#                         # pass  # If the web app is slightly behind, do not freeze the child process!
-
-#         # END While
-
-#     except Exception as e:
-#         print(f"[EXCEPTION] Error while rendering display: {e}")
-#     finally:
-#         for s in worker_shms:
-#             s.close()
-
-
-def get_metadata_overlay(
-    display_frame, metadata_or_bbs, class_list, scale_display, disp_size, is_bgr=True
-):
-    scale_display_x, scale_display_y = scale_display
-    disp_w, disp_h = disp_size
-    for _, obj in metadata_or_bbs.items():
-        bbox = obj["bbox"]
-        x = max(0, int(bbox["x"] * scale_display_x))
-        y = max(0, int(bbox["y"] * scale_display_y))
-        w = min(disp_w, int(bbox["width"] * scale_display_x))
-        h = min(disp_h, int(bbox["height"] * scale_display_y))
-
-        class_name = bbox["object"]
-        class_id = class_list.index(class_name) if class_name in class_list else 0
-        confidence = bbox.get("object_det", {}).get("confidence", 0.0)
-
-        bb_color = get_detection_color(class_id, is_bgr=is_bgr)
-        label = f"{class_name} {confidence:.2f}"
-
-        display_frame = cv2.rectangle(
-            display_frame, (x, y), (x + w, y + h), bb_color, 2
+    orig_methods = list(
+        sorted(
+            set(
+                [
+                    k
+                    for h in handler_classes + [test_class_self]
+                    for k in h.__dict__.keys()
+                ]
+            )
         )
-        draw_label(display_frame, label, (x, y), color=bb_color, padding=5)
-    return display_frame
-
-
-def get_bb_overlay(display_frame, metadata_or_bbs, scale_display, disp_size):
-    scale_display_x, scale_display_y = scale_display
-    disp_w, disp_h = disp_size
-    for box in metadata_or_bbs:
-        if torch.is_tensor(box):
-            x1, y1, x2, y2 = box.to(torch.int).cpu().tolist()
-        else:
-            x1, y1, x2, y2 = map(int, box)
-
-        x1 = max(0, int(x1 * scale_display_x))
-        y1 = max(0, int(y1 * scale_display_y))
-        x2 = min(disp_w, int(x2 * scale_display_x))
-        y2 = min(disp_h, int(y2 * scale_display_y))
-        display_frame = cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-    return display_frame
-
-
-# def test_rendering_worker(queue, display_size, out_path, target_fps):
-#     """
-#     Ultra-efficient video saver for TEST_MODE.
-#     Pipes raw BGR frames directly into an internal FFmpeg engine subshell.
-#     """
-#     disp_w, disp_h = display_size
-
-#     # Construct optimized MPEG-4 parameters to match main pipeline architecture
-#     ffmpeg_cmd = [
-#         "ffmpeg",
-#         "-y",
-#         "-probesize",
-#         "32",
-#         "-analyzeduration",
-#         "0",
-#         "-f",
-#         "rawvideo",
-#         "-pix_fmt",
-#         "bgr24",
-#         "-s",
-#         f"{disp_w}x{disp_h}",
-#         "-r",
-#         str(int(target_fps)),
-#         "-i",
-#         "-",
-#         "-c:v",
-#         "libx264",
-#         "-crf",
-#         "23",
-#         # "-c:v", "mpeg4",  # Or "libx264" if you prefer H.264
-#         # "-qscale:v", "4",  # Quality scale (use -crf 23 if using libx264)
-#         str(out_path),
-#     ]
-
-#     # Spawn background daemon process
-#     proc = subprocess.Popen(
-#         ffmpeg_cmd,
-#         stdin=subprocess.PIPE,
-#         stdout=subprocess.DEVNULL,
-#         stderr=subprocess.DEVNULL,
-#         bufsize=10**7,
-#     )
-
-#     try:
-#         while True:
-#             item = queue.get()
-#             if item is None:  # Sentinel value to drain and close the process
-#                 break
-
-#             display_frame, frameNum, metadata_or_bbs, class_list = item
-#             # display_frame = np.ascontiguousarray(display_frame)
-#             scale_display_x = disp_w / 640
-#             scale_display_y = disp_h / 640
-
-#             # --- Draw Detection Overlays ---
-#             if isinstance(metadata_or_bbs, dict):
-#                 # Object Mode (YOLO Structs)
-#                 display_frame = get_metadata_overlay(
-#                     display_frame,
-#                     metadata_or_bbs,
-#                     class_list,
-#                     (scale_display_x, scale_display_y),
-#                     (disp_w, disp_h),
-#                 )
-
-#             elif metadata_or_bbs is not None:
-#                 # # Motion / Smart Filtering Overlay Path
-#                 display_frame = get_bb_overlay(
-#                     display_frame,
-#                     metadata_or_bbs,
-#                     (scale_display_x, scale_display_y),
-#                     (disp_w, disp_h),
-#                 )
-
-#             # Pipe continuous raw contiguous memory block directly into kernel filesystem handles
-#             proc.stdin.write(np.ascontiguousarray(display_frame).tobytes())
-#             # queue.task_done()
-
-#     except Exception as e:
-#         print(f"[TEST-WORKER-EXCEPTION] Video compilation error: {e}")
-#     finally:
-#         if proc.stdin:
-#             proc.stdin.close()
-#         proc.wait()
+    )
+    return test_class_self, orig_methods
 
 
 class DeviceBaseHandler:
@@ -797,416 +608,470 @@ class DeviceBaseHandler:
         self.is_rtsp = str(self.source).startswith("rtsp:/")
         self.active = True
         self.active_streams = active_streams
-
         self.config = config
+
+        sf_name = "SF" if config.sf_enabled else "noSF"
+        self._testMethodName = kwargs.get(
+            "run_name",
+            f"{name}_{sf_name}_{config.DETECTION_TYPE.lower()}_{config.DEVICE.lower()}",
+        )
+
         configstr = "\n".join(
             [f"\t{k}: {v}" for k, v in config.__dict__.items() if not k.startswith("_")]
         )
-        log_to_logger(f"PipelineConfig: \n{configstr}\n", level="info")
+        main_app_logger.info(f"PipelineConfig: \n{configstr}\n")
 
         self.loop = asyncio.get_event_loop()
         self.frame_ready_event = asyncio.Event()
-        # self.frame_ready_event = threading.Event()
         self._is_stopped = False
         self._stop_lock = threading.Lock()  # Local lock for this instance
-        self.mp_frame_ready_event = mp.Event()
+        self.main_startup_event = mp.Event()
 
         # From global
         self.device = self.config.DEVICE
         self.device_input = self.config.device_input
-        # self.disp_w, self.disp_h = self.config.DISPLAY_FRAME_SIZE
+        self.disp_w, self.disp_h = self.config.DISPLAY_FRAME_SIZE
         self.resize_h, self.resize_w = [self.config.MODEL_H, self.config.MODEL_W]
 
-        self.setup_reader(self.config.TARGET_FPS, self.config.CLIP_DURATION)
+        self.setup_reader(
+            self.config.TARGET_FPS,
+            self.config.CLIP_DURATION,
+            startup_event=self.main_startup_event,
+        )
 
         # Kwargs
         # clip_duration = kwargs.get("clip_duration", CLIP_DURATION)
         self.initialize_variables()
 
-        provided_model = kwargs.get("model")
-        self.setup_model(provided_model)
-
-        self.prepare_pipeline()
+        # Should be started before calling setup_threads
+        # if hasattr(self.reader, "worker") and not self.reader.worker.is_alive():
+        #     self.reader.worker.start()
 
         # Start dedicated inference thread and timers
         # self.stat_start_time = time.perf_counter() # timing to display frame
-        self.last_heartbeat = time.time()
         self.setup_threads()
+        self.last_heartbeat = time.perf_counter()
 
-    def setup_model(self, provided_model, force_export=False):
+    def start(self):
+        """
+        Starts the decoupled ingestion and inference threads in the correct order.
+        """
+        # PRE-SYNC: Ensure GPU is idle before timing starts
+        if self.device_input == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        main_app_logger.info(f"[START {self.name}] Starting Threads ...")
+
+        # Start the hardware-decoupled reader first
+        self.reader.start()
+
+        # if self.config.ENABLE_QUERYING:
+        #     self._initialize_writer()
+
+        # Small delay to allow the reader's deque to populate
+        time.sleep(0.1)
+
+        # Start the producer and consumer threads
+        if hasattr(self, "process_thread") and not self.process_thread.is_alive():
+            self.process_thread.start()
+
+        if not self.config.DISABLE_DETECTION:
+            if hasattr(self, "render_proc") and hasattr(self.render_proc, "start"):
+                self.render_proc.start()
+
+            if hasattr(self, "display_proc") and hasattr(self.display_proc, "start"):
+                self.display_proc.start()
+
         if (
-            self.frame_width * self.frame_height
-        ) <= self.config.SMART_FILTERING_PIXEL_CONSTRAINT:
-            if "_noSF" not in self.config.model_path:
-                oldpath = Path(self.config.model_path)
-                old_modelname = self.config.MODEL_NAME
-                self.config.MODEL_NAME = f"{old_modelname}_noSF"
-                new_model_name = oldpath.name.replace(
-                    old_modelname, self.config.MODEL_NAME
-                )
-                self.config.model_path = str(oldpath.parent / new_model_name)
+            self.config.ENABLE_QUERYING
+            and not self.config.TEST_MODE
+            and not self.metadata_thread.is_alive()
+        ):
+            self.metadata_thread.start()
 
-        if provided_model is not None and not isinstance(provided_model, str):
-            self.model = provided_model
-            self.label_source = [v for k, v in self.model.names.items()]
-        else:
-            # if isinstance(provided_model, str) or provided_model is None:
-            # if Path(self.config.model_path).exists():
-            #     self.model = YOLO(self.config.model_path, verbose=False, task="detect")
-            #     self.label_source = []
-            #     for k, v in self.model.names.items():
-            #         self.label_source.append(v)
-            # else:
-            run_platform_name = "engine" if "cuda" in self.device_input else "openvino"
-            self.model, _, self.label_source = get_model(
-                Path(self.config.model_path).parent,
-                self.config.MODEL_NAME.replace("_noSF", ""),
-                run_platform_name,
-                self.device_input,
-                batch=self.config.MODEL_MAX_BATCH_SIZE,
-                force_export=force_export,
-                sf_enabled=self.config.sf_enabled,
-                model_h=self.resize_h,
-                model_w=self.resize_w,
+        if self.config.ENABLE_QUERYING and not self.writer_process.is_alive():
+            self.writer_process.start()
+
+        self.last_heartbeat = time.perf_counter()
+        return self
+
+    def stop(self):
+        """
+        A robust, sequential shutdown process that gracefully terminates all threads
+        and releases all resources without race conditions, especially for live streams.
+        """
+        # Force the GPU to finish all active kernels, copy operations,
+        # and event processing across all streams.
+        # This guarantees no async operations are holding the memory locked!
+        if "cuda" in str(self.device_input) and torch.cuda.is_available():
+            # main_app_logger.info(f"[STOP {self.name}] Synchronizing all CUDA streams...")
+            torch.cuda.synchronize(self.device_input)
+
+        # Use a lock to prevent this complex function from being called by multiple threads at once.
+        with self._stop_lock:
+            if getattr(self, "_is_stopped", False):
+                return
+
+            main_app_logger.info(
+                f"[STOP {self.name}] Initiating orderly shutdown sequence..."
             )
 
-            if run_platform_name == "openvino":
-                self.model.predictor.args.embed = False
+            if hasattr(self, "write_queue") and hasattr(self, "writer_process"):
+                try:
+                    self.write_queue.put(
+                        None, timeout=1.0
+                    )  # The poison pill for the process
+                except (queue.Full, AttributeError):
+                    pass
 
-            if not self.config.sf_enabled:
-                self.model_warmup(self.frame_height, self.frame_width)
-            else:
-                self.model_warmup(self.resize_h, self.resize_w)
-        # else:
-        #     self.model = provided_model
-        #     self.label_source = []
-        #     for k, v in self.model.names.items():
-        #         self.label_source.append(v)
+            # Signal all active loops to stop accepting new work.
+            self.active = False
+            self.prefetch_active = False
 
-    def initialize_variables(self):
-        # 1. HARD GUARD: Capture reader values and ensure the connection is active
-        self.input_fps = self.reader.input_fps
-        self.target_fps = self.reader.target_fps
-        self.frame_width = self.reader.frame_width
-        self.frame_height = self.reader.frame_height
-        self.numFrames = self.reader.numFrames
+            if hasattr(self, "active_streams") and isinstance(
+                self.active_streams, dict
+            ):
+                self.active_streams.pop(self.name, None)
 
-        if self.input_fps <= 0 or self.frame_width <= 0 or self.frame_height <= 0:
-            main_app_logger.error(
-                f"[{self.name}] Stream handler fast-fail triggered. Destination "
-                f"unreachable or invalid ({self.source}). Terminating pipeline configuration."
-            )
-            # Instantly stop background threads to prevent zombie process leakage
-            if hasattr(self, "reader") and self.reader is not None:
-                self.reader.stop()
-
-            raise RuntimeError(
-                f"Failed to initialize stream reader endpoint: {self.source}"
-            )
-
-        # 2. Proceed with calculation mechanics safely only if values are healthy
-        self.step_size = self.input_fps / self.target_fps
-        self.frame_skip = self.reader.frame_skip
-        self.max_frames_per_clip = self.reader.max_frames_per_clip
-        self.frame_interval = self.reader.frame_interval
-
-        self.duration_s = self.numFrames / self.input_fps
-        self.expected_num_frames = int(self.duration_s * self.target_fps)
-        self.get_frameWH()
-
-        # Determine minimum contour size relative to frame resolution
-        self.min_contour_area = int(
-            (self.config.ROI_MIN_AREA_RATIO * self.resize_w)
-            * (self.config.ROI_MIN_AREA_RATIO * self.resize_h)
-        )  # 207
-
-        self.dist_thresh_8k = max(
-            self.config.ROI_DISTANCE_THRESH_RATIO * self.frame_width,
-            self.config.ROI_DISTANCE_THRESH_RATIO * self.frame_height,
-        )
-        multiplier = 2.0 if self.device_input == "cpu" else 1.0
-        self.dist_thresh_640 = (
-            max(
-                self.config.ROI_DISTANCE_THRESH_RATIO * self.resize_w,
-                self.config.ROI_DISTANCE_THRESH_RATIO * self.resize_h,
-            )
-            * multiplier
-        )  # 0.05 * self.resize_w
-        self.scales_tensor = torch.tensor(
-            [self.scale_x, self.scale_y, self.scale_x, self.scale_y],
-            # device="cpu",
-            device=self.device_input,
-        )
-
-        self.disp_w, self.disp_h = self.config.DISPLAY_FRAME_SIZE
-
-        # Performance Tracking
-        self.elapsed_display_time = 0.0
-        self.frame_count = 0  # Frame count for videos
-        self.frame_count_target = 0
-        self.last_delivered_frame_id = -1  # Track what was actually sent
-        self.last_frame_id = 0
-        self.latest_processed_frame = None
-        self.next_process_idx = 0.0
-        self.stat_fps = 0
-        self.stat_frame_count = 0
-        self.total_objects_detected = 0
-
-        self.writer_done = True
-
-        # Video Clipping
-        # self.video_writer = None
-        self.ffmpeg_proc = None  # Replaces cv2.VideoWriter completely
-        # self.fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # avc1, mp4v
-        # self.clip_id = 0
-        # self.clip_filename = ""
-        self.clip_filename_pattern = f"{self.config.SHARED_OUTPUT}/{self.name}_%03d.mp4"
-        # self.clip_key = f"{self.name}_000.mp4"
-        # self.tmp_file = ""
-        self.frame_in_clip_count = 0
-
-        if self.config.ENABLE_QUERYING:
-            # Thread-safe queue for the resized frames (640x640)
-            # maxlen=300 allows for a 20-second buffer in case of extreme disk lag
-            # Non-blocking queue for frames and control signals
-            self.write_queue = queue.Queue(maxsize=300)
-            if not self.config.TEST_MODE:
-                self.send_metadata_queue = queue.Queue()
-            self.writer_done = False
-        self.stop_writer = threading.Event() if self.config.ENABLE_QUERYING else None
-
-        # --- PRE-ALLOCATED ZERO-COPY HARDWARE RING WORKSPACE ---
-        self.ring_depth = 4  # 8
-        self.gpu_ring_idx = 0
-        self.cpu_ring_idx = 0
-
-        self.pinned_matrices = []
-        self.pinned_tensors = []
-
-        self.ingest_ring_depth = 4
-        self.ingest_ring_idx = 0
-        self.ingest_ring = []
-
-        for _ in range(self.ingest_ring_depth):
-            # Match the exact dimensions of the 8K reader output
-            mat = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
-            try:
-                cv2.cuda.registerPageLocked(
-                    mat
-                )  # Page-lock for ultra-fast DMA transfers
-            except Exception:
-                pass
-            self.ingest_ring.append(mat)
-
-        # Pre-allocate a 4-slot ring buffer for raw 8K BGR frames
-        self.ai_ring_depth = 4
-        self.ai_ring_idx = 0
-        self.frame_stride_bytes = (
-            self.resize_w * self.resize_h * 3
-        )  # ~99.5 MB per frame
-
-        self.ai_shms = []
-        self.ai_shm_names = []
-        self.ai_pinned_tensors = []  # Explicit property initialization 🚀
-        init_timestamp = int(time.time_ns())
-        for i in range(self.ai_ring_depth):
-            name = f"shm_ai_640_{self.name}_{i}_{os.getpid()}_{init_timestamp}"
-
-            try:
-                # Attempt to attach to a lingering zombie segment
-                old_shm = shared_memory.SharedMemory(name=name)
-                old_shm.close()
-                old_shm.unlink()  # Permanently destroys the old OS block handle
-                main_app_logger.warning(
-                    f"Cleaned up residual zombie shared memory block: {name}"
-                )
-            except FileNotFoundError:
-                pass  # Block doesn't exist, safe to proceed normal initialization
-
-            shm = shared_memory.SharedMemory(
-                name=name, create=True, size=self.frame_stride_bytes
-            )
-            self.ai_shms.append(shm)
-            self.ai_shm_names.append(name)
-
-            # Map a zero-copy lockless numpy array view straight onto the memory block
-            view = np.ndarray(
-                (self.resize_h, self.resize_w, 3), dtype=np.uint8, buffer=shm.buf
-            )
-
-            # Page-lock the host buffer window to maximize PCIe bus transfer bandwidth
-            try:
-                cv2.cuda.registerPageLocked(view)
-            except Exception:
-                pass
-
-            # Expose a direct matching PyTorch host tensor map to secure high-speed uploads
-            self.ai_pinned_tensors.append(torch.from_numpy(view))
-
-        # Pre-allocate a 4D FP16 GPU staging canvas to maximize Tensor Core performance
-        # if self.device_input == "cuda":
-        # self.ai_gpu_staging = torch.empty(
-        #     (1, 3, self.frame_height, self.frame_width),
-        #     dtype=torch.float16,
-        #     device=f"cuda:{self.gpu_id}",
-        # )
-        # self.preview_gpu_staging = torch.empty(
-        #     (1, 3, self.frame_height, self.frame_width),
-        #     dtype=torch.float16,
-        #     device=f"cuda:{self.gpu_id}",
-        # )
-
-        # Pre-allocate 640x640 workspace footprint across CPU and GPU spaces
-        for _ in range(self.ring_depth):
-            mat = np.zeros((self.resize_h, self.resize_w, 3), dtype=np.uint8)
-            try:
-                cv2.cuda.registerPageLocked(mat)
-            except cv2.error:
-                pass
-            self.pinned_matrices.append(mat)
-            self.pinned_tensors.append(torch.from_numpy(mat))
-        # Isolate CUDA tasks using a dedicated stream and independent hardware completion barriers
-        self.processing_stream = (
-            torch.cuda.Stream() if self.device_input == "cuda" else None
-        )
-        # Pre-allocated hardware events guarantee completely non-blocking stream isolation
-        self.slot_events = (
-            [torch.cuda.Event() for _ in range(8)]
-            if self.device_input == "cuda"
-            else None
-        )
-
-        self.gpu_float_staging = None
-        if self.device_input == "cuda":
-            self.gpu_float_staging = torch.empty(
-                (1, 3, self.frame_height, self.frame_width),
-                dtype=torch.float16,
-                device=f"cuda:{self.gpu_id}",
-            )
-
-        # Default Kernels
-        self.dilate_kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            # cv2.MORPH_RECT,
-            (self.config.DILATE_KERNEL_SIZE, self.config.DILATE_KERNEL_SIZE),
-        )
-        # self.dilate_kernel_for_enhanced_mask = np.ones((15,15), np.uint8)  # 5, 5) (21, 21)
-        self.dilate_kernel_for_enhanced_mask = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            # cv2.MORPH_RECT,
-            (
-                self.config.BKGD_SUB_INCLUDE_HISTORY_DILATE_KERNEL_SIZE,
-                self.config.BKGD_SUB_INCLUDE_HISTORY_DILATE_KERNEL_SIZE,
-            ),
-        )
-
-    def setup_reader(self, target_fps, clip_duration):
-        # if hasattr(self, "reader"):
-        #     del self.reader
-
-        # Add a tiny sleep or garbage collect to ensure the GPU handle is released
-        gc.collect()
-        torch.cuda.empty_cache()  # Clear any remaining context
-
-        # TODO: Further investigate GPU path, bkgd subtraction sensitive to artifacts
-        self.gpu_id = 0
-        is_rtsp_stream = str(self.source).startswith(
-            ("rtsp://", "rtmp://", "http://", "https://")
-        )
-        determined_queue_size = (
-            4 if is_rtsp_stream else 2
-        )  # (0 if self.config.TEST_MODE else 2)
-        if self.device_input == "cuda":  # and not self.is_rtsp:
-            from include.readers import GPUReader
-
-            self.reader = GPUReader(
-                source=self.source,
-                target_fps=target_fps,
-                clip_duration=clip_duration,
-                gpu_id=0,  # self.gpu_id,
-                queue_size=determined_queue_size,
-            )
-        else:
-            from include.readers import CPUReader
-
-            self.reader = CPUReader(
-                source=self.source,
-                target_fps=target_fps,
-                clip_duration=clip_duration,
-                queue_size=determined_queue_size,
-            )
-
-    def prepare_pipeline(self):
-        if self.device_input == "cuda":
-            self.prepare_gpu_pipeline()
-            if len(self.active_streams) == 0:
-                self.gpu_warmup()
-        else:
-            self.prepare_cpu_pipeline()
-
-        # AUTOMATED BACKSUB WARMUP GATE
-        # Priming the Gaussian mixture model before the pipeline loop kicks off
-        if getattr(self.config, "SMART_FILTERING_ENABLED", False):
-            video_source = getattr(self, "source", None)
-            if video_source and os.path.exists(video_source):
-                print(f"[INIT] Warming up background subtractor using: {video_source}")
-                warmup_cap = cv2.VideoCapture(video_source)
-
-                # 20 to 30 frames are optimal to prime the baseline history grid
-                for _ in range(30):
-                    ret, raw_frame = warmup_cap.read()
-                    if not ret:
-                        break
-
-                    # Downscale the warmup frames to match your active pipeline resolution rules
-                    resized_warmup = cv2.resize(
-                        raw_frame,
-                        (self.resize_w, self.resize_h),
-                        interpolation=cv2.INTER_NEAREST,
-                    )
-
-                    # Force a highly aggressive learning rate (e.g., 0.1) during initialization
-                    # to lock down the background model quickly, avoiding delayed frame processing.
-                    if self.device_input == "cuda":
-                        # If you use a GPU-bound background subtractor
-                        self.bgs_cuda.apply(
-                            resized_warmup, learningRate=self.lr, stream=self.bgs_stream
-                        )
+            # Wake up any FastAPI async streaming generators waiting on frame_ready_event
+            if (
+                hasattr(self, "frame_ready_event")
+                and self.frame_ready_event is not None
+            ):
+                try:
+                    if hasattr(self, "loop") and self.loop and self.loop.is_running():
+                        self.loop.call_soon_threadsafe(self.frame_ready_event.set)
                     else:
-                        # Standard CPU track fallback
-                        self.bgs.apply(resized_warmup, learningRate=self.lr)
+                        self.frame_ready_event.set()
+                except Exception:
+                    pass
 
-                warmup_cap.release()
-                print("[INIT] Background subtractor warm up complete. GMM initialized.")
+            main_app_logger.info(f"[STOP {self.name}] Stopping writer event...")
+            self.set_stop_writer_event(remove=False)
+
+            # Shut down the worker pools. wait=True is crucial.
+            # This blocks until all background tasks have finished.
+            main_app_logger.info(
+                f"[STOP {self.name}] Shutting down worker executors..."
+            )
+            self.stop_executors(["clip_executor", "executor"])
+
+            # Join all other background threads.
+            main_app_logger.info(
+                f"[STOP {self.name}] Joining all background threads..."
+            )
+            self.stop_threads(
+                [
+                    "process_thread",
+                    "writer_process",
+                    "metadata_thread",
+                    "display_proc",
+                    "render_proc",
+                ]
+            )
+            # if (
+            #     hasattr(self, "writer_process") and self.writer_process.is_alive()
+            # ):  # actually a process
+            #     self.writer_process.join(timeout=3.0)
+            #     if self.writer_process.is_alive():
+            #         self.writer_process.terminate()
+            self.unregister_pinned_cuda_data()
+            buffer_pools = [
+                "shm_buffer_pool",
+                "gpu_input",
+                "clipper_shm_np_views",
+                "pinned_matrices",
+                "pinned_tensors",
+            ]
+            self.clear_buffer_pools(buffer_pools)
+
+            if hasattr(self, "reader") and self.reader is not None:
+                if hasattr(self.reader, "pinned_views"):
+                    self.reader.pinned_views = []
+                if hasattr(self.reader, "_static_gpu_frame_buffer"):
+                    self.reader._static_gpu_frame_buffer = None
+
+            if hasattr(self, "reader") and self.reader is not None:
+                main_app_logger.info(f"[STOP {self.name}] Stopping reader process...")
+                self.reader.stop()
+                main_app_logger.info(f"[STOP {self.name}] Reader process stopped.")
+
+            if hasattr(self, "prefetch_threads") and self.prefetch_threads:
+                main_app_logger.info(f"[STOP {self.name}] Stopping prefetch threads...")
+                for val in self.prefetch_threads:
+                    self.stop_thread(val)
+                self.prefetch_threads.clear()
+                # delattr(self, "prefetch_threads")
+
+            if hasattr(self, "async_writer") and self.async_writer is not None:
+                main_app_logger.info(f"[STOP {self.name}] Releasing writer...")
+                try:
+                    self.async_writer.release()
+                except Exception:
+                    pass
+                setattr(self, "async_writer", None)
+
+            # Clear the buffer that holds direct pointers to the shared memory.
+            # This is the most critical step to release the "exported pointers".
+            # buffer_pools = ["shm_buffer_pool", "gpu_input"]
+            # buffer_pools = [
+            #     "shm_buffer_pool",
+            #     "gpu_input",
+            #     "clipper_shm_np_views",
+            #     "pinned_matrices",
+            #     "pinned_tensors",
+            # ]
+            # self.clear_buffer_pools(buffer_pools)
+            # if hasattr(self, "shm_buffer_pool") and self.shm_buffer_pool is not None:
+            #     main_app_logger.info(
+            #         f"[STOP {self.name}] Clearing shared memory buffer pool to release pointers..."
+            #     )
+            #     for i in range(len(self.shm_buffer_pool)):
+            #         self.shm_buffer_pool[i] = None
+            #     # self.shm_buffer_pool = None
+
+            # if hasattr(self, "gpu_input") and self.gpu_input is not None:
+            #     # main_app_logger.info(
+            #     #     f"[STOP {self.name}] Clearing shared memory buffer pool to release pointers..."
+            #     # )
+            #     for i in range(len(self.gpu_input)):
+            #         self.gpu_input[i] = None
+            #     self.gpu_input = None
+            #     # self.gpu_input.clear()
+
+            # Force instant garbage collection to drop Python buffer exports from memoryview
+            gc.collect()
+            if "cuda" in str(self.device_input) and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            shm_names = [
+                "clipper_shm_blocks",
+                "reader.shms",
+                "shms",
+            ]
+            main_app_logger.info(f"[STOP {self.name}] Clearing shared memory...")
+            self.clear_shared_memory_list(shm_names)
+
+            # if hasattr(self, "clipper_shm_blocks"):
+            #     for shm in self.clipper_shm_blocks:
+            #         shm.close()
+            #         shm.unlink()  # This removes the file from /dev/shm
+
+            # shms_to_close = []  # self.shms
+            # if hasattr(self, "reader") and self.reader is not None:
+            #     main_app_logger.info(
+            #         f"[STOP {self.name}] Calling reader.stop() to clean up worker process..."
+            #     )
+            #     self.reader.stop()
+            #     if hasattr(self.reader, "shms"):
+            #         shms_to_close += self.reader.shms
+            # self.reader = None
+
+            # if hasattr(sys, "exc_info"):
+            #     # This clears the three-element tuple (type, value, traceback)
+            #     exc_info = sys.exc_info()
+            #     if exc_info[2] is not None: # Check if a traceback object exists
+            #         traceback.clear_frames(exc_info[2])
+            # # For older python versions, or as an extra measure
+            # if hasattr(sys, "exc_clear"):
+            #     sys.exc_clear()
+
+            # gc.collect()
+            # if "cuda" in str(self.device_input) and torch.cuda.is_available():
+            #     torch.cuda.empty_cache()
+            #     if hasattr(torch.cuda, "ipc_collect"):
+            #         torch.cuda.ipc_collect()
+
+            # if shms_to_close:
+            #     main_app_logger.info(f"[STOP {self.name}] Closing OS shared memory files...")
+            #     for shm in shms_to_close:
+            #         try:
+            #             shm.close()
+            #             shm.unlink()
+            #         except Exception:
+            #             pass
+            #     shms_to_close.clear()
+
+            # =========================================================================
+            # 🕵️‍♂️ ADVANCED REFERENCE INVESTIGATOR
+            # =========================================================================
+            # import gc
+            # import inspect
+
+            main_app_logger.info("\n" + "=" * 80)
+            main_app_logger.info(
+                "🕵️‍♂️ [STOP INVESTIGATION] Scanning for active pointers to SharedMemory blocks..."
+            )
+            # main_app_logger.info("=" * 80)
+
+            # if hasattr(self, "reader") and hasattr(self.reader, "shms"):
+            #     for idx, shm in enumerate(self.reader.shms):
+            #         main_app_logger.info(f"\n[SHM BLOCK {idx}] Name: {shm.name}")
+
+            #         # Create a function to recursively find the ultimate owner
+            #         def find_owner(obj, depth=0):
+            #             if depth > 5:  # Safety limit to prevent infinite recursion
+            #                 return
+
+            #             referrers = gc.get_referrers(obj)
+            #             for ref in referrers:
+            #                 # Ignore the current function's local variables
+            #                 if ref is referrers or ref is locals():
+            #                     continue
+
+            #                 ref_type_name = type(ref).__name__
+
+            #                 # If we find a class instance, we found the owner!
+            #                 if hasattr(ref, "__dict__"):
+            #                     # Check if it's a class instance and not just a dict
+            #                     if not isinstance(ref, (dict, list, tuple, set)):
+            #                         for k, v in ref.__dict__.items():
+            #                             if v is obj:
+            #                                 main_app_logger.info(
+            #                                     f"{'  ' * depth}└── Found Owner: Class <{type(ref).__name__}> holds reference in attribute '{k}'"
+            #                                 )
+
+            #                 # If the referrer is a list or tuple, recurse deeper
+            #                 elif isinstance(ref, (list, tuple)):
+            #                     main_app_logger.info(
+            #                         f"{'  ' * depth}└── Held by container: <{ref_type_name}> of len {len(ref)}"
+            #                     )
+            #                     find_owner(ref, depth + 1)
+
+            #         find_owner(shm)
+            # main_app_logger.info("=" * 80 + "\n")
+            # =========================================================================
+
+            # 8. Clean up any remaining handler resources like queues and events.
+            main_app_logger.info(f"[STOP {self.name}] Cleaning up final resources...")
+            self.stop_sync_manager()
+            self.drain_and_close_queues(
+                ["signal_queue", "render_queue", "prefetch_queue", "write_queue"]
+            )
+
+            remove_attrs = [
+                "_cached_grid_x",
+                "_cached_grid_y",
+                "ffmpeg_proc",
+                "frame_in_clip_count",
+                "latest_processed_frame",
+                "mp_frame_ready_flag",
+                "mp_last_id",
+                "processing_stream",
+                "reader_active_idx",
+                "ready_buffer_idx",
+                "render_queue_backlog_counter",
+                "render_queue_counter",
+                "shm_frame_lengths",
+                "stat_start_time",
+                "write_queue_backlog_counter",
+                "write_queue_counter",
+                "static_gpu_360p",
+                "static_gpu_byte_bchw",
+                "gpu_float_staging",
+                "pinned_matrices",
+                "pinned_tensors",
+            ]
+            main_app_logger.info(f"[STOP {self.name}] Removing attributes...")
+            self.remove_scalar_attributes(remove_attrs)
+
+            # self.stop_events()
+            events = [
+                "frame_ready_event",
+                "queue_data_ready_event",
+                "_d2h_fence",
+                "det_end",
+                "det_start",
+                "frame_ready_event",
+                "main_startup_event",
+                "queue_data_ready_event",
+                "reader_lock",
+                "roi_end",
+                "roi_start",
+                "sf_end",
+                "sf_start",
+                "worker_tracking_lock",
+            ]
+            main_app_logger.info(f"[STOP {self.name}] Stopping events...")
+            self.stop_events(events, keys_to_skip_deletion=default_attr_keys)
+
+            if hasattr(self, "slot_events") and self.slot_events is not None:
+                main_app_logger.info(f"[STOP {self.name}] Stopping slot events...")
+                # Grab local reference and immediately nullify instance attribute
+                events_to_clean = self.slot_events
+                self.slot_events = None
+                if events_to_clean is not None:
+                    for ev in list(events_to_clean):
+                        try:
+                            if isinstance(ev, torch.cuda.Event):
+                                # Force internal driver handle release
+                                del ev
+                        except Exception:
+                            pass
+                    # self.slot_events = None
+
+            if getattr(self, "processor", None):
+                delattr(self, "processor")
+
+            if getattr(self, "evaluator", None):
+                delattr(self, "evaluator")
+
+            # self.pinned_matrices.clear()
+            # self.pinned_tensors.clear()
+
+            self.clean_up_tensors_and_arrays()
+
+            release_native_linux_heap()
+
+            gc.collect()
+            if "cuda" in self.device_input and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+
+            # with self._stop_lock:
+            self._is_stopped = True
+            self.status = "DONE"
+            self.active_streams.pop(self.name, None)
+            main_app_logger.info(f"[STOP {self.name}] Shutdown complete.")
 
     def setup_threads(self):
-        # Shared 10MB memory for display
-        self.setup_shared_memory()
+        """Overrides handlers.py to bind threads dynamically to the test instance."""
+
+        self._cached_grid_y, self._cached_grid_x = torch.meshgrid(
+            torch.arange(
+                self.resize_h, device=self.device_input
+            ),  # Match target tracking resolution
+            torch.arange(self.resize_w, device=self.device_input),
+            indexing="ij",
+        )
+
+        self.setup_shared_memory()  # Natively sets up Manager dictionary and buffers
 
         # Executor for Async YOLO tasks and FFmpeg re-encoding
         self.executor = ThreadPoolExecutor(max_workers=self.config.MAX_WORKERS)
+
         self.clip_executor = ThreadPoolExecutor(max_workers=self.config.MAX_WORKERS)
 
-        print(
+        main_app_logger.info(
             f"sf_enabled: {self.config.sf_enabled}\tTEST_MODE: {self.config.TEST_MODE}",
-            flush=True,
         )
 
-        self.signal_queue = mp.Queue(maxsize=32)  # 1)
-        self.render_queue = mp.Queue(maxsize=5)
-
-        # Producer: Handles acquisition and AI metadata logs
-        # self.process_thread = threading.Thread(
-        #     target=self.run_realtime_inference,
-        #     args=(self.config.sf_enabled,),
-        #     daemon=True,
-        # )
         self.process_thread = threading.Thread(
-            target=lambda: self.run_realtime_inference(
-                sf_enabled=self.config.sf_enabled
-            ),
+            target=self.run_realtime_inference,
+            kwargs={
+                "sf_enabled": self.config.sf_enabled,
+                "gt_enabled": getattr(self, "gt_enabled", False),
+            },
             daemon=True,
         )
+
+        # # Open up looking-ahead buffer horizons to eliminate 8K queue backpressure stalls
+        # self.render_queue_maxsize = 16  # 4
+        # self.render_queue = queue.Queue(maxsize=self.render_queue_maxsize)
+
+        # self.signal_queue_maxsize = 32  # 8
+        # self.signal_queue = queue.Queue(maxsize=self.signal_queue_maxsize)
 
         if self.config.TEST_MODE:
             test_dir = os.getenv(
@@ -1214,11 +1079,23 @@ class DeviceBaseHandler:
             )
             os.makedirs(test_dir, exist_ok=True)
 
-            out_path = os.path.join(test_dir, f"{self.name}_detections_output.mp4")
-            self.output_path = out_path
-            log_to_logger(
-                f"[TEST MODE] Detection results saved to: {out_path}", level="info"
-            )
+            if hasattr(self, "video_output_name"):
+                video_output_name = self.video_output_name
+            else:
+                if self.source.startswith("rtsp"):
+                    short_name = "rtsp"
+                else:
+                    short_name = Path(self.source).stem
+                video_output_name = f"{self._testMethodName}_{short_name}.mp4"
+
+            self.output_path = os.path.join(test_dir, video_output_name)
+            # self.output_path = os.path.join(
+            #     test_dir, f"{self.name}_detections_output.mp4"
+            # )
+            # log_to_logger(
+            #     f"[TEST MODE] Detection results saved to: {self.output_path}",
+            #     level="info",
+            # )
 
             self.async_writer = AsyncVideoWriter(
                 self.output_path,
@@ -1227,20 +1104,14 @@ class DeviceBaseHandler:
                 (self.disp_w, self.disp_h),
             )
 
-            # self.render_proc = threading.Thread(
-            #     target=test_rendering_worker,
-            #     args=(
-            #         self.render_queue,
-            #         (self.disp_w, self.disp_h),
-            #         out_path,
-            #         self.target_fps,
-            #     ),
-            #     daemon=True,
-            # )
-
             # Dummy target alignment to prevent execution signature exceptions
-            self.render_proc = threading.Thread(target=lambda: None, daemon=True)
-            self.display_proc = threading.Thread(target=lambda: None, daemon=True)
+            # self.render_proc = threading.Thread(target=lambda: None, daemon=True)
+            # self.display_proc = threading.Thread(target=lambda: None, daemon=True)
+            # self.render_proc = DummyProcess()
+            # self.display_proc = DummyProcess()
+            log_to_logger(
+                f"[TEST MODE] Results saved to: {self.output_path}", level="info"
+            )
         else:
             self.async_writer = AsyncDisplayVideoWriter(
                 float(self.target_fps),
@@ -1256,9 +1127,6 @@ class DeviceBaseHandler:
                     self.loop = asyncio.get_event_loop()
                 except RuntimeError:
                     self.loop = None  # Headless fallback context
-
-            self.render_proc = threading.Thread(target=lambda: None, daemon=True)
-            self.display_proc = threading.Thread(target=lambda: None, daemon=True)
 
         if self.config.ENABLE_QUERYING:
             # NEW: Dedicated I/O pool for Disk/GPU transfers (Higher worker count for 8K)
@@ -1285,11 +1153,426 @@ class DeviceBaseHandler:
                 )
 
             # Consumer: Handles GPU-to-CPU download and Disk I/O (Writing resized frames to RAM disk)
-            self.writer_thread = threading.Thread(
-                target=self.video_writer_core_loop,
-                args=(self.stop_writer,),
+            # self.writer_process = threading.Thread(
+            #     target=self.video_writer_core_loop,
+            #     args=(self.stop_writer,),
+            #     daemon=True,
+            # )
+
+            # self.render_proc = threading.Thread(target=lambda: None, daemon=True)
+            # self.display_proc = threading.Thread(target=lambda: None, daemon=True)
+            # self.render_proc = DummyProcess()
+            # self.display_proc = DummyProcess()
+
+    def initialize_variables(self):
+        self.prefetch_threads = []
+        # Track active worker threads atomically to protect end-of-stream drainage
+        num_prefetch_workers = 4 if self.device_input == "cpu" else 3
+        self.active_workers_count = num_prefetch_workers
+        self.worker_tracking_lock = threading.Lock()
+
+        # Override the atomic tracking count to match our active pool allocation
+        with self.worker_tracking_lock:
+            self.active_workers_count = num_prefetch_workers
+
+        # self.initialize_run_realtime_inference(read_frame_only, num_prefetch_workers)
+
+        # 1. HARD GUARD: Capture reader values and ensure the connection is active
+        if not hasattr(self, "result_dir"):
+            self.result_dir = self.config.SHARED_OUTPUT
+        self.device_index = f"cuda:{self.gpu_id}" if self.device_input else "cpu"
+        self.input_fps = self.reader.input_fps
+        self.target_fps = self.reader.target_fps
+        self.frame_width = self.reader.frame_width
+        self.frame_height = self.reader.frame_height
+        self.numFrames = self.reader.numFrames
+        # self.min_roi_w = int(self.config.ROI_MIN_AREA_RATIO * self.resize_w)
+        # self.min_roi_h = int(self.config.ROI_MIN_AREA_RATIO * self.resize_h)
+        # self.max_roi_w = int(self.resize_w * self.config.ROI_MAX_RELATIVE_SIZE_RATIO)
+        # self.max_roi_h = int(self.resize_h * self.config.ROI_MAX_RELATIVE_SIZE_RATIO)
+        # self.max_cached_elements = 100
+
+        if self.input_fps <= 0 or self.frame_width <= 0 or self.frame_height <= 0:
+            main_app_logger.error(
+                f"[{self.name}] Stream handler fast-fail triggered. Destination "
+                f"unreachable or invalid ({self.source}). Terminating pipeline configuration."
+            )
+            # Instantly stop background threads to prevent zombie process leakage
+            if hasattr(self, "reader") and self.reader is not None:
+                self.reader.stop()
+
+            raise RuntimeError(
+                f"Failed to initialize stream reader endpoint: {self.source}"
+            )
+
+        # 2. Proceed with calculation mechanics safely only if values are healthy
+        self.step_size = (
+            float(self.input_fps) / float(self.target_fps)
+            if hasattr(self, "target_fps")
+            else 1.0
+        )
+        self.frame_skip = self.reader.frame_skip
+        self.max_frames_per_clip = self.reader.max_frames_per_clip
+        self.frame_interval = self.reader.frame_interval
+
+        self.duration_s = self.numFrames / self.input_fps
+        self.expected_num_frames = int(self.duration_s * self.target_fps)
+        self.get_frameWH()
+
+        # Determine minimum contour size relative to frame resolution
+        # self.min_contour_area = int(
+        #     (self.min_roi_h)
+        #     * (self.min_roi_h)
+        # )  # 207
+
+        # self.dist_thresh_8k = max(
+        #     self.config.ROI_DISTANCE_THRESH_RATIO * self.frame_width,
+        #     self.config.ROI_DISTANCE_THRESH_RATIO * self.frame_height,
+        # )
+        # multiplier = 2.0 if self.device_input == "cpu" else 1.0
+        # self.dist_thresh_640 = (
+        #     max(
+        #         self.config.ROI_DISTANCE_THRESH_RATIO * self.resize_w,
+        #         self.config.ROI_DISTANCE_THRESH_RATIO * self.resize_h,
+        #     )
+        #     * multiplier
+        # )  # 0.05 * self.resize_w
+        # self.scales_tensor = torch.tensor(
+        #     [self.scale_x, self.scale_y, self.scale_x, self.scale_y],
+        #     # device="cpu",
+        #     device=self.device_input,
+        # )
+
+        # self.disp_w, self.disp_h = self.config.DISPLAY_FRAME_SIZE
+
+        # Performance Tracking
+        self.elapsed_display_time = 0.0
+        self.frame_count = 0  # Frame count for videos
+        self.frame_count_target = 0
+        self.last_delivered_frame_id = -1  # Track what was actually sent
+        self.last_frame_id = 0
+        self.latest_processed_frame = None
+        self.next_process_idx = 0.0
+        self.stat_fps = 0
+        self.stat_frame_count = 0
+        self.abs_frame_num = 0
+        self.total_objects_detected = 0
+        self.is_cuda = self.device.lower() == "gpu" and torch.cuda.is_available()
+        self.frame_in_clip_count = 0
+
+        self.writer_done = True
+
+        # Video Clipping
+        # self.video_writer = None
+        self.ffmpeg_proc = None  # Replaces cv2.VideoWriter completely
+        # self.fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # avc1, mp4v
+        # self.clip_id = 0
+        # self.clip_filename = ""
+        self.clip_filename_pattern = f"{self.config.SHARED_OUTPUT}/{self.name}_%03d.mp4"
+        # self.clip_key = f"{self.name}_000.mp4"
+        # self.tmp_file = ""
+        # self.frame_in_clip_count = 0
+
+        if self.config.ENABLE_QUERYING:
+            self.gpu_float_staging = torch.empty(
+                (1, 3, self.frame_height, self.frame_width),
+                dtype=torch.float16,
+                device=self.device_index,
+            )
+            # Thread-safe queue for the resized frames (640x640)
+            # maxlen=300 allows for a 20-second buffer in case of extreme disk lag
+            # Non-blocking queue for frames and control signals
+            # self.write_queue = queue.Queue(maxsize=int(self.target_fps))  # 300)
+
+            # self.write_queue = queue.Queue(
+            #     maxsize=int(self.target_fps / 2)
+            #     if self.device_input == "cpu"
+            #     else int(self.target_fps / 2)
+            # )  # 300)
+
+            # Define the depth of your shared memory ring buffer. 16 is a safe number.
+            self.clipper_ring_depth = 16
+            self.clipper_shm_frame_bytes = self.config.MODEL_W * self.config.MODEL_H * 3
+
+            # Create the shared memory blocks
+            self.clipper_shm_blocks = [
+                SharedMemory(create=True, size=self.clipper_shm_frame_bytes)
+                for _ in range(self.clipper_ring_depth)
+            ]
+
+            # Get the names to pass to the new process
+            self.clipper_shm_names = [shm.name for shm in self.clipper_shm_blocks]
+
+            # Create NumPy array views that the main process will use to write data
+            self.clipper_shm_np_views = [
+                np.ndarray(
+                    (self.config.MODEL_H, self.config.MODEL_W, 3),
+                    dtype=np.uint8,
+                    buffer=shm.buf,
+                )
+                for shm in self.clipper_shm_blocks
+            ]
+
+            # An atomic, thread-safe counter to track the next available slot
+            self.clipper_ring_idx = mp.Value("i", 0)
+            self.clipper_idx_lock = (
+                mp.Lock()
+            )  # Lock to prevent race conditions when getting an index
+
+            self.write_queue = mp.Queue(maxsize=self.clipper_ring_depth * 2)
+            # if (
+            #     not hasattr(self, "writer_process")
+            #     or self.writer_process is None
+            #     or not self.writer_process.is_alive()
+            # ):
+            #     main_app_logger.info(
+            #         " [CLIPPER-INIT] Target worker runtime thread is offline. Provisioning core consumer loop thread...",
+            #     )
+            self.writer_process = mp.Process(
+                target=video_writer_core_loop,
+                args=(
+                    self.write_queue,
+                    self.clip_filename_pattern,
+                    self.target_fps,
+                    self.config.MODEL_W,
+                    self.config.MODEL_H,
+                    int(self.config.CLIP_DURATION),
+                    # Pass the shared memory details to the new process
+                    self.clipper_shm_names,
+                    self.clipper_shm_frame_bytes,
+                ),
                 daemon=True,
             )
+            # self.writer_process.start()
+            if not self.config.TEST_MODE:
+                self.send_metadata_queue = queue.Queue()
+            self.writer_done = False
+        self.stop_writer = threading.Event() if self.config.ENABLE_QUERYING else None
+
+        # self._cached_grid_y, self._cached_grid_x = torch.meshgrid(
+        #     torch.arange(
+        #         self.resize_h, device=self.device_input
+        #     ),  # Match target tracking resolution
+        #     torch.arange(self.resize_w, device=self.device_input),
+        #     indexing="ij",
+        # )
+
+        # self.fixed_inference_batch = torch.empty(
+        #     (self.config.MODEL_MAX_BATCH_SIZE, 3, self.config.MODEL_H, self.config.MODEL_W),
+        #     dtype=torch.half,
+        #     device=self.device_input,
+        # )
+        # Create a deep look-ahead queue buffer that consumes near 0 RAM
+        # because it only holds reference pointers to your 6 SHM slots!
+        # if self.is_rtsp:
+        # prefetch_maxsize = 10
+        prefetch_maxsize = 5  # use 4 or 5; 10 risk memlock
+        # else:
+        #     prefetch_maxsize = (
+        #         128 if self.device_input != "cpu" else int(self.target_fps)
+        #     )
+
+        self.prefetch_queue = queue.Queue(
+            maxsize=prefetch_maxsize,
+        )
+        # self.prefetch_queue = mp.Queue(maxsize=128)
+        # Initialize a thread-safe signaling handle at class setup (run_realtime_inference)
+        self.queue_data_ready_event = threading.Event()
+        maxsize = (
+            self.prefetch_queue.maxsize
+            if hasattr(self.prefetch_queue, "maxsize")
+            else self.prefetch_queue._maxsize
+        )
+        # self.shm_buffer_pool = [None] * maxsize
+        try:
+            self.shm_buffer_pool = [
+                # (
+                #     torch.empty(
+                #         (self.frame_height, self.frame_width, 3), dtype=torch.uint8
+                #     ).pin_memory(),
+                #     None,  # event
+                #     0,  # frame_num
+                #     0,  # abs_frame_num
+                #     0.0,  # read_latency
+                # )
+                None
+                for _ in range(maxsize)
+            ]
+        except Exception as e_:
+            traceback.print_exc()
+            main_app_logger.info(f"[INITIALIZATION ERROR] Error occurred: {e_}")
+        self.gpu_input = [
+            torch.empty(
+                (self.frame_height, self.frame_width, 3),
+                device=self.device_input,
+                dtype=torch.uint8,
+            )  # .pin_memory()
+            for _ in range(maxsize)
+        ]
+
+        self.prefetch_active = True
+
+        self.prefetch_threads = []
+
+        # self.shm_buffer_pool = [None] * maxsize
+        # self.shm_buffer_pool = mp.Manager().list([None] * maxsize)
+        # global_shared_pool = mp.Manager().list([None] * maxsize)
+        # self.shm_buffer_pool = global_shared_pool
+
+        # Track active worker threads atomically to protect end-of-stream drainage
+        num_prefetch_workers = 1  # 4 if self.device_input == "cpu" else 3
+        self.active_workers_count = num_prefetch_workers
+        self.worker_tracking_lock = threading.RLock()
+        # self.obj_counter_l-ock = threading.Lock()
+
+        # Offload the pre-fetch layer straight to a daemon thread context
+        # prefetch_thread = threading.Thread(target=frame_prefetch_worker, daemon=True)
+        # prefetch_thread.start()
+        # num_prefetch_workers = 1 if self.device_input == "cpu" else 3
+        # num_prefetch_workers = 3
+
+        # Override the atomic tracking count to match our active pool allocation
+        with self.worker_tracking_lock:
+            self.active_workers_count = num_prefetch_workers
+
+        # This guarantees frames are read from self.reader sequentially
+        # and stay perfectly in order, while letting workers decode in parallel!
+        self.reader_lock = threading.RLock()
+
+        # --- PRE-ALLOCATED ZERO-COPY HARDWARE RING WORKSPACE ---
+        self.ring_depth = 4  # 8  # _async_clipper_worker
+        self.gpu_ring_idx = 0  # _async_clipper_worker
+        self.cpu_ring_idx = 0  # _async_clipper_worker
+
+        self.pinned_matrices = []  # _async_clipper_worker, video_writer_core_loop (CPU)
+        if self.device_input == "cuda":
+            self.pinned_tensors = []  # _async_clipper_worker
+
+            self.static_gpu_byte_bchw = torch.empty(
+                (1, 3, self.disp_h, self.disp_w),
+                dtype=torch.uint8,
+                device="cuda",
+            ).contiguous()
+
+        # Pre-allocate 640x640 workspace footprint across CPU and GPU spaces
+        for _ in range(
+            self.ring_depth
+        ):  # _async_clipper_worker, video_writer_core_loop
+            mat = np.zeros((self.resize_h, self.resize_w, 3), dtype=np.uint8)
+            if self.device_input == "cuda":
+                try:
+                    cv2.cuda.registerPageLocked(mat)
+                except cv2.error:
+                    pass
+                self.pinned_tensors.append(torch.from_numpy(mat))
+
+            self.pinned_matrices.append(mat)
+
+        # self.init_pipeline_shared_memory()
+
+        # if self.device_input == "cuda" and not hasattr(self, "_cuda_gaussian_filter"):
+        #     # Large block blur to dissolve high-frequency single-pixel speckles
+        #     # ksize=(15, 15)
+        #     # ksize=(11, 11)
+        #     ksize = (17, 17)
+        #     self._cuda_gaussian_filter = cv2.cuda.createGaussianFilter(
+        #         srcType=cv2.CV_8UC1, dstType=cv2.CV_8UC1, ksize=ksize, sigma1=0
+        #     )
+
+        # if not hasattr(self, "_filter_scratch_keep"):
+        #     # Existing order and boolean validation maps
+        #     self._filter_scratch_keep = torch.zeros(
+        #         (self.max_cached_elements,), dtype=torch.bool, device=self.device_input
+        #     )
+        #     self._filter_order_scratch = torch.zeros(
+        #         (self.max_cached_elements,), dtype=torch.long, device=self.device_input
+        #     )
+
+        #     # Persistent coordinate layers to absorb inner-loop tensor evaluations safely
+        #     self._filter_scratch_x1 = torch.zeros(
+        #         (self.max_cached_elements,), dtype=torch.float32, device=self.device_input
+        #     )
+        #     self._filter_scratch_y1 = torch.zeros(
+        #         (self.max_cached_elements,), dtype=torch.float32, device=self.device_input
+        #     )
+        #     self._filter_scratch_x2 = torch.zeros(
+        #         (self.max_cached_elements,), dtype=torch.float32, device=self.device_input
+        #     )
+        #     self._filter_scratch_y2 = torch.zeros(
+        #         (self.max_cached_elements,), dtype=torch.float32, device=self.device_input
+        #     )
+        #     self._filter_scratch_ioa = torch.zeros(
+        #         (self.max_cached_elements,), dtype=torch.float32, device=self.device_input
+        #     )
+
+        # Isolate CUDA tasks using a dedicated stream and independent hardware completion barriers
+        self.processing_stream = (
+            torch.cuda.Stream() if self.device_input == "cuda" else None
+        )
+
+        # Cache the context manager instance persistently
+        self.compiled_no_grad_gate = torch.no_grad()
+
+        # Pre-allocated hardware events guarantee completely non-blocking stream isolation
+        self.slot_events = (
+            [torch.cuda.Event() for _ in range(8)]
+            if self.device_input == "cuda"
+            else None
+        )
+
+        # Allocate a permanent float32/float16 channel layout space directly on VRAM
+        if self.device_input == "cuda":
+            self.static_gpu_360p = torch.empty(
+                (1, 3, self.disp_h, self.disp_w),
+                dtype=torch.float32,
+                device=self.device_input,
+            )
+            self.static_gpu_byte_bchw = torch.empty(
+                (1, 3, self.disp_h, self.disp_w),
+                dtype=torch.uint8,
+                device=self.device_input,
+            ).contiguous()
+
+    def setup_reader(self, target_fps, clip_duration, startup_event=None):
+        # if hasattr(self, "reader"):
+        #     del self.reader
+
+        self.gpu_id = 0
+
+        # try:
+        determined_queue_size = (
+            # 4 if self.is_rtsp else 2  # (0 if self.config.TEST_MODE else 2)
+            # 4 if self.is_rtsp else 8
+            4  # max: 5
+        )
+        if self.device_input == "cuda":  # and not self.is_rtsp:
+            # Add a tiny sleep or garbage collect to ensure the GPU handle is released
+            # gc.collect()
+            # torch.cuda.empty_cache()  # Clear any remaining context
+
+            from include.readers import GPUReader
+
+            self.reader = GPUReader(
+                source=self.source,
+                startup_event=startup_event,
+                target_fps=target_fps,
+                clip_duration=clip_duration,
+                gpu_id=0,  # self.gpu_id,
+                queue_size=determined_queue_size,
+            )
+        else:
+            from include.readers import CPUReader
+
+            self.reader = CPUReader(
+                source=self.source,
+                startup_event=startup_event,
+                target_fps=target_fps,
+                clip_duration=clip_duration,
+                queue_size=determined_queue_size,
+            )
+        # except Exception as e:
+        #     self.reader = None
+        #     raise ValueError(f"Stream reader initialization failure: {e}")
 
     def setup_shared_memory(self):
         self.manager = mp.Manager()
@@ -1306,27 +1589,44 @@ class DeviceBaseHandler:
         self.mp_last_id = mp.Value("i", -1)
         self.mp_frame_ready_flag = mp.Value("b", False)
 
+        # --- HIGH-SPEED ATOMIC TELEMETRY BACKLOG REGISTERS ---
+        self.render_queue_backlog_counter = mp.Value("i", 0)
+        self.write_queue_backlog_counter = mp.Value("i", 0)
+
         display_timestamp = int(time.time_ns())
 
         for idx in range(num_shms):
             # self.shm = mp.shared_memory.SharedMemory(create=True, size=10*1024*1024)
             shm_name = f"shm_{self.name}_{idx}_{os.getpid()}_{display_timestamp}"
-            # print(f"[DEBUG]: Setting up SHM {shm_name}", flush=True)
-            try:
-                shm = mp.shared_memory.SharedMemory(
-                    name=shm_name, create=True, size=10 * 1024 * 1024
-                )
-            except FileExistsError:
-                # Attach to existing memory
-                shm = mp.shared_memory.SharedMemory(name=shm_name)
-            except Exception as e:
-                main_app_logger.error(f"Failed to initialize shared memory: {e}")
-                raise
-            self.shms.append(shm)
-            shm_names.append(shm_name)
+            if shm_name not in shm_names:
+                try:
+                    SharedMemory(name=shm_name).unlink()
+                except FileNotFoundError:
+                    pass
+                # main_app_logger.info(f"[DEBUG]: Setting up SHM {shm_name}")
+                try:
+                    shm = SharedMemory(
+                        name=shm_name, create=True, size=10 * 1024 * 1024
+                    )
+                    # safe_unregister_shm(shm.name)
+                except FileExistsError:
+                    # Attach to existing memory
+                    shm = SharedMemory(name=shm_name)
+                    # safe_unregister_shm(shm.name)
+                except Exception as e:
+                    main_app_logger.error(f"Failed to initialize shared memory: {e}")
+                    raise
+                self.shms.append(shm)
+                shm_names.append(shm_name)
+
+                # try:
+                #     unregister(shm._name, "shared_memory")
+                #     # main_app_logger.info(f"[HANDLER] Successfully unregistered {shm.name} from Resource Tracker.")
+                # except Exception:
+                #     pass
 
         self.signal_queue = self.manager.Queue(maxsize=32)
-        self.render_queue = self.manager.Queue(maxsize=5)
+        self.render_queue = self.manager.Queue(maxsize=10)  # old-5
 
         self.shared_details = self.manager.dict()
         self.shared_details["shm_names"] = shm_names
@@ -1334,621 +1634,1596 @@ class DeviceBaseHandler:
         # self.shared_details["frame_length"] = [0 for _ in range(num_shms)]
         self.shared_details["last_id"] = -1
 
-    def start(self):
+    # PIPELINE FUNCTIONS --------------------------------------------
+
+    def update_frame(self, stat_start_time):
+        # if self.device_input == "cuda":
+        #     torch.cuda.synchronize()
+
+        self.stat_frame_count += 1
+        self.elapsed_display_time += time.perf_counter() - stat_start_time
+        # self.elapsed_display_time = time.perf_counter() - stat_start_time
+        # if elapsed > 0.5:
+        self.stat_fps = round(self.stat_frame_count / self.elapsed_display_time, 1)
+
+    @torch.inference_mode()
+    def pipeline_fn(
+        self,
+        device_frame,
+        overall_frame_num,
+        stat_start_time,
+        current_clip_id,
+        gt_boxes=None,
+        read_frame_only=False,
+    ):
+        global all_metadata
+        current_clip_key = f"{self.name}_{current_clip_id:03d}.mp4"
+        current_clip_path = f"{self.config.SHARED_OUTPUT}/{current_clip_key}"
+
+        metadata = {}
+        motion_detected = False
+        metrics = {"sf_time": 0, "roi_time": 0, "det_time": 0, "bbs": None}
+
+        # Given input frame, get metadata and metrics
+        try:
+            if read_frame_only:
+                # Get frame, metadata and metrics
+                _, det_frame = self.processor.format_bbs_and_frame_4_detection(
+                    [], device_frame
+                )
+
+            else:
+                # --- CLIP GENERATION ---
+                if self.config.ENABLE_QUERYING:
+                    if (
+                        self.config.DEBUG_FLAG
+                        and hasattr(self, "max_frames_per_clip")
+                        and (
+                            self.frame_in_clip_count % 15 == 0
+                            or self.frame_in_clip_count == 1
+                        )
+                    ):
+                        main_app_logger.info(
+                            f"[CLIPPER] Frame progress tracking index: {self.frame_in_clip_count}/{self.max_frames_per_clip} (Overall Frame: {overall_frame_num})"
+                        )
+
+                    self.prep_frame_for_video(device_frame, overall_frame_num)
+
+                    if self.frame_in_clip_count > self.max_frames_per_clip:
+                        global clip_completion_tracker
+                        if current_clip_key not in clip_completion_tracker:
+                            clip_completion_tracker[current_clip_key] = {
+                                "video": False,
+                                "meta": False,
+                                "start_time": time.time(),
+                            }
+
+                        clip_completion_tracker[current_clip_key]["meta"] = True
+                        # main_app_logger.info(
+                        #     f" [BARRIER-SEAL] All metadata extracted for {current_clip_key}. Evaluating convergence...",
+                        #
+                        # )
+                        self._evaluate_barrier_and_dispatch(
+                            current_clip_key,
+                            current_clip_path,
+                            self.resize_w,
+                            self.resize_h,
+                        )
+
+                        self.start_new_clip(current_clip_id)
+
+                # Run model on frame, get metadata and metrics
+                with torch.inference_mode():
+                    metrics, metadata, det_frame, motion_detected = self.processor.run(
+                        device_frame,
+                        overall_frame_num,
+                        frame_in_clip_count=self.frame_in_clip_count,
+                        gt_boxes=None,
+                    )
+
+            num_objs = len(metadata.keys())
+            self.total_objects_detected += num_objs
+
+            if self.config.DEBUG_FLAG:
+                meta_keys = ", ".join(list(metadata.keys()))
+                main_app_logger.info(
+                    f"[DEBUG] {current_clip_key} metadata keys: {meta_keys}",
+                )
+
+            if num_objs > 0:
+                if current_clip_key not in all_metadata:
+                    all_metadata[current_clip_key] = {"object": {}, "face": {}}
+
+                all_metadata[current_clip_key]["object"].update(metadata)
+
+            # data_to_draw = metadata
+            if self.config.DEBUG_FLAG and overall_frame_num % 50 == 0:
+                main_app_logger.info(
+                    f"[METADATA-DEBUG A] Logged tracking structures for Frame #{overall_frame_num} into dictionary key: {current_clip_key}. Number detections: {self.total_objects_detected}",
+                )
+
+            if self.config.TEST_MODE:
+                self.frame2video(
+                    det_frame,
+                    overall_frame_num,
+                    metadata,
+                    getattr(self, "label_source", None),
+                    stat_start_time,
+                )
+            else:
+                self.frame2output(
+                    det_frame,
+                    overall_frame_num,
+                    metadata,
+                    self.label_source,
+                    stat_start_time,
+                )
+
+            # with self.obj_counter_lock:
+            #     self.num_objs += len(metadata.keys())
+        # except (TypeError, IndexError):
+        #     # App is shutting down and processor/reader not available
+        #     self.active = False
+
+        except Exception as e_detection:
+            # traceback.print_exc()
+            # if self.active:
+            traceback.print_exc()
+            main_app_logger.info(f"[DETECTION ERROR] Exception: {e_detection}")
+            # self.active = False
+
+        finally:
+            # del inf_data, bbs_full_res, device_frame, det_frame
+            if "det_frame" in locals():
+                del det_frame
+            if "device_frame" in locals():
+                del device_frame
+            # if "bbs_full_res" in locals():
+            #     del bbs_full_res
+            # if "inf_data" in locals():
+            #     del inf_data
+
+        return metadata, metrics  # Skip full detection pass
+
+    def initialize_run_realtime_inference(self, read_frame_only, num_prefetch_workers):
+        # self.duration_target = 30
+        # self.status = "RUNNING"
+        self.processor = self._setup_processor(read_frame_only)
+
+        if hasattr(self, "processor") and hasattr(self.processor, "label_source"):
+            self.label_source = self.processor.label_source
+        # Setup empty list to track background futures natively
+        # self._active_inference_futures = []
+
+        if self.is_cuda and not hasattr(self, "sf_start") and self.config.TEST_MODE:
+            self.sf_start, self.sf_end = (
+                torch.cuda.Event(enable_timing=True),
+                torch.cuda.Event(enable_timing=True),
+            )
+            self.roi_start, self.roi_end = (
+                torch.cuda.Event(enable_timing=True),
+                torch.cuda.Event(enable_timing=True),
+            )
+            self.det_start, self.det_end = (
+                torch.cuda.Event(enable_timing=True),
+                torch.cuda.Event(enable_timing=True),
+            )
+
+        if self.config.TEST_MODE:
+            self.component_stats = {
+                "sf": [],
+                "roi": [],
+                "det": [],
+                "dma_upload": [],  # Track PCIe Transfer Latencies
+                "queue_blocked": [],  # Track GIL Serialization stalls
+                "batch_sizes": [],  # Track Smart Filtering density
+                "thread_backlog": [],  # Track thread work pool backlog
+            }
+            self.crops_per_frame_list = []
+
+        # Bind active execution permanently to sub-stream BEFORE entering loop (Bypasses TLS Overhead)
+        # if self.device_input == "cuda" and torch.cuda.is_available():
+        #     torch.cuda.set_stream(self.inference_stream)
+        if hasattr(self, "target_fps") and hasattr(self, "duration_target"):
+            self.max_target_frames = int(self.duration_target * float(self.target_fps))
+        elif hasattr(self, "numFrames"):
+            self.max_target_frames = self.numFrames
+        else:
+            self.max_target_frames = float("inf")
+
+        # self.dynamic_limit = max(2, int(0.5 * self.target_fps))
+
+        # Initialize a thread-safe signaling handle at class setup (run_realtime_inference)
+        self.queue_data_ready_event = threading.Event()
+
+        try:
+            for _ in range(num_prefetch_workers):
+                # prefetch_thread = mp.Process(
+                prefetch_thread = threading.Thread(
+                    target=lambda: global_frame_prefetch_worker_v1(self),
+                    daemon=True,
+                )
+                prefetch_thread.start()
+                self.prefetch_threads.append(prefetch_thread)
+        except Exception as e:
+            main_app_logger.critical(
+                f"[{self.name}] Failed to start prefetch workers: {e}", exc_info=True
+            )
+            traceback.print_exc()
+            raise
+
+    @torch.inference_mode()
+    def run_realtime_inference(
+        self,
+        sf_enabled=True,
+        profiler=None,
+        gt_enabled=False,
+        read_frame_only=False,
+    ):
+        self.status = "RUNNING"
+
+        self.initialize_run_realtime_inference(
+            read_frame_only, self.active_workers_count
+        )
+
+        self.stat_start_time = time.perf_counter()
+        # pipeline_start_time = self.stat_start_time
+        # last_loop_cycle_timestamp = self.stat_start_time
+
+        missing_frame_cnt = 0
+        max_retries = int(self.target_fps)
+        # Release the master startup event at the last possible moment.
+        self.main_startup_event.set()
+        while (
+            self.active  # or not self.prefetch_queue.empty()
+        ):  # and self.frame_count_target < self.max_target_frames:
+            stat_start_time = time.perf_counter()
+            try:
+                # FRAME RETRIEVAL ---------------------------------------------
+                try:
+                    safe_frame, frame_details, should_continue = (
+                        self._get_frame_from_queue()
+                    )
+
+                    if not should_continue:
+                        self.active = False  # Signal loop termination
+                        break
+                    if safe_frame is None:  # and self.is_rtsp:
+                        missing_frame_cnt += 1
+
+                        if missing_frame_cnt >= max_retries:
+                            self.active = False  # Signal loop termination
+                            main_app_logger.info("Too many frames missing. Exiting ...")
+                            break
+                        continue  # Skip to the next iteration if the frame is invalid
+
+                    # try:
+                    #     # ret, slot_idx = self.prefetch_queue.get(block=True, timeout=1.0)
+                    #     # ret, slot_idx = self.prefetch_queue.get(block=False)
+                    #     ret, slot_idx = self.prefetch_queue.get(block=True, timeout=1.0)
+                    #     self.prefetch_queue.task_done()
+
+                    # except queue.Empty:
+                    #     with self.worker_tracking_lock:
+                    #         if (
+                    #             self.active_workers_count == 0
+                    #             and self.prefetch_queue.empty()
+                    #         ):
+                    #             self.active = False
+                    #             break
+                    #     # If the queue is empty AND the prefetch workers are done, we can exit.
+                    #     if not self.active:
+                    #         break
+                    #     continue
+
+                    # # If self.stop() drops the queues, break out of the thread loop natively.
+                    # except (OSError, ValueError, AssertionError):
+                    #     main_app_logger.info(
+                    #         "[PROCESS THREAD] Ingestion queue disconnected via stop() signal. Breaking loop."
+                    #     )
+                    #     self.active = False
+                    #     break
+
+                    # if ret is False or slot_idx == "END_OF_STREAM":
+                    #     main_app_logger.info(
+                    #         "[PROCESS THREAD] End of video stream detected. Breaking loop naturally."
+                    #     )
+                    #     self.active = False
+                    #     break
+
+                    # if not self.active:
+                    #     break
+
+                    # # if slot_idx == -1 or self.shm_buffer_pool[slot_idx] is None:
+                    # #     continue
+                    # if (
+                    #     slot_idx == -1
+                    #     or not hasattr(self, "shm_buffer_pool")
+                    #     or self.shm_buffer_pool is None
+                    # ):
+                    #     continue
+                    # if (
+                    #     slot_idx >= len(self.shm_buffer_pool)
+                    #     or self.shm_buffer_pool[slot_idx] is None
+                    # ):
+                    #     continue
+
+                    # # Zero-Copy Reference Extraction straight out of the memory slot array
+                    # (
+                    #     raw_shm_frame,
+                    #     current_event,
+                    #     frame_num,
+                    #     abs_frame_num,
+                    #     true_read_latency_secs,
+                    # ) = self.shm_buffer_pool[slot_idx]
+
+                    # if frame_num == 0:
+                    #     main_app_logger.info(
+                    #         f"[VERIFY - CONSUMER] Main loop is officially processing Frame {frame_num}!",
+                    #     )
+
+                    # if "cuda" in str(self.device_input):
+                    #     safe_frame = self.gpu_input[slot_idx]
+                    #     # safe_frame = cpu_tensor.to(self.device_input, non_blocking=True)
+                    #     safe_frame.copy_(raw_shm_frame)
+                    #     # self.gpu_input[slot_idx].zero_()
+                    # else:
+                    #     safe_frame = raw_shm_frame
+
+                    # # Record the PyTorch CUDA event on the current stream
+                    # if current_event is not None and isinstance(
+                    #     current_event, torch.cuda.Event
+                    # ):
+                    #     # This tells the GPU that the consumer is done reading this slot
+                    #     current_event.record(torch.cuda.current_stream())
+
+                    # # Originally 0-based but make 1-based
+                    # frame_num += 1
+                    # abs_frame_num += 1
+                    # self.abs_frame_num = abs_frame_num
+                    missing_frame_cnt = 0
+
+                except queue.Empty:
+                    if getattr(self.reader, "reconnect_failed", False):
+                        self.active = False
+                        break
+                    if not self.active:
+                        break  # Exit on error if shutdown has been initiated
+                    time.sleep(0.001)
+                    continue
+
+                # FRAME PROCESSING ---------------------------------------------
+                # stat_start_time = self.stat_start_time
+                self.abs_frame_num = frame_details["abs_frame_num"]
+                calculated_clip_id = (
+                    frame_details["frame_num"] - 1
+                ) // self.max_frames_per_clip
+                self.frame_count += 1
+                self.frame_count_target += 1
+                self.frame_in_clip_count += 1
+
+                # RUN PIPELINE_FN ---------------------------------------------
+                # run_pipelinefn_start = time.perf_counter()
+                # self.frame_count_target += 1
+                # self.frame_in_clip_count += 1
+
+                # if gt_enabled:
+                #     target_boxes_array = self.get_frame_gt_boxes(
+                #         abs_frame_num, gt_sequence, gt_boxes
+                #     )
+
+                metadata_or_bbs, metrics = self.pipeline_fn(
+                    safe_frame,
+                    frame_details["frame_num"],
+                    stat_start_time,
+                    calculated_clip_id,
+                    read_frame_only=read_frame_only,
+                )
+
+                # # FRAME POST PROCESSING ---------------------------------------------
+
+                # Explicitly delete frame variables to free their references
+                frame_8k = None
+                del frame_8k, safe_frame
+                if "metadata_or_bbs" in locals():
+                    del metadata_or_bbs
+
+                if self.frame_count % 100 == 0:
+                    gc.collect()
+
+                # Force a microscopic micro-yield if executing on CPU.
+                # This grants immediate execution priority back to the background cleaning thread,
+                # allowing the garbage collector to evict data from RAM instantly!
+                if self.device_input == "cpu":
+                    time.sleep(
+                        0
+                    )  # .005)  # 1ms yield breaks core processor starvation lock
+
+                # END -> frame processing
+            except torch.cuda.OutOfMemoryError:
+                main_app_logger.info("!" * 70)
+                main_app_logger.info(
+                    "[CRITICAL TEST CRASH] GPU MEMORY CEILING HIT INSIDE RUNNER LOOP!"
+                )
+                main_app_logger.info(
+                    "Freezing allocation history registers and writing diagnostic log..."
+                )
+                main_app_logger.info("!" * 70)
+
+                try:
+                    snapshot_filename = (
+                        f"/tmp/test_vram_leak_profile_pid{os.getpid()}.pickle"
+                    )
+                    torch.cuda.memory._dump_snapshot(snapshot_filename)
+                    main_app_logger.info(
+                        f"[PROFILER SUCCESSFUL] Snapshot profile written to: {snapshot_filename}"
+                    )
+                    main_app_logger.info(
+                        "--> Drag and drop this file directly into: https://pytorch.org"
+                    )
+                except Exception as dump_err:
+                    main_app_logger.info(
+                        f"Failed to record profile data snapshot: {dump_err}"
+                    )
+
+                # Force safe system unlinking of background workers to clean up OS handles
+                self.active = False
+                if hasattr(self, "reader") and self.reader is not None:
+                    self.reader.stop()
+                raise
+
+            except Exception as e:
+                if not self.active or not getattr(self, "prefetch_active", True):
+                    main_app_logger.info(
+                        "[PROCESS THREAD] System shutdown detected during exception sweep. Exiting thread payload context."
+                    )
+                    break
+
+                main_app_logger.info(
+                    f"[CRITICAL PIPELINE ERROR] Crash on frame: {repr(e)}"
+                )
+                traceback.print_exc()
+                raise e  # Let it break so you can see the exact line number!
+
+        # END -> while self.active and self.frame_count_target < self.max_target_frames:
+
+        # PIPELINE POST PROCESSING ---------------------------------------------
+        # )
+
+        self.async_writer.release()
+
+        # CALCULATE PERFORMANCE METRICS ---------------------------------------------
+        main_app_logger.info(
+            f"Execution Finished. Total Output Frames Written: {self.frame_count_target}"
+        )
+
+        # Force early hardware driver sweep before unbinding threads
+        if self.device_input == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+        gc.collect()
+
+        if profiler is not None:
+            profiler.stop()
+
+        self.stop()
+
+    def get_overlay(
+        self,
+        display_frame,
+        metadata_or_bbs,
+        class_list,
+        scale_display_x,
+        scale_display_y,
+        color=(0, 0, 255),
+    ):
+        if isinstance(metadata_or_bbs, dict):
+            detached_bbs = {
+                k: (v.detach() if torch.is_tensor(v) else v)
+                for k, v in metadata_or_bbs.items()
+            }
+            # Object Mode (YOLO Structs)
+            display_frame = get_metadata_overlay(
+                display_frame,
+                detached_bbs,
+                class_list,
+                (scale_display_x, scale_display_y),
+                (self.disp_w, self.disp_h),
+                is_bgr=True,
+            )
+
+        elif metadata_or_bbs is not None:
+            # # Motion / Smart Filtering Overlay Path
+            display_frame = get_bb_overlay(
+                display_frame,
+                metadata_or_bbs,
+                (scale_display_x, scale_display_y),
+                (self.disp_w, self.disp_h),
+                color=color,
+            )
+
+        return display_frame
+
+    def _get_frame_from_queue(self):
         """
-        Starts the decoupled ingestion and inference threads in the correct order.
+        Retrieves the next available frame data from the shared memory prefetch queue.
+
+        This helper encapsulates the logic for handling an empty queue, stream termination
+        signals, and invalid data slots, making the main processing loop cleaner.
+
+        Returns:
+            A tuple containing:
+            - (torch.Tensor or None): The frame tensor if successful, otherwise None.
+            - (dict or None): A dictionary with frame metadata (frame_num, event), or None.
+            - (bool): A flag indicating if the processing loop should continue.
         """
-        # PRE-SYNC: Ensure GPU is idle before timing starts
-        if self.device_input == "cuda":
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+        try:
+            # Block for a short timeout to wait for a frame
+            ret, slot_idx = self.prefetch_queue.get(block=True, timeout=1.0)
+            self.prefetch_queue.task_done()
+        except queue.Empty:
+            # If the queue is empty, check if workers are still active before deciding to exit.
+            with self.worker_tracking_lock:
+                if self.active_workers_count == 0 and self.prefetch_queue.empty():
+                    main_app_logger.info(
+                        "[HELPER] Prefetch queue is empty and all workers are done. Signaling stop."
+                    )
+                    return None, None, False  # Stop
+            return None, None, True  # Continue waiting
+        except (OSError, ValueError):
+            # The queue was likely closed by self.stop(), signal to exit.
+            main_app_logger.info("[HELPER] Prefetch queue was closed. Signaling stop.")
+            return None, None, False  # Stop
 
-        # Start the hardware-decoupled reader first
-        self.reader.start()
-
-        if self.config.ENABLE_QUERYING:
-            self._initialize_writer()
-
-        # Small delay to allow the reader's deque to populate
-        time.sleep(0.1)
-
-        # Start the producer and consumer threads
-        if hasattr(self, "process_thread") and not self.process_thread.is_alive():
-            self.process_thread.start()
-
-        # If running on the CPU track, block the main test thread briefly until the CPU
-        # has successfully populated the first few frames into the render queue.
-        # This completely prevents the FFmpeg rendering worker from starving and skipping
-        # the initial 3-4 seconds of video.
-        # if getattr(self, "device_input", "cpu") == "cpu":
-        #     print("[INIT] Waiting for CPU to prime the render queue...")
-        #     timeout_counter = 0
-        #     # Wait until at least 5 frames are buffered in the queue or 10 seconds pass
-        #     while self.render_queue.qsize() < 5 and timeout_counter < 100:
-        #         time.sleep(0.1)
-        #         timeout_counter += 1
-        #     print(
-        #         f"[INIT] Render queue primed with {self.render_queue.qsize()} frames. Launching worker."
-        #     )
-
-        if not self.config.DISABLE_DETECTION:
-            self.render_proc.start()
-
-            self.display_proc.start()
+        # Check for end-of-stream signal or invalid data
+        if not ret or slot_idx == "END_OF_STREAM":
+            main_app_logger.info("[HELPER] Received end-of-stream signal.")
+            return None, None, False  # Stop
 
         if (
-            self.config.ENABLE_QUERYING
-            and not self.config.TEST_MODE
-            and not self.metadata_thread.is_alive()
+            slot_idx == -1
+            or not hasattr(self, "shm_buffer_pool")
+            or self.shm_buffer_pool is None
+            or slot_idx >= len(self.shm_buffer_pool)
+            or self.shm_buffer_pool[slot_idx] is None
         ):
-            self.metadata_thread.start()
+            return None, None, True  # Continue, skip this invalid slot
 
-        if self.config.ENABLE_QUERYING and not self.writer_thread.is_alive():
-            self.writer_thread.start()
+        # --- Zero-Copy Reference Extraction ---
+        (
+            raw_shm_frame,
+            current_event,
+            frame_num,
+            abs_frame_num,
+            true_read_latency_secs,
+        ) = self.shm_buffer_pool[slot_idx]
+        # self.shm_buffer_pool[slot_idx] = None # Immediately clear the slot
 
-        return self
-
-    # def stopv1(self):
-    #     """
-    #     Comprehensive resource release. Safely drains the frame pipelines,
-    #     forces a graceful FFmpeg flush to prevent 'moov atom' index corruption,
-    #     and cleanly unlinks shared memory layers.
-    #     """
-    #     with self._stop_lock:
-    #         if self._is_stopped:
-    #             return  # Already stopped by another thread
-
-    #         # 1. Instantly pull out of active dashboards to stop inbound traffic
-    #         if self.name in self.active_streams:
-    #             self.active_streams.pop(self.name, None)
-
-    #         self.active = False
-    #         print(
-    #             f"[STOP] Initiating graceful flush shutdown for {self.name}",
-    #             flush=True,
-    #         )
-
-    #         # 2. Trigger your event handler flags
-    #         if hasattr(self, "stop_writer") and self.stop_writer is not None:
-    #             try:
-    #                 self.stop_writer.set()
-    #             except Exception:
-    #                 pass
-
-    #         # 3. PHASE 1: UNBLOCK CONSUMER CORES (Poison Pill Deliveries First)
-    #         if hasattr(self, "write_queue") and self.write_queue is not None:
-    #             try:
-    #                 # Clear out pending frame backlogs to speed up shutdown execution
-    #                 while not self.write_queue.empty():
-    #                     try:
-    #                         self.write_queue.get_nowait()
-    #                     except Exception:
-    #                         break
-    #                 # Dispatch clean poison pill token to release the consumer thread
-    #                 self.write_queue.put(None)
-    #             except Exception:
-    #                 pass
-
-    #         # if hasattr(self, "render_queue") and self.render_queue is not None:
-    #         #     try:
-    #         #         # while not self.render_queue.empty():
-    #         #         #     try:
-    #         #         #         self.render_queue.get_nowait()
-    #         #         #     except Exception:
-    #         #         #         break
-    #         #         # self.render_queue.put_nowait(None)
-    #         #         while not self.render_queue.empty():
-    #         #             time.sleep(
-    #         #                 0.01
-    #         #             )  # Give the disk writer room to catch up cleanly
-
-    #         #         # Deliver the poison pill token ONLY after the queue is empty
-    #         #         self.render_queue.put(None, timeout=2.0)
-    #         #     except Exception:
-    #         #         pass
-
-    #         if hasattr(self, "render_queue") and self.render_queue is not None:
-    #             try:
-    #                 # --- THE DEFINITIVE UNBLOCKING FIX ---
-    #                 # Drop any lingering items aggressively instead of sleeping infinitely
-    #                 # on an empty queue check that never clears.
-    #                 while not self.render_queue.empty():
-    #                     try:
-    #                         self.render_queue.get_nowait()
-    #                     except Exception:
-    #                         break
-
-    #                 # Immediately push the poison pill sentinel to terminate the worker safely
-    #                 self.render_queue.put_nowait(None)
-    #             except Exception:
-    #                 pass
-
-    #         # 4. PHASE 2: GRACEFUL FFmpeg DEFLATION GATE (Bypasses Moov Issues)
-    #         if hasattr(self, "ffmpeg_proc") and self.ffmpeg_proc is not None:
-    #             try:
-    #                 print(
-    #                     "[STOP] Closing video pipeline write handles to flush metadata...",
-    #                     flush=True,
-    #                 )
-    #                 if self.ffmpeg_proc.stdin:
-    #                     self.ffmpeg_proc.stdin.close()  # Safely alerts FFmpeg to finalize files
-
-    #                 if self.ffmpeg_proc.stderr:
-    #                     self.ffmpeg_proc.stderr.close()  # Instantly forces readline() to return None and exits thread safely
-
-    #                 # Grant a soft 5-second window for storage layer disk synchronization
-    #                 self.ffmpeg_proc.wait(timeout=5.0)
-    #                 print(
-    #                     " [STOP] FFmpeg closed cleanly with valid indexing atoms.",
-    #                     flush=True,
-    #                 )
-    #             except subprocess.TimeoutExpired:
-    #                 print(
-    #                     " [STOP-WARN] Video flush timed out. Forcing hard termination.",
-    #                     flush=True,
-    #                 )
-    #                 try:
-    #                     self.ffmpeg_proc.kill()
-    #                 except Exception:
-    #                     pass
-    #             except Exception as io_err:
-    #                 print(
-    #                     f" [STOP-WARN] Error during streaming flush: {io_err}",
-    #                     flush=True,
-    #                 )
-    #             finally:
-    #                 self.ffmpeg_proc = None
-    #                 self.video_writer = None
-
-    #         # 5. PHASE 3: SHUTDOWN MULTIPROCESSING DAEMONS
-    #         for proc_attr in ["render_proc", "ai_proc"]:
-    #             proc = getattr(self, proc_attr, None)
-    #             if proc is not None:
-    #                 try:
-    #                     if proc.is_alive():
-    #                         proc.terminate()
-    #                     proc.join(timeout=0.5)
-    #                     proc.close()
-    #                 except Exception:
-    #                     pass
-    #                 setattr(self, proc_attr, None)
-
-    #         # 6. PHASE 4: FINAL SEGMENT EVALUATION CONVERGENCE
-    #         try:
-    #             final_clip_key = f"{self.name}_{self.clip_id:03d}.mp4"
-    #             final_clip_path = f"{self.config.SHARED_OUTPUT}/{final_clip_key}"
-
-    #             # Check if the final truncated or partial segment actually exists before dispatching
-    #             if (
-    #                 os.path.exists(final_clip_path)
-    #                 and os.path.getsize(final_clip_path) > 0
-    #             ):
-    #                 print(
-    #                     f" [STOP-FLUSH] Registering finalized terminal clip: {final_clip_key}",
-    #                     flush=True,
-    #                 )
-    #                 global clip_completion_tracker
-    #                 if final_clip_key not in clip_completion_tracker:
-    #                     clip_completion_tracker[final_clip_key] = {
-    #                         "video": False,
-    #                         "meta": False,
-    #                         "start_time": time.time(),
-    #                     }
-
-    #                 clip_completion_tracker[final_clip_key]["video"] = True
-    #                 clip_completion_tracker[final_clip_key]["meta"] = True
-    #                 self._evaluate_barrier_and_dispatch(
-    #                     final_clip_key, final_clip_path, self.resize_w, self.resize_h
-    #                 )
-    #         except Exception as final_flush_err:
-    #             print(
-    #                 f" [STOP-WARN] Final segment tracking layer bypass failed: {final_flush_err}",
-    #                 flush=True,
-    #             )
-
-    #         # 8. PHASE 6: UNMAP HARDWARE MEMORY OBJECTS
-    #         if hasattr(self, "shared_details"):
-    #             try:
-    #                 # Force-close the internal lock primitive hidden inside the Manager dict proxy
-    #                 if hasattr(self.shared_details, "_ctx") and hasattr(
-    #                     self.shared_details._ctx, "RLock"
-    #                 ):
-    #                     lock = self.shared_details._ctx.RLock()
-    #                     if hasattr(lock, "_semlock"):
-    #                         lock._semlock._close()
-    #                 self.shared_details.clear()
-    #             except Exception:
-    #                 pass
-    #             del self.shared_details
-
-    #         if (
-    #             hasattr(self, "mp_frame_ready_event")
-    #             and self.mp_frame_ready_event is not None
-    #         ):
-    #             try:
-    #                 # mp.Event allocates an internal ctx.Cond / ctx.Lock boundary pair
-    #                 if hasattr(self.mp_frame_ready_event, "_cond"):
-    #                     cond = self.mp_frame_ready_event._cond
-    #                     if hasattr(cond, "_lock") and hasattr(cond._lock, "_semlock"):
-    #                         cond._lock._semlock._close()
-    #             except Exception:
-    #                 pass
-    #             self.mp_frame_ready_event = None
-
-    #         for q_attr in ["signal_queue", "render_queue"]:
-    #             if hasattr(self, q_attr):
-    #                 q = getattr(self, q_attr)
-    #                 if q is not None:
-    #                     try:
-    #                         # 1. Flush and break down standard background worker threads safely
-    #                         q.close()
-    #                         q.join_thread()
-
-    #                         # 2. CRITICAL: Force-close the hidden POSIX lock primitives to clear resource_tracker limits
-    #                         if hasattr(q, "_rlock") and q._rlock is not None:
-    #                             if hasattr(q._rlock, "_semlock"):
-    #                                 q._rlock._semlock._close()
-
-    #                         if hasattr(q, "_writer") and q._writer is not None:
-    #                             if hasattr(q._writer, "_semlock"):
-    #                                 q._writer._semlock._close()
-    #                     except Exception:
-    #                         pass
-    #                     setattr(self, q_attr, None)
-
-    #         for primitive_attr in [
-    #             "ready_buffer_idx",
-    #             "reader_active_idx",
-    #             "shm_frame_lengths",
-    #         ]:
-    #             if hasattr(self, primitive_attr):
-    #                 obj = getattr(self, primitive_attr)
-    #                 if obj is not None and hasattr(obj, "get_lock"):
-    #                     try:
-    #                         # Grab the hidden lower-level POSIX context lock map
-    #                         lock = obj.get_lock()
-    #                         # If the lock handle is bound to an active system descriptor, release it
-    #                         if hasattr(lock, "_semlock"):
-    #                             lock._semlock._close()  # Forces immediate unlinking at the OS level
-    #                     except Exception:
-    #                         pass
-    #                 setattr(self, primitive_attr, None)
-
-    #         if hasattr(self, "manager") and self.manager is not None:
-    #             try:
-    #                 self.manager.shutdown()
-    #             except Exception:
-    #                 pass
-    #             self.manager = None
-
-    #         if hasattr(self, "pinned_matrices") and self.pinned_matrices:
-    #             for active_mat in self.pinned_matrices:
-    #                 try:
-    #                     cv2.cuda.unregisterPageLocked(active_mat)
-    #                 except Exception:
-    #                     pass
-    #             self.pinned_matrices.clear()
-    #             self.pinned_tensors.clear()
-
-    #         # FIXED: Explicitly clear the high-speed AI tensor staging array allocations
-    #         if hasattr(self, "ai_pinned_tensors") and self.ai_pinned_tensors:
-    #             self.ai_pinned_tensors.clear()
-
-    #         if hasattr(self, "ai_shms") and self.ai_shms:
-    #             for shm in self.ai_shms:
-    #                 try:
-    #                     shm.close()
-    #                     shm.unlink()
-    #                 except Exception:
-    #                     pass
-    #             self.ai_shms.clear()
-    #             if hasattr(self, "ai_shm_names") and self.ai_shm_names:
-    #                 self.ai_shm_names.clear()
-
-    #         if hasattr(self, "shms") and self.shms:
-    #             for shm in self.shms:
-    #                 shm.close()
-    #                 try:
-    #                     shm.unlink()
-    #                 except FileNotFoundError:
-    #                     pass
-    #             self.shms.clear()
-    #             if (
-    #                 hasattr(self, "shared_details")
-    #                 and "shm_names" in self.shared_details
-    #             ):
-    #                 try:
-    #                     self.shared_details.pop("shm_names", None)
-    #                 except Exception:
-    #                     pass
-
-    #         if hasattr(self, "cap") and self.cap is not None:
-    #             self.cap.release()
-    #             self.cap = None
-
-    #         for pool_name in [
-    #             "executor",
-    #             # "io_executor",
-    #             "clip_executor",
-    #             # "ffmpeg_executor",
-    #         ]:
-    #             if hasattr(self, pool_name) and getattr(self, pool_name) is not None:
-    #                 try:
-    #                     getattr(self, pool_name).shutdown(wait=True)
-    #                 except Exception:
-    #                     pass
-    #                 setattr(self, pool_name, None)
-
-    #         # self.reader = None
-    #         self._is_stopped = True
-    #         print(f" [STOP] {self.name} pipeline resources fully released.", flush=True)
-
-    def stop(self):
-        """Overrides handlers.py to flush thread objects safely without deadlocking."""
-        with self._stop_lock:
-            if self._is_stopped:
-                return
-
-            print(
-                f"\n[PIPELINE-TEARDOWN] Initiating graceful thread drainage for {self.name}",
-                flush=True,
+        if frame_num == 0:
+            main_app_logger.info(
+                f"[VERIFY - CONSUMER] Main loop is officially processing Frame {frame_num}!",
             )
-            self.active = False
-            time.sleep(0.05)
 
-            # 1. Rapidly clear the async video writer thread queue first
-            if hasattr(self, "async_writer") and self.async_writer is not None:
+        # Convert numpy array from shared memory to a torch tensor
+        # cpu_tensor = torch.from_numpy(raw_shm_frame) if isinstance(raw_shm_frame, np.ndarray) else raw_shm_frame
+
+        # # Move to the correct device (GPU or CPU)
+        # if "cuda" in str(self.device_input):
+        #     safe_frame = cpu_tensor.to(self.device_input, non_blocking=True)
+        # else:
+        #     safe_frame = cpu_tensor
+
+        # if "cuda" in str(self.device_input):
+        #     safe_frame = self.gpu_input[slot_idx]
+        #     # safe_frame = cpu_tensor.to(self.device_input, non_blocking=True)
+        #     safe_frame.copy_(raw_shm_frame)
+        #     # self.gpu_input[slot_idx].zero_()
+        # else:
+        safe_frame = raw_shm_frame
+
+        # Record the CUDA event to signal that the consumer is done with this slot
+        if current_event and isinstance(current_event, torch.cuda.Event):
+            current_event.record(torch.cuda.current_stream())
+
+        frame_details = {
+            "frame_num": frame_num + 1,
+            "abs_frame_num": abs_frame_num + 1,
+            "event": current_event,
+            "reader_time": true_read_latency_secs,
+        }
+
+        # Explicitly delete intermediate tensors
+        del raw_shm_frame
+
+        return safe_frame, frame_details, True
+
+    def _setup_processor(self, read_frame_only):
+        """
+        Selects and initializes the appropriate object detector based on the configuration.
+
+        This helper encapsulates the logic for creating the AI model (`processor`),
+        handling potential initialization errors gracefully.
+
+        Args:
+            read_frame_only (bool): If True, no processor is initialized as frames are only being read.
+
+        Returns:
+            An initialized detector instance (e.g., SmartFilteringObjectDetector) or None.
+        """
+        # If we are only reading frames, no AI model is needed.
+        # if read_frame_only:
+        #     return None
+
+        # Determine the correct detector class based on the smart filtering configuration.
+        DetectorClass = (
+            SmartFilteringObjectDetector
+            if self.config.sf_enabled
+            else GeneralObjectDetector
+        )
+        detector_name = DetectorClass.__name__
+        main_app_logger.info(f"[{self.name}] Initializing processor: {detector_name}")
+
+        try:
+            # Common configuration for all detectors.
+            debug_frame_limit = (
+                self.config.DEBUG_FRAME_LIMIT if self.config.DEBUG_FLAG else -1
+            )
+
+            processor = DetectorClass(
+                config=self.config,
+                device=self.device_input,
+                timer_enabled=True,
+                resize_hw=(self.resize_h, self.resize_w),
+                frame_hw=(self.frame_height, self.frame_width),
+                target_fps=self.target_fps,
+                result_dir=self.result_dir,
+                run_name=self._testMethodName,
+                debug_frame_limit=debug_frame_limit,
+            )
+            return processor
+        except Exception as e:
+            # If the model fails to load, log the error and halt the pipeline.
+            main_app_logger.critical(
+                f"[{self.name}] CRITICAL: Failed to initialize AI processor '{detector_name}'. Error: {e}",
+                exc_info=True,
+            )
+            # Propagate the error to stop the handler from starting.
+            raise
+
+    def frame2video(
+        self,
+        device_frame,
+        frameNum,
+        metadata_or_bbs,
+        class_list,
+        stat_start_time,
+        gt_boxes=None,
+    ):
+        """
+        Frame is formated and added to video
+        metadata_or_bbs: Expected to be in resize dimensions (640x640)
+        """
+
+        # Factor for converting 640 bb dimensions to display dimensions
+        scale_display_x = self.disp_w / self.resize_w  # 640
+        scale_display_y = self.disp_h / self.resize_h  # 640
+
+        if self.device_input == "cuda":  # and torch.is_tensor(device_frame):
+            with torch.inference_mode():
+                # 2. Fast Inline VRAM Downscaling into our static memory slot
+                # Reshape to (Batch, Channel, Height, Width) seamlessly without duplicating data
+                gpu_tensor = device_frame[None].permute(0, 3, 1, 2)
+
+                resized_tensor = torch.nn.functional.interpolate(
+                    gpu_tensor,
+                    size=(self.disp_h, self.disp_w),
+                    mode="nearest",
+                )
+
+            # Using copy_() avoids creating any runtime allocations or memory-stride drift.
+            self.static_gpu_byte_bchw.copy_(resized_tensor)
+
+            # Safely reshape the pre-allocated, locked GPU memory layout back to standard HWC array topology.
+            # Since the underlying array layout is strictly contiguous, this permute is guaranteed
+            # to be zero-copy on the GPU and free from memory race stalls.
+            bgr_contiguous = self.static_gpu_byte_bchw.squeeze(0).permute(1, 2, 0)
+
+            # 1. Grab the current free pinned slot tracking variables from your reader
+            d2h_idx = self.reader.d2h_selector
+            pinned_tensor_buf = self.reader.d2h_buffers[d2h_idx]
+
+            # # Synchronize only the side download stream layout channel
+            # self.reader.download_stream.synchronize()
+            # Initialize a static download sync event on setup_context if not present
+            # if not hasattr(self, "_d2h_fence"):
+            #     self._d2h_fence = torch.cuda.Event()
+
+            with torch.cuda.stream(self.reader.download_stream):
+                pinned_tensor_buf.copy_(
+                    bgr_contiguous,
+                    non_blocking=True,
+                )
+            #     self._d2h_fence.record()
+
+            # self._d2h_fence.synchronize()
+
+            cpu_360p_frame = self.reader.d2h_numpys[d2h_idx]
+
+            # 5. Non-Blocking Push straight to your background AsyncVideoWriter thread pool
+            # We pass a direct .copy() slice so the hot loop can instantly reuse the pinned ring buffer
+            # display_frame = np.array(cpu_360p_frame, copy=True, order="C")
+            display_frame = np.asarray(cpu_360p_frame, order="C")
+            if display_frame.shape[-1] == 3:
+                display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
+
+            # --- Draw Detection Overlays ---
+            if gt_boxes is not None:
+                # Factor for converting 8K (original) bb dimensions to display dimensions
+                scale_display_ox = self.disp_w / self.frame_width
+                scale_display_oy = self.disp_h / self.frame_height
+
+                display_frame = self.get_overlay(
+                    display_frame,
+                    gt_boxes,
+                    None,
+                    scale_display_ox,
+                    scale_display_oy,
+                    color=(0, 255, 0),
+                )
+
+            display_frame = self.get_overlay(
+                display_frame,
+                metadata_or_bbs,
+                class_list,
+                scale_display_x,
+                scale_display_y,
+            )
+
+            self.async_writer.write_frame(display_frame)
+            self.update_frame(stat_start_time)
+            # self.canvas_selector = 1 - self.canvas_selector
+            self.reader.d2h_selector = 1 - self.reader.d2h_selector
+
+            if (
+                self.config.DEBUG_FLAG
+                and self.config.TEST_MODE
+                and frameNum <= self.config.DEBUG_FRAME_LIMIT
+            ):
+                stage_debug_dir = (
+                    self.result_dir / "debug_stages" / self._testMethodName / "display"
+                )
+                stage_debug_dir.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(
+                    # str(stage_debug_dir / f"frame_{f_num:04d}_stage6_threshold.jpg"),
+                    str(stage_debug_dir / f"frame_{frameNum:04d}_final_frame.jpg"),
+                    display_frame,
+                )
+
+        else:  # CPU
+            # Reusable baseline track for CPU execution mappings
+            display_frame = cv2.resize(
+                device_frame,
+                (self.disp_w, self.disp_h),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+            # --- Draw Detection Overlays ---
+            if gt_boxes is not None:
+                # Factor for converting 8K (original) bb dimensions to display dimensions
+                scale_display_ox = self.disp_w / self.frame_width
+                scale_display_oy = self.disp_h / self.frame_height
+
+                display_frame = self.get_overlay(
+                    display_frame,
+                    gt_boxes,
+                    None,
+                    scale_display_ox,
+                    scale_display_oy,
+                    color=(0, 255, 0),
+                )
+
+            display_frame = self.get_overlay(
+                display_frame,
+                metadata_or_bbs,
+                class_list,
+                scale_display_x,
+                scale_display_y,
+            )
+            self.async_writer.write_frame(display_frame)
+            self.update_frame(stat_start_time)
+
+        # if "display_frame" in locals():
+        #     del display_frame
+        # if "metadata_or_bbs" in locals():
+        #     del metadata_or_bbs
+
+    def frame2output(
+        self, device_frame, frame_num, metadata_or_bbs, class_list, stat_start_time
+    ):
+        """
+        Renders drone detection bounding boxes onto the canvas
+        before dispatching to the live UI shared memory stream.
+        """
+        if not self.active:
+            return
+
+        # Factor for converting 640 bb dimensions to display dimensions
+        scale_display_x = self.disp_w / self.resize_w  # 640
+        scale_display_y = self.disp_h / self.resize_h  # 640
+
+        try:
+            if self.device_input == "cuda":  # and torch.is_tensor(device_frame):
+                with torch.inference_mode():
+                    # main_app_logger.info(f"device_frame.shape: {device_frame.shape}")
+                    # main_app_logger.info(f"\tdevice_frame[None, :].shape: {device_frame[None, :].shape}")
+                    # 2. Fast Inline VRAM Downscaling into our static memory slot
+                    # Reshape to (Batch, Channel, Height, Width) seamlessly without duplicating data
+                    gpu_tensor = device_frame[None, :].permute(0, 3, 1, 2).float()
+
+                    resized_tensor = torch.nn.functional.interpolate(
+                        gpu_tensor,
+                        size=(self.disp_h, self.disp_w),
+                        mode="nearest",
+                    )
+
+                # CONVERTS TO CPU EARLIER (WORKS but lowers fps)
+                # hwc_byte_tensor = resized_tensor.squeeze(0).permute(1, 2, 0).byte()
+                # cpu_tensor = hwc_byte_tensor.cpu()
+                # bgr_contiguous = cpu_tensor.contiguous()
+
+                # Using copy_() avoids creating any runtime allocations or memory-stride drift.
+                self.static_gpu_byte_bchw.copy_(resized_tensor.byte())
+
+                # Safely reshape the pre-allocated, locked GPU memory layout back to standard HWC array topology.
+                # Since the underlying array layout is strictly contiguous, this permute is guaranteed
+                # to be zero-copy on the GPU and free from memory race stalls.
+                bgr_contiguous = self.static_gpu_byte_bchw.squeeze(0).permute(1, 2, 0)
+
+                # 1. Grab the current free pinned slot tracking variables from your reader
+                d2h_idx = self.reader.d2h_selector
+                pinned_tensor_buf = self.reader.d2h_buffers[d2h_idx]
+
+                # c_idx = self.canvas_selector
+                # current_canvas = self.static_host_canvases[c_idx]
+
+                # host_tensor_view = torch.as_tensor(current_canvas, device="cpu")
+
+                # 3. Non-blocking asynchronous PCIe DMA Download directly into our page-locked canvas
+                # with torch.cuda.stream(self.reader.download_stream):
+                # if (
+                #     hasattr(self.reader, "download_stream")
+                #     and self.reader.download_stream is not None
+                # ):
+                #     torch.cuda.set_stream(self.reader.download_stream)
+                # pinned_tensor = torch.from_numpy(current_canvas).cuda()
+                pinned_tensor_buf.copy_(bgr_contiguous, non_blocking=True)
+
+                # Synchronize only the side download stream layout channel
+                # self.reader.download_stream.synchronize()
+
+                cpu_360p_frame = self.reader.d2h_numpys[d2h_idx]
+
+                # 5. Non-Blocking Push straight to your background AsyncVideoWriter thread pool
+                # We pass a direct .copy() slice so the hot loop can instantly reuse the pinned ring buffer
+                display_frame = np.array(cpu_360p_frame, copy=True, order="C")
+                if display_frame is not None and display_frame.shape[-1] == 3:
+                    display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
+
+                # --- Draw Detection Overlays ---
+                display_frame = self.get_overlay(
+                    display_frame,
+                    metadata_or_bbs,
+                    class_list,
+                    scale_display_x,
+                    scale_display_y,
+                )
+
+                self.async_writer.write_frame(display_frame, frame_num)
+                self.update_frame(stat_start_time)
+                # self.canvas_selector = 1 - self.canvas_selector
+                self.reader.d2h_selector = 1 - self.reader.d2h_selector
+
+            else:
+                # Reusable baseline track for CPU execution mappings
+                display_frame = cv2.resize(
+                    device_frame,
+                    (self.disp_w, self.disp_h),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+
+                # --- Draw Detection Overlays ---
+                display_frame = self.get_overlay(
+                    display_frame,
+                    metadata_or_bbs,
+                    class_list,
+                    scale_display_x,
+                    scale_display_y,
+                )
+                self.async_writer.write_frame(display_frame, frame_num)
+                self.update_frame(stat_start_time)
+
+        except Exception:
+            traceback.print_exc()
+        # return
+
+        if "display_frame" in locals():
+            del display_frame
+        if "metadata_or_bbs" in locals():
+            del metadata_or_bbs
+
+    # CLEANUP --------------------------------------------
+
+    def clean_up_tensors_and_arrays_v1(self):
+        main_app_logger.info("[CLEANUP] Safely stripping active runtime arrays ...")
+
+        # 1. Force disable tracking states to stop graph allocation recursion
+        # torch.set_grad_enabled(False)
+
+        # if hasattr(torch, "jit") and hasattr(torch.jit, "_builtins"):
+        #     if isinstance(torch.jit._builtins, dict):
+        #         torch.jit._sbuiltins.clear()
+        #     else:
+        #         torch.jit._builtins = {}
+
+        # 2. Collect references safely using strict type checking
+        # This completely avoids pulling unmanaged proxy objects from the heap
+        all_live_objects = gc.get_objects()
+
+        target_tensors = []
+        target_arrays = []
+
+        for obj in all_live_objects:
+            try:
+                obj_type = type(obj)
+                if isinstance(obj, types.FrameType):
+                    frame_info = inspect.getframeinfo(obj)
+                    if (
+                        "openvino" in frame_info.filename
+                        or "openvino.py" in frame_info.filename
+                    ):
+                        # Clear the frame's local variable dictionary to break circular references
+                        obj.f_locals.clear()
+
+                # Check for concrete types to prevent triggering proxy __getattr__ hooks
+                if obj_type is torch.Tensor:
+                    target_tensors.append(obj)
+                elif obj_type is np.ndarray:
+                    # Explicitly guard size checks to keep it completely stable
+                    if obj.base is None and obj.ndim > 0:
+                        target_arrays.append(obj)
+            except Exception:
+                traceback.print_exc()
+
+        # 3. Truncate discovered references in-place without triggering deletions
+        reclaimed_tensors = 0
+        for tensor in target_tensors:
+            try:
+                # Truncate raw storage footprint safely
+                tensor.data = torch.empty(0, device=self.device_input)
+                reclaimed_tensors += 1
+            except Exception:
+                traceback.print_exc()
+
+        reclaimed_arrays = 0
+        for arr in target_arrays:
+            try:
+                # Shrink writeable numpy arrays down to 0 bytes safely
+                if arr.flags.writeable:
+                    arr.resize((0,), refcheck=False)
+                    reclaimed_arrays += 1
+            except (ValueError, SystemError):
+                traceback.print_exc()
+            except Exception:
+                traceback.print_exc()
+
+        main_app_logger.info(
+            f"[CLEANUP] Reclaimed {reclaimed_tensors} tensors and {reclaimed_arrays} arrays safely."
+        )
+
+        # Clean local registers immediately
+        all_live_objects = None
+        target_tensors = None
+        target_arrays = None
+
+        if hasattr(sys, "exc_info"):
+            sys.exc_clear() if hasattr(sys, "exc_clear") else None
+        gc.collect()
+
+    def clean_up_tensors_and_arrays(self):
+        """
+        Safely releases instance-local memory without corrupting global PyTorch tensors.
+        """
+        main_app_logger.info(
+            f"[CLEANUP {getattr(self, 'name', '')}] Releasing local arrays and flushing caches..."
+        )
+
+        # Explicitly release any instance-level tensor references
+        instance_tensor_attrs = [
+            "static_gpu_360p",
+            "static_gpu_byte_bchw",
+            "gpu_float_staging",
+            "scales_tensor",
+            "_cached_grid_x",
+            "_cached_grid_y",
+        ]
+        for attr in instance_tensor_attrs:
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+
+        if hasattr(sys, "exc_info"):
+            try:
+                if hasattr(sys, "exc_clear"):
+                    sys.exc_clear()
+            except Exception:
+                pass
+
+        gc.collect()
+        if "cuda" in str(self.device_input) and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+
+    def drain_queues(self, all_queues, wait_time=15.0):
+        # Wait (15 seconds) for your background writers to pull remaining matrices out of the pipe
+        drain_start = time.perf_counter()
+        while time.perf_counter() - drain_start < wait_time:
+            still_has_frames = False
+            for q_name in all_queues:
+                q_val = getattr(self, q_name, None)
+                if q_val is not None:
+                    try:
+                        # Accumulate total remaining frame backlogs across your pipelines
+                        # if hasattr(q_val, "qsize"):
+                        #     backlog += q_val.qsize()
+                        if not q_val.empty():
+                            still_has_frames = True
+                            break
+                    except Exception:
+                        pass
+
+            if not still_has_frames:
+                main_app_logger.info(
+                    "[TEARDOWN] All background queues are empty. Proceeding to safe close.",
+                )
+                break
+
+            # Yield micro-slices to grant immediate execution priority to background threads
+            time.sleep(0.01)
+
+    def remove_scalar_attributes(self, remove_attrs):
+        for attr in remove_attrs:
+            val = getattr(self, attr, None)
+            if val is not None:
+                # try:
+                #     val.clear()
+                # except Exception:
+                #     setattr(self, attr, None)
+
+                # # try: delattr(self, attr)
+                # # except AttributeError: pass
                 try:
-                    self.async_writer.release()
+                    # THE NATIVE SHIELD: Only call clear() if it has the attribute!
+                    if hasattr(val, "clear") and callable(getattr(val, "clear")):
+                        val.clear()
+                    else:
+                        # If it's a primitive type like an int, reset it safely
+                        if isinstance(val, int):
+                            setattr(self, attr, 0)
+                        elif isinstance(val, float):
+                            setattr(self, attr, 0.0)
+                        elif isinstance(val, dict):
+                            setattr(self, attr, {})
+                        elif torch.is_tensor(val):
+                            val.data = torch.empty(0, device=self.device_input)
+                        else:
+                            setattr(self, attr, None)
+                    if hasattr(self, attr):
+                        delattr(self, attr)
                 except Exception:
+                    # pass
                     traceback.print_exc()
 
-            # Instantly pull out of active dashboards to stop inbound traffic
-            if self.name in self.active_streams:
-                self.active_streams.pop(self.name, None)
+                try:
+                    if hasattr(self, attr):
+                        delattr(self, attr)
+                except Exception:
+                    # pass
+                    traceback.print_exc()
 
-            if not self.config.TEST_MODE:
-                if hasattr(self, "send_metadata_queue"):
-                    local_send_metadata_queue = self.send_metadata_queue
-                else:
-                    global send_metadata_queue
-                    local_send_metadata_queue = send_metadata_queue
-                if local_send_metadata_queue is not None:
+    def drain_and_close_queues(self, all_queues):
+        for key in all_queues:
+            val = getattr(self, key, None)
+            if val is None:
+                continue
+            try:
+                while not val.empty():
+                    val.get_nowait()
+            except Exception:
+                pass
+            try:
+                if hasattr(val, "close"):
+                    if hasattr(val, "cancel_join_thread"):
+                        val.cancel_join_thread()
+                    val.close()
+            except Exception:
+                pass
+            # setattr(self, key, None)
+
+    def stop_events(self, events=[], keys_to_skip_deletion=[]):
+        for event_attr in events:
+            # if hasattr(self, event_attr):
+            tgt_event = getattr(self, event_attr, None)
+            if tgt_event is None:
+                continue
+            try:
+                if hasattr(tgt_event, "_handle"):
+                    tgt_event._handle.close()
+                if (
+                    isinstance(tgt_event, torch.cuda.Event)
+                    and event_attr not in keys_to_skip_deletion
+                ):
+                    # Force internal driver handle release
+                    del tgt_event
+            except Exception:
+                # pass
+                traceback.print_exc()
+            setattr(self, event_attr, None)
+
+            if hasattr(self, event_attr) and event_attr not in keys_to_skip_deletion:
+                delattr(self, event_attr)
+
+    def stop_thread(self, val):
+        # current_thread_id = threading.get_ident()
+        # val = getattr(self, targeted_key, None)
+        # val = targeted_key_val
+        try:
+            if hasattr(val, "is_alive") and val.is_alive():
+                if val.ident != threading.get_ident():
+                    if hasattr(val, "terminate"):
+                        val.terminate()
+                    val.join(timeout=0.5)
+        except Exception:
+            if val is None:
+                pass
+            traceback.print_exc()
+
+    def stop_threads(self, all_targeted_keys):
+        current_thread_id = threading.get_ident()
+        for attr in all_targeted_keys:
+            val = getattr(self, attr, None)
+            if val is None:
+                continue
+            try:
+                if hasattr(val, "is_alive") and val.is_alive():
+                    if getattr(val, "ident", None) != current_thread_id:
+                        # if hasattr(val, "terminate"): val.terminate()
+                        # val.join(timeout=0.5)
+                        if isinstance(val, (threading.Thread, DummyProcess)):
+                            # Threads can only be joined cooperatively via flags (self.active = False)
+                            val.join(timeout=0.2)  # Use a tight, rapid timeout gate
+                        else:
+                            val.join(timeout=3.0)
+                            # OS multi-processing blocks can safely accept termination hooks
+                            if val.is_alive() and hasattr(val, "terminate"):
+                                val.terminate()
+            except Exception:
+                # pass
+                traceback.print_exc()
+
+            # Clean up references immediately to drop tracking counters
+            if getattr(val, "ident", None) != current_thread_id:
+                setattr(self, attr, None)
+
+    def set_stop_writer_event(self, remove=False):
+        if hasattr(self, "stop_writer") and self.stop_writer is not None:
+            try:
+                self.stop_writer.set()
+            except Exception:
+                pass
+            setattr(self, "stop_writer", None)
+
+            if remove:
+                try:
+                    delattr(self, "stop_writer")
+                except AttributeError:
+                    pass
+
+    def stop_executors(self, all_targeted_keys, remove=True):
+        for key in list(all_targeted_keys):
+            val = getattr(self, key, None)
+            if val is None:
+                continue
+            try:
+                val.shutdown(wait=False, cancel_futures=True)
+                # Natively strip out the inner worker thread arrays to drop OS handles
+                if hasattr(val, "_threads"):
+                    val._threads.clear()
+            except Exception:
+                try:
+                    val.shutdown(wait=False)
+                except Exception:
+                    pass
+            setattr(self, key, None)
+            if remove:
+                delattr(self, key)
+
+    def unregister_pinned_cuda_data_v1(self):
+        # Unregister the hidden page-locks inside the ai_pinned_tensors pool
+        if hasattr(self, "ai_pinned_tensors") and self.ai_pinned_tensors:
+            for tensor in list(self.ai_pinned_tensors):
+                try:
+                    if torch.is_tensor(tensor):
+                        # Extract the shared NumPy view to break the C++ driver lock
+                        cv2.cuda.unregisterPageLocked(tensor.numpy())
+                except cv2.error:
+                    pass
+                except Exception:
+                    pass
+
+        # Unregister the standard pinned_tensors pool page-locks
+        if hasattr(self, "pinned_tensors") and self.pinned_tensors:
+            for tensor in list(self.pinned_tensors):
+                try:
+                    if torch.is_tensor(tensor):
+                        cv2.cuda.unregisterPageLocked(tensor.numpy())
+                except cv2.error:
+                    pass
+                except Exception:
+                    pass
+
+        # Unregister any standalone page-locked matrices
+        if hasattr(self, "pinned_matrices") and self.pinned_matrices:
+            for active_mat in list(self.pinned_matrices):
+                if getattr(self, "device_input", "cpu") == "cuda":
                     try:
-                        # 1. Wait for any in-flight ThreadPoolExecutor inference workers
-                        # to finish submitting final frame maps to all_metadata
-                        if hasattr(self, "executor") and self.executor is not None:
-                            while self.get_executor_backlog() > 0:
-                                time.sleep(0.01)
+                        # Wrap explicitly to catch the native OpenCV -217 API Exception!
+                        cv2.cuda.unregisterPageLocked(active_mat)
+                    except cv2.error:
+                        # Catch the pointer registry mismatch safely without breaking the stop() execution stream
+                        pass
+                    except Exception:
+                        pass
 
-                        backlog_count = local_send_metadata_queue.qsize()
-                        print(
-                            f"[TEARDOWN] send_metadata_queue has {backlog_count} pending uploads. Delivering poison pill sentinel...",
-                            flush=True,
-                        )
+        # FORCE PYTORCH C++ ALLOCATOR TO DISSOLVE THE HARDWARE BOUNDARIES
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
 
-                        # 2. Push the explicit sentinel None token to tell the consumer loop to close
-                        local_send_metadata_queue.put(None)
+    def unregister_pinned_cuda_data(self):
+        """
+        Safely unregisters OpenCV page-locked host memory from the CUDA driver
+        before the underlying arrays are released.
+        """
+        if getattr(self, "device_input", "cpu") != "cuda":
+            return
 
-                        # 3. CRITICAL BRIDGING BLOCK: If the thread is active and alive,
-                        # block the main process context to let it completely empty the queue
-                        if (
-                            hasattr(self, "metadata_thread")
-                            and self.metadata_thread is not None
-                        ):
-                            if self.metadata_thread.is_alive():
-                                # Force the main thread to join until the consumer hits the sentinel and exits
-                                self.metadata_thread.join(timeout=2.0)
+        if hasattr(self, "pinned_matrices") and self.pinned_matrices:
+            for active_mat in list(self.pinned_matrices):
+                if active_mat is not None:
+                    try:
+                        cv2.cuda.unregisterPageLocked(active_mat)
+                    except Exception:
+                        pass
 
-                            if self.metadata_thread.is_alive():
-                                print(
-                                    "[TEARDOWN-WARN] Metadata database thread hung on socket lock. Bypassing safely to prevent deadlock.",
-                                    flush=True,
-                                )
-                            else:
-                                print(
-                                    "[TEARDOWN] Metadata database thread exited cleanly.",
-                                    flush=True,
-                                )
+        if hasattr(self, "pinned_tensors") and self.pinned_tensors:
+            for tensor in list(self.pinned_tensors):
+                if tensor is not None and torch.is_tensor(tensor):
+                    try:
+                        cv2.cuda.unregisterPageLocked(tensor.numpy())
+                    except Exception:
+                        pass
 
-                    except Exception as teardown_err:
-                        print(
-                            f"[TEARDOWN WARN] Metadata drainage exception: {teardown_err}",
-                            flush=True,
-                        )
+        # Force CUDA driver to finalize unpinning
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
 
-            # =====================================================================
-            # DECUPLED MULTI-PROCESS TEARDOWN LIFECYCLE SEQUENCE
-            # =====================================================================
-            # 1. FIRST: Drain and synchronize your thread pool tasks so EVERY frame drops into the IPC queue
-            if hasattr(self, "display_pool") and self.display_pool is not None:
+    def clear_buffer_pools(self, buffer_pools):
+        for buffer_pool in buffer_pools:
+            val = getattr(self, buffer_pool, None)
+            if val is None:
+                continue
+
+            setattr(self, buffer_pool, None)
+            for i in range(len(val)):
+                val[i] = None
+            if hasattr(val, "clear"):
                 try:
-                    if hasattr(self.display_pool, "_work_queue"):
-                        backlog = self.display_pool._work_queue.qsize()
-                        if backlog > 0:
-                            print(
-                                f"\n\033[94m[STAGE 1/4] Synchronizing display pool threads. Draining {backlog} background tasks...\033[0m",
-                                flush=True,
-                            )
-                            backlog_s = time.perf_counter()
-                            while (
-                                self.display_pool._work_queue.qsize() > 0
-                                or len(self.reorder_staging_buffer) > 0
-                            ):
-                                # Yield a brief slice to let worker threads complete downscaling
-                                time.sleep(0.01)
-                            backlog_e = time.perf_counter() - backlog_s
-                            print(f"\t\033[94mTook {backlog_e} secs\033[0m", flush=True)
-                    print(
-                        "\033[92m[SUCCESS] All background image transformations completed cleanly.\033[0m",
-                        flush=True,
-                    )
-                    self.display_pool.shutdown(wait=True)
-                except Exception as e:
-                    print(
-                        f"[TEARDOWN ERROR] Thread pool synchronization failed: {e}",
-                        flush=True,
-                    )
-                setattr(self, "display_pool", None)
-
-            # 1. FIRST: Instantly dispatch the shutdown token so the worker process knows to flush entries
-            if hasattr(self, "render_queue") and self.render_queue is not None:
-                try:
-                    print(
-                        f"\n\033[94m[STAGE 1/3] Dispatching shutdown sentinel (None) to rendering process worker (Backlog: {self.render_queue.qsize()} frames)...\033[0m",
-                        flush=True,
-                    )
-                    # Delivering the poison pill immediately tells FFmpeg to drain remaining blocks sequentially
-                    self.render_queue.put(None, timeout=2.0)
-                except Exception as queue_err:
-                    print(
-                        f"\033[91m[TEARDOWN ERROR] Failed staging shutdown token: {queue_err}\033[0m",
-                        flush=True,
-                    )
-
-            # 2. SECOND: Allow the background multiprocessing queue to empty outstanding items naturally
-            if hasattr(self, "render_queue") and self.render_queue is not None:
-                try:
-                    print(
-                        "\n\033[94m[STAGE 2/3] Finalizing file output. Draining remaining frames from IPC memory lane...\033[0m",
-                        flush=True,
-                    )
-                    t_drain = time.perf_counter()
-                    # Wait up to 15 seconds for the worker process to pull every remaining matrix out of the pipe
-                    while (
-                        not self.render_queue.empty()
-                        and (time.perf_counter() - t_drain) < 15.0
-                    ):
-                        time.sleep(
-                            0.01
-                        )  # Micro-yield grants immediate execution priority to the background process core
+                    val.clear()
                 except Exception:
                     pass
 
-            # 3. THIRD: Block the main thread safely and allow the detached process to finish disk I/O operations
-            if hasattr(self, "render_proc") and self.render_proc is not None:
+    def clear_pinned_data(self):
+        tensor_pools = ["ai_pinned_tensors", "pinned_tensors"]
+        for pool_attr in tensor_pools:
+            pool = getattr(self, pool_attr, None)
+            if pool:
+                for tensor in list(pool):
+                    try:
+                        if torch.is_tensor(tensor):
+                            # Truncate internal storage mapping layer immediately
+                            tensor.data = torch.empty(0, device="cpu")
+                    except Exception:
+                        pass
                 try:
-                    join_duration = 0.0
-                    if self.render_proc.is_alive():
-                        print(
-                            "\033[94m[STAGE 2/2] Main thread blocking. Synchronizing hard drive file headers...\033[0m",
-                            flush=True,
-                        )
-                        t_join_start = time.perf_counter()
-                        self.render_proc.join(
-                            timeout=15.0
-                        )  # Safe timeout lets video containers finalize cleanly
-                        join_duration = time.perf_counter() - t_join_start
-                    else:
-                        print(
-                            "\033[94m[STAGE 2/2] Main thread clear...\033[0m",
-                            flush=True,
-                        )
-
-                    if self.render_proc.is_alive():
-                        print(
-                            "\n\033[91m[CRITICAL STALL] Render worker process hung on disk write! Forcing termination...\033[0m",
-                            flush=True,
-                        )
-                        self.render_proc.terminate()
-                        self.render_proc.join()
-                    else:
-                        print(
-                            f"\033[92m[FINAL] Video compilation finished cleanly! Hard drive commit took {join_duration:.2f} seconds.\033[0m",
-                            flush=True,
-                        )
-
-                    # self.render_proc.close()
-                except Exception as proc_err:
-                    print(
-                        f"\033[91m[TEARDOWN ERROR] Failed closing background process container: {proc_err}\033[0m",
-                        flush=True,
-                    )
-                setattr(self, "render_proc", None)
-
-            render_proc_handle = getattr(self, "render_proc", None)
-            if render_proc_handle is not None:
-                try:
-                    # 1. Check if it is a Process vs Thread
-                    if hasattr(render_proc_handle, "terminate"):
-                        # Production/Multiprocessing fallback path
-                        if render_proc_handle.is_alive():
-                            render_proc_handle.terminate()
-                            render_proc_handle.join()
-                        render_proc_handle.close()
-                    else:
-                        # Thread-Safe Path: Standard background threading handles
-                        # do not require manual termination or descriptor closure hooks.
-                        if render_proc_handle.is_alive():
-                            render_proc_handle.join(timeout=0.2)
-
-                    print(
-                        "\033[92m[SUCCESS] Background rendering thread container released cleanly.\033[0m",
-                        flush=True,
-                    )
-                except Exception as e:
-                    print(
-                        f"[TEARDOWN WARN] Safely ignoring lingering thread reference handles: {e}",
-                        flush=True,
-                    )
-                finally:
-                    setattr(self, "render_proc", None)
-
-            # 4. FOURTH: Clean up remaining pipeline executors and queues safely
-            if hasattr(self, "render_queue") and self.render_queue is not None:
-                try:
-                    self.render_queue.close()
-                    self.render_queue.cancel_join_thread()
+                    pool.clear()
                 except Exception:
                     pass
-                setattr(self, "render_queue", None)
 
-            # if hasattr(self, "async_writer") and self.async_writer is not None:
-            #     self.async_writer.release()
+        # 7. UNPIN HARDWARE MATRICES (From initialize_variables)
+        if hasattr(self, "pinned_matrices") and self.pinned_matrices:
+            try:
+                self.pinned_matrices.clear()
+            except Exception:
+                pass
 
-            if hasattr(self, "executor") and self.executor is not None:
-                try:
-                    self.executor.shutdown(wait=True)
-                except Exception:
-                    pass
-                setattr(self, "executor", None)
+    def clear_shared_memory_list(self, shm_names: list):
+        """
+        Cleans up and unlinks shared memory collections, supporting both
+        direct attributes ("shms") and nested attributes ("reader.shms").
+        """
+        for shm_path in shm_names:
+            curr_obj = self
+            for attr in shm_path.split("."):
+                curr_obj = getattr(curr_obj, attr, None)
+                if curr_obj is None:
+                    break
 
-            self.status = "DONE"
-            self._is_stopped = True
-            print(
-                "[STOPPING] Teardown complete. Releasing session cleanly.\n",
-                flush=True,
-            )
+            val = curr_obj
+            if not val:
+                continue
 
-    def model_warmup(self, H=640, W=640):
-        H, W = int(H), int(W)
-        # Move the dummy input creation inside a no_grad block
-        with torch.no_grad():
-            print(f"Starting warmup for {self.name}...", flush=True)
-            dummy_input = torch.zeros((1, 3, H, W)).to(self.device_input)
+            release_shared_memory(list(val))
+            # for shm in list(val):
+            #     if shm is not None:
+            #         try:
+            #             # Release buffer view if open
+            #             if hasattr(shm, "buf") and shm.buf is not None:
+            #                 shm.buf.release()
+            #         except Exception:
+            #             pass
 
-            # Perform iterations directly on the main thread
-            for i in range(5):
-                _ = self.run_model(
-                    dummy_input,
-                    imgsz=(H, W),
-                    batch=1,
-                    device_input=self.device_input,
-                    stream=STREAM_ARG,
+            #         try:
+            #             shm.close()
+            #         except Exception:
+            #             pass
+
+            #         try:
+            #             shm.unlink()
+            #         except (FileNotFoundError, AttributeError, OSError):
+            #             pass
+
+            # # Clear the container list/collection in-place
+            # if hasattr(val, "clear"):
+            #     try:
+            #         val.clear()
+            #     except Exception:
+            #         pass
+
+    def clean_up_reader(self):
+        """Halts the background prefetch staging worker completely before draining pipeline queues."""
+        if hasattr(self, "reader") and self.reader is not None:
+            try:
+                # 1. IMMEDIATE HALT: Force the background loop condition to fail instantly
+                self.reader.stopped = True
+                self.prefetch_active = False
+                self.active = False
+
+                # 2. Join the prefetch thread gracefully so it finishes its current read and dies
+                if hasattr(self, "prefetch_threads") and self.prefetch_threads:
+                    for th in self.prefetch_threads:
+                        if th.is_alive():
+                            th.join(timeout=0.2)
+                    self.prefetch_threads.clear()
+
+                # if hasattr(self.reader, "print_breakdown"):
+                #     self.reader.print_breakdown()
+
+                # 3. Safe, deadlock-free queue drain loop (Now guaranteed to exit cleanly)
+                drain_timeout_start = time.perf_counter()
+                while not self.prefetch_queue.empty():
+                    try:
+                        self.prefetch_queue.get_nowait()
+                        self.prefetch_queue.task_done()
+                    except Exception:
+                        break
+                    # Hard escape hatch safety guard to prevent hanging if threads ghost
+                    if time.perf_counter() - drain_timeout_start > 0.5:
+                        break
+
+                # 4. Trigger standard standalone hardware unpinning routines
+                # if hasattr(self.reader, "release_hardware_pins"):
+                #     self.reader.release_hardware_pins()
+
+                self.reader.stop()
+
+            except Exception as e:
+                main_app_logger.debug(
+                    f"Reader object isolation step encountered a soft error: {e}"
                 )
-                if i == 0 and hasattr(self.model, "predictor") and self.model.predictor:
-                    self.cached_predictor = self.model.predictor
+            finally:
+                self.reader = None
 
-            # Force GPU to finish before returning
-            if self.device_input == "cuda":
-                torch.cuda.synchronize()
+    def unlink_shared_memory(self, all_shm_keys):
+        for key in all_shm_keys:
+            val = getattr(self, key, None)
+            if val is None:
+                continue
+            for shm in list(val):
+                if shm is not None:
+                    try:
+                        # Drop direct memoryview trackers instantly
+                        if hasattr(shm, "buf") and shm.buf is not None:
+                            try:
+                                shm.buf.release()
+                            except Exception:
+                                pass
 
-            # Pin a lightweight tensor to prevent downstream empty_cache() calls
-            # from destroying the compiled model weight layouts in memory
-            self.__persistent_vram_lock = torch.zeros((1,), device=self.device_input)
+                        # Invalidate private mmap structures to drop pytest stack frame caches
+                        if hasattr(shm, "_mmap") and shm._mmap is not None:
+                            try:
+                                shm._mmap = None
+                            except Exception:
+                                pass
 
-        print(f"Warmup complete for {self.name}", flush=True)
+                        # try:
+                        #     shm.__class__.__del__ = lambda self: None
+                        # except Exception:
+                        #     pass
 
+                        # # Unlink text descriptors out of the core tracker process
+                        # shm_descriptor = shm._name if shm._name.startswith("/") else f"/{shm._name}"
+                        # try:
+                        #     unregister(shm_descriptor, "shared_memory")
+                        # except Exception:
+                        #     pass
+
+                        shm.close()
+                        shm.unlink()
+                    except Exception:
+                        pass
+            try:
+                val.clear()
+            except Exception:
+                pass
+
+    def stop_sync_manager(self):
+        """Safely shuts down the background Sync Base Manager process daemon."""
+        # if hasattr(self, "shared_details") and self.shared_details is not None:
+        #     try: self.shared_details.clear()
+        #     except Exception: pass
+
+        if hasattr(self, "manager") and self.manager is not None:
+            try:
+                if hasattr(self.manager, "_allocated"):
+                    for memory_block in list(self.manager._allocated):
+                        try:
+                            if (
+                                hasattr(memory_block, "buf")
+                                and memory_block.buf is not None
+                            ):
+                                memory_block.buf.release()
+                            memory_block.close()
+                            memory_block.unlink()
+                        except Exception:
+                            pass
+                    try:
+                        self.manager._allocated.clear()
+                    except Exception:
+                        pass
+                self.manager.shutdown()
+
+                # Added
+                if (
+                    hasattr(self.manager, "_process")
+                    and self.manager._process is not None
+                ):
+                    proc = self.manager._process
+                    if proc.is_alive():
+                        proc.join(timeout=0.2)
+                    if proc.is_alive():
+                        proc.terminate()
+                        proc.join()
+
+            except Exception:
+                pass
+            setattr(self, "manager", None)
+
+    def purge_attributes(self):
+        # ─── FORCE LOW-LEVEL OPENVINO C++ HARDWARE PURGE ───
+        if hasattr(self, "model") and self.model is not None:
+            try:
+                # If your backend utilizes an OpenVINO core orchestrator:
+                model_wrapper = self.model
+
+                # Check for common OpenVINO runtime handle names inside your core class
+                for attr_name in ["core", "_core", "ov_core", "runtime"]:
+                    if hasattr(model_wrapper, attr_name):
+                        ov_core = getattr(model_wrapper, attr_name)
+                        if ov_core is not None:
+                            # 1. Force OpenVINO to clear internal cached compiled models and models' graphs
+                            if hasattr(ov_core, "get_property"):
+                                try:
+                                    # Tells OpenVINO to drop its physical memory caching metrics pools
+                                    ov_core.set_property({}, {})
+                                except Exception:
+                                    pass
+
+                            # 2. Trigger explicit Python C++ boundary deconstruction bindings
+                            if hasattr(ov_core, "__del__"):
+                                ov_core.__del__()
+
+                            setattr(model_wrapper, attr_name, None)
+            except Exception:
+                pass
+
+        # Un-bind dynamic instance methods to break Pytest's reference hold
+        for dynamic_method in ["run_realtime_inference", "pipeline_fn"]:
+            if hasattr(self, dynamic_method):
+                try:
+                    # Wiping out the bound method object instantly frees the frame loops
+                    # setattr(self, dynamic_method, None)
+                    delattr(self, dynamic_method)
+                except Exception:
+                    pass
+
+        for cls_attr in ["d2h_buffers", "d2h_numpys", "d2h_selector"]:  # "pipeline_fn",
+            if hasattr(self, cls_attr):
+                try:
+                    setattr(self, cls_attr, None)
+                except AttributeError:
+                    pass
+
+        # Now it is structurally safe to purge attributes without causing cross-thread collisions
+        keys_to_purge = [
+            "__persistent_vram_lock",
+            "_DeviceBaseHandler__persistent_vram_lock",  # Wipes out the private lock tensor safely
+            "ai_gpu_staging",
+            "ai_pinned_tensors",
+            "ai_shm_names",  # Clear names list references
+            "ai_shms",  # Clear handler specific memory arrays
+            # "all_preds",
+            # "all_targets",
+            "bgs_stream",
+            "config",  # Force config destruction
+            "evaluator",
+            "executor",
+            "frame_buffer_pool",
+            "gpu_buffer_pool",
+            "gpu_display_frame",
+            "gpu_encoder_8k_buf",
+            "gpu_float_staging",
+            "host_buffer_pool",
+            "inference_stream",
+            "model",
+            "pinned_downloaded_frame_np",
+            "pinned_downloaded_resizedframe_np",
+            "pinned_matrices",  # Clear handler registration matrix list
+            "pinned_tensors",  # Clear backend tensor mappings
+            "process_thread",
+            "raw_input",
+            "reader",
+            "scales_tensor",
+            "shms",  # Clear handler specific memory arrays
+            "static_gpu_360p",  # Added to secure structural bounds
+            "static_gpu_byte_bchw",  # Added to secure structural bounds
+            # "static_host_canvases",
+            # "io_executor",
+        ]
+        for key in keys_to_purge:
+            if hasattr(self, key):
+                try:
+                    delattr(self, key)
+                except AttributeError:
+                    pass
+
+        gc.collect()
+
+    # HELPER FUNCTIONS --------------------------------------------
     def get_executor_backlog(self):
         """Returns the number of tasks currently waiting in the thread pool queue."""
         # access the internal queue of the executor
@@ -1984,7 +3259,7 @@ class DeviceBaseHandler:
             free_gb = free / (2**30)
             return free_gb > min_gb
         except Exception as e:
-            print(f"[EXCEPTION] Disk check error: {e}")
+            main_app_logger.info(f"[EXCEPTION] Disk check error: {e}")
             return False
 
     # Gets frame W and H details
@@ -2010,15 +3285,6 @@ class DeviceBaseHandler:
         self.scale_x = self.frame_width / self.config.MODEL_W
         self.scale_y = self.frame_height / self.config.MODEL_H
 
-    def update_frame(self, stat_start_time):
-        if self.device_input == "cuda":
-            torch.cuda.synchronize()
-
-        self.stat_frame_count += 1
-        self.elapsed_display_time += time.perf_counter() - stat_start_time
-        # if elapsed > 0.5:
-        self.stat_fps = round(self.stat_frame_count / self.elapsed_display_time, 1)
-
     def is_processing(self):
         """Returns True if any part of the pipeline is still active."""
         if not self.reader.stopped:
@@ -2034,109 +3300,23 @@ class DeviceBaseHandler:
 
         q_size = self.write_queue.qsize()
         if self.process_thread is not None:
-            print(
+            main_app_logger.info(
                 f"[STATUS] Writer: {self.write_count}/{self.frame_count_target} | Q: {q_size} | Inf: {'Alive' if self.process_thread.is_alive() else 'Dead'}",
                 end="\r",
-                flush=True,
             )
         else:
-            print(
+            main_app_logger.info(
                 f"[STATUS] Writer: {self.write_count}/{self.frame_count_target} | Q: {q_size}",
                 end="\r",
-                flush=True,
             )
 
         if not self.write_queue.empty():
             return True
         if self.write_count < self.frame_count_target:
             # q_size = self.write_queue.qsize()
-            # print(f"[DRAIN] Writer: {self.write_count}/{self.frame_count} | Queue: {q_size}", end="\r", flush=True)
+            # main_app_logger.info(f"[DRAIN] Writer: {self.write_count}/{self.frame_count} | Queue: {q_size}", end="\r")
             return True
         return False
-
-    def run_model(
-        self,
-        frame,
-        imgsz=(BASE_PIPELINE_CONFIG.MODEL_H, BASE_PIPELINE_CONFIG.MODEL_W),
-        batch=1,
-        device_input="cuda",
-        stream=False,
-    ):
-        # --- DEBUG VERIFICATION ---
-        # if torch.is_tensor(frame):
-        #     # We want to see [N, 3, 640, 640] where N > 1
-        #     print(f"[DEBUG] Tensor Input Shape: {frame.shape}")
-        # elif isinstance(frame, list):
-        #     print(f"[DEBUG] List Input Length: {len(frame)}")
-
-        # print(f"[DEBUG] Stream Mode: {stream} | Requested Batch: {batch}")
-        # ---------------------------
-        if isinstance(frame, torch.Tensor):
-            # Ensure on the right device
-            frame = frame.to(device_input)
-
-            # Make sure input is multiple of 32
-            h, w = frame.shape[-2:]
-            pad_h = (32 - h % 32) % 32
-            pad_w = (32 - w % 32) % 32
-
-            if pad_h > 0 or pad_w > 0:
-                # F.pad for 4D tensor (B, C, H, W) uses (left, right, top, bottom)
-                frame = F.pad(frame, (0, pad_w, 0, pad_h), value=0)
-
-        # with torch.inference_mode():
-        #     torch.set_num_threads(1)
-        #     results = self.model.predict(
-        #         frame,
-        #         imgsz=imgsz,
-        #         batch=batch,
-        #         device=device_input,
-        #         verbose=False,
-        #         stream=stream,
-        #         conf=self.config.DETECTION_THRESHOLD,
-        #         max_det=self.config.MAX_DETECTIONS,
-        #         rect=(batch == 1),  # False,  #
-        #     )
-        # return results
-        with torch.inference_mode():
-            if device_input == "cpu":
-                # --- SAFE HIGH-SPEED FRAMEWORK INGESTION GATE ---
-                # If input is an NCHW PyTorch tensor or transposed array view,
-                # decode it back into a standard list of un-transposed [H, W, C] uint8
-                # image frames before handing it over to the predictor engine.
-                if isinstance(frame, torch.Tensor):
-                    # Convert NCHW tensor back to standard NHWC layout standard
-                    np_frames = frame.detach().cpu().permute(0, 2, 3, 1).numpy()
-                    # Rescale back to uint8 pixel range
-                    np_frames = (np_frames * 255.0).astype(np.uint8)
-                    # Unpack the batch array dimensions into a standard list of standalone images
-                    # ingestion_source = [np.ascontiguousarray(img) for img in np_frames]
-                    np_frames_aligned = np.copy(np_frames, order="C")
-                    ingestion_source = list(np_frames_aligned)
-                else:
-                    ingestion_source = frame
-            else:
-                ingestion_source = frame
-
-            if getattr(self, "cached_predictor", None) is not None:
-                results = self.cached_predictor(frame)
-            else:
-                # Execute prediction using the safe public API path.
-                # Passing raw standard [H, W, C] frame matrices handles all sigmoid bounding box
-                # decoders and confidence multipliers natively, correcting the top-left clumping bug.
-                results = self.model.predict(
-                    ingestion_source,
-                    imgsz=imgsz,
-                    batch=batch,
-                    device=device_input,
-                    verbose=False,
-                    stream=stream,
-                    conf=self.config.DETECTION_THRESHOLD,
-                    max_det=self.config.MAX_DETECTIONS,
-                    rect=(batch == 1),
-                    profile=False,  # Disable interior torch.cuda.synchronize() gates completely!
-                )
-            return results
 
     def _check_shm_safety(self, threshold_percent=90):
         """
@@ -2148,7 +3328,7 @@ class DeviceBaseHandler:
         percent_used = (usage.used / usage.total) * 100
 
         if percent_used > threshold_percent:
-            print(
+            main_app_logger.info(
                 f" [CRITICAL] /dev/shm usage at {percent_used:.1f}%. Purging old clips..."
             )
 
@@ -2164,1392 +3344,314 @@ class DeviceBaseHandler:
                     #     continue
 
                     clip.unlink()
-                    print(f"[PURGE] Deleted {clip.name} to free RAM.")
+                    main_app_logger.info(f"[PURGE] Deleted {clip.name} to free RAM.")
 
                     # Re-check usage after each deletion
                     usage = shutil.disk_usage("/dev/shm")
                     if (usage.used / usage.total) * 100 < 70:
                         break
                 except Exception as e:
-                    print(f"[EXCEPTION] Could not purge {clip}: {e}")
+                    main_app_logger.info(f"[EXCEPTION] Could not purge {clip}: {e}")
 
-    def run_realtime_inference(self, sf_enabled):
-        """Producer: Maintains the target FPS and updates clip IDs."""
-        # Calculate a dynamic limit: tolerate 0.5 seconds of lag.
-        # If target_fps is 15, the limit is 7. If target_fps is 30, the limit is 15.
-        self.dynamic_limit = max(2, int(0.5 * self.target_fps))
-        last_frame_time = time.perf_counter()
-        while self.active:
+    def print_active_gpu_tensor_memory(self):
+        main_app_logger.info(
+            "=" * 60,
+        )
+        main_app_logger.info(
+            "\033[95m[VRAM INVESTIGATOR] Scanning Active GPU Tensors with Sources:\033[0m"
+        )
+
+        # Capture the exact C++ memory registry structure
+        try:
+            raw_snapshot = torch.cuda.memory._snapshot()
+            segments = raw_snapshot.get("segments", [])
+        except Exception:
+            segments = []
+            main_app_logger.info(
+                "[WARN] Failed parsing native memory context snapshot.",
+            )
+
+        # Map raw block storage memory addresses straight to Python frames
+        addr_to_source = {}
+        for seg in segments:
+            for block in seg.get("blocks", []):
+                if block.get("state") == "active_allocated":
+                    addr = block.get("address")
+                    history = block.get("history", [])
+                    if history:
+                        # Inspect the deepest frame in the allocation stack
+                        frame = history[-1]
+                        filename = frame.get("filename", "Unknown")
+                        lineno = frame.get("line", 0)
+                        func_name = frame.get("name", "unknown_func")
+                        addr_to_source[addr] = f"{filename}:{lineno} ({func_name})"
+
+        # Scan the heap via GC and resolve actual backing storage layers
+        leaked_tensors = []
+        total_detected_bytes = 0
+
+        for obj in gc.get_objects():
             try:
-                # FRAME RETRIEVAL ---------------------------------------------
-                try:
-                    ret, frame_8k, frame_num = self.reader.read()
-                    if not ret or frame_8k is None:
-                        print(
-                            "[CLIPPER-TARGET] End of video file source detected. Initiating graceful shutdown.",
-                            flush=True,
-                        )
-                        # if self.reader is None or (
-                        #     hasattr(self.reader, "stopped") and self.reader.stopped
-                        # ):
-                        if self.device_input == "cuda":
-                            torch.cuda.synchronize()
+                if torch.is_tensor(obj) and obj.is_cuda:
+                    t_bytes = obj.element_size() * obj.nelement()
+                    total_detected_bytes += t_bytes
+                    if t_bytes > 0:
+                        leaked_tensors.append(obj)
+            except Exception:
+                pass
 
-                        if hasattr(self, "executor") and self.executor is not None:
-                            while self.get_executor_backlog() > 0:
-                                time.sleep(0.01)
+        obj = None  # Break tracking register references
 
-                        # Instead of only processing the active clip_id, loop through every clip
-                        # listed in all_metadata to ensure nothing is dropped at shutdown.
-                        global all_metadata, clip_completion_tracker
-                        active_tracked_keys = list(all_metadata.keys())
+        for i, tensor in enumerate(leaked_tensors):
+            t_bytes = tensor.element_size() * tensor.nelement()
 
-                        for target_clip_key in active_tracked_keys:
-                            # Reconstruct the explicit path structure for each target clip segment
-                            target_clip_filename = (
-                                f"{self.config.SHARED_OUTPUT}/{target_clip_key}"
-                            )
-
-                            if target_clip_key not in clip_completion_tracker:
-                                clip_completion_tracker[target_clip_key] = {
-                                    "video": False,
-                                    "meta": False,
-                                    "start_time": time.time(),
-                                }
-
-                            # Mark tracking convergence fields to True concurrently
-                            clip_completion_tracker[target_clip_key]["video"] = True
-                            clip_completion_tracker[target_clip_key]["meta"] = True
-
-                            print(
-                                f" [CLIPPER-TARGET] Finalizing terminal sync barrier for: {target_clip_key}",
-                                flush=True,
-                            )
-
-                            # Safely delegate the queue pushing directly to your validation handler
-                            self._evaluate_barrier_and_dispatch(
-                                target_clip_key,
-                                target_clip_filename,
-                                self.resize_w,
-                                self.resize_h,
-                            )
-
-                        # clip_id = (self.frame_count - 1) // self.max_frames_per_clip
-                        # clip_filename = f"{self.config.SHARED_OUTPUT}/{self.name}_{clip_id:03d}.mp4"
-                        # clip_key = Path(clip_filename).name
-                        # global clip_completion_tracker
-                        # if "clip_completion_tracker" in globals() or "clip_completion_tracker" in locals():
-                        #     if clip_key not in clip_completion_tracker:
-                        #         clip_completion_tracker[clip_key] = {
-                        #             "video": False,
-                        #             "meta": False,
-                        #             "start_time": time.time(),
-                        #         }
-                        #     # Force both verification boundaries to True concurrently
-                        #     clip_completion_tracker[clip_key]["video"] = True
-                        #     clip_completion_tracker[clip_key]["meta"] = True
-
-                        # print(
-                        #     f" [BARRIER-SEAL] All metadata extracted for {clip_key}. Evaluating convergence...",
-                        #     flush=True,
-                        # )
-                        # self._evaluate_barrier_and_dispatch(
-                        #     clip_key,
-                        #     clip_filename,
-                        #     self.resize_w,
-                        #     self.resize_h,
-                        # )
-
-                        # global send_metadata_queue, all_metadata
-                        # if clip_key in all_metadata:
-                        #     # Signal to process metadata for previous cli
-                        #     if (
-                        #         "send_metadata_queue" in globals()
-                        #         or "send_metadata_queue" in locals()
-                        #     ):
-                        #         try:
-                        #             send_metadata_queue.put(
-                        #                 (
-                        #                     clip_filename,
-                        #                     self.resize_w,
-                        #                     self.resize_h,
-                        #                 )
-                        #             )
-                        #         except Exception as queue_err:
-                        #             print(
-                        #                 f"[CLIPPER-WARN] Metadata queue push skipped or unallocated: {queue_err}",
-                        #                 flush=True,
-                        #             )
-
-                        self.active = False
-                        break
-                        # continue
-                    # if torch.is_tensor(device_frame):
-                    #     # Tell the main thread's stream to wait for the upload stream's completion
-                    #     torch.cuda.current_stream().wait_stream(self.reader.upload_stream)
-                except queue.Empty:
-                    if getattr(self.reader, "reconnect_failed", False):
-                        self.active = False
-                        break
-                    time.sleep(0.002)
-                    continue
-                except Exception:
-                    traceback.print_exc()
-
-            except queue.Empty:
-                if getattr(self.reader, "reconnect_failed", False):
-                    self.active = False
-                    break
-                time.sleep(0.002)
-                continue
-
-            calculated_clip_id = (frame_num - 1) // self.max_frames_per_clip
-            # self.clip_id = calculated_clip_id
-            # print(f"frame_num: {frame_num} calculated_clip_id: {calculated_clip_id}", flush=True)
-            stat_start_time = time.perf_counter()  # timing to display detection
-            self.frame_count += 1
-            self.frame_count_target += 1
-            self.frame_in_clip_count += 1
-            # is_target_frame = True  # float(frame_num) >= self.next_process_idx
-
-            # # Create a dedicated memory surface immediately on the Producer line.
-            # # This isolates the VRAM grid before the reader can overwrite it.
-            # if self.device_input == "cuda" and torch.is_tensor(device_frame):
-            #     isolated_device_frame = device_frame.clone().contiguous()
-            # elif isinstance(device_frame, np.ndarray):
-            #     # isolated_device_frame = device_frame.copy()
-            #     # Zero-copy memory map assignment directly into the dedicated ingestion slot
-            #     self.ingest_ring[self.ingest_ring_idx][:] = device_frame
-            #     isolated_device_frame = self.ingest_ring[self.ingest_ring_idx]
-
-            #     # Safely step to the next slot in the ring buffer
-            #     self.ingest_ring_idx = (
-            #         self.ingest_ring_idx + 1
-            #     ) % self.ingest_ring_depth
-            # else:
-            #     isolated_device_frame = device_frame
-
-            # Determine if this frame should be AI or Raw based on backlog
-            # But ALWAYS submit to the executor to maintain frame order.
-            backlog = self.get_executor_backlog()
-
-            while backlog > 4 and self.active:
-                time.sleep(0.005)
-                backlog = self.get_executor_backlog()
-
-            def wrapped_fn(*args):
-                if self.device_input == "cuda":
-                    # Ensure the worker thread switches to your targeted pipeline execution timeline
-                    # torch.cuda.set_stream(self.inference_stream)
-                    # dev_frame, f_num, target_flag, stat_start_time = args
-                    dev_frame, f_num, start_time, clip_id = args
-                    # isolated_device_frame = (
-                    #     dev_frame.clone()
-                    #     if torch.is_tensor(dev_frame)
-                    #     else dev_frame.copy()
-                    # )
-                    # isolated_device_frame = dev_frame
-
-                    with torch.cuda.stream(self.inference_stream):
-                        self.pipeline_fn(dev_frame, f_num, start_time, clip_id)
-
-                    # Force a non-blocking device barrier to ensure operations have fully hit VRAM
-                    # before releasing the thread context
-                    # self.inference_stream.synchronize()
-                    # Force the device to catch up before dropping thread scope references
-                    # self.inference_stream.synchronize()
-
-                    # Explicitly drop the variable frames from the localized stack frame
-                    # if "isolated_device_frame" in locals():
-                    #     del isolated_device_frame
-                    # if "dev_frame" in locals():
-                    #     del dev_frame
+            # --- THE FIX: Extract the address of the underlying storage block ---
+            try:
+                if hasattr(tensor, "untyped_storage"):
+                    storage_addr = tensor.untyped_storage().data_ptr()
+                elif hasattr(tensor, "storage") and tensor.storage():
+                    storage_addr = tensor.storage().data_ptr()
                 else:
-                    # dev_frame, f_num, target_flag, stat_start_time = args
-                    dev_frame, f_num, start_time, clip_id = args
-                    # isolated_device_frame = (
-                    #     dev_frame.clone()
-                    #     if torch.is_tensor(dev_frame)
-                    #     else dev_frame.copy()
-                    # )
-                    # isolated_device_frame = dev_frame
-                    self.pipeline_fn(dev_frame, f_num, start_time, clip_id)
+                    storage_addr = tensor.data_ptr()
+            except Exception:
+                storage_addr = tensor.data_ptr()
 
-            # if is_target_frame:  # timing to display detection
-            #     self.next_process_idx += self.step_size
-            # Handoff to AI and Writer
-            # if self.active:
-            # Clone the tensor buffer immediately on the producer thread
-            # to prevent upstream overwrite races by the next reader iteration.
-            # isolated_device_frame = device_frame.clone() if torch.is_tensor(device_frame) else device_frame.copy()
-            self.executor.submit(
-                # pipeline_fn,
-                wrapped_fn,
-                frame_8k,
-                self.frame_count,
-                # is_target_frame,
-                stat_start_time,
-                calculated_clip_id,
+            # Extract absolute code trace locations from our snapshot dictionary
+            source_loc = addr_to_source.get(
+                storage_addr, "Unknown Native C++ Allocation / Model Context"
             )
-            # else:
-            #     # Process background execution context for skipped frames
-            #     self.pipeline_fn(device_frame, frame_num, is_target_frame)
 
-            # if self.device_input == "cuda":
-            #     torch.cuda.synchronize()
+            main_app_logger.info(
+                f" > Tensor {i:3d} | Shape: {str(list(tensor.shape)):<18} | "
+                f"Size: {t_bytes / 1024**2:6.2f} MB | Source: \033[93m{source_loc}\033[0m"
+            )
 
-            # --- PRECISE CLOCK SYNC ---
-            # This prevents the producer from "lapping" the consumer
-            # and building that jumpy backlog in the first place.
-            elapsed = time.perf_counter() - last_frame_time
-            if elapsed < self.frame_interval:
-                # time.sleep(self.frame_interval - elapsed)
-                # Subtract a small epsilon (0.001) for OS scheduling overhead
-                sleep_duration = max(0, self.frame_interval - elapsed - 0.0015)
-                if sleep_duration > 0.001:
-                    time.sleep(sleep_duration)
-            last_frame_time = time.perf_counter()
-
-            self.update_frame(stat_start_time)
-            self.last_heartbeat = time.time()
-
-        self.stop()
-
-    def filter_contained_boxes(self, boxes, overlap_thresh=0.9):
-        """
-        Vectorized IoA filter: Removes boxes if most of their area is inside another box.
-        """
-        if boxes.shape[0] <= 1:
-            return boxes
-
-        # Calculate Areas
-        w = (boxes[:, 2] - boxes[:, 0]).clamp(min=0)
-        h = (boxes[:, 3] - boxes[:, 1]).clamp(min=0)
-        areas = w * h
-        valid_mask = (
-            (w < (self.resize_w * self.config.ROI_MAX_RELATIVE_SIZE_RATIO))
-            & (h < (self.resize_h * self.config.ROI_MAX_RELATIVE_SIZE_RATIO))
-            & (w > 0)
-            & (h > 0)
-            & (areas >= self.min_contour_area)
+        del leaked_tensors
+        main_app_logger.info(
+            f"[VRAM INVESTIGATOR] Total Live Tensor Memory: {total_detected_bytes / 1024**2:.2f} MB"
         )
-        boxes = boxes[valid_mask]
-        areas = areas[valid_mask]
+        gc.collect()
+        if (
+            torch.cuda.is_available()
+        ):  # self.device_input == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()  # Flush the pool BEFORE the guard snapshots it
 
-        # Compute all-to-all Intersections [N, N]
-        lt = torch.max(boxes.unsqueeze(1)[:, :, :2], boxes.unsqueeze(0)[:, :, :2])
-        rb = torch.min(boxes.unsqueeze(1)[:, :, 2:], boxes.unsqueeze(0)[:, :, 2:])
-        wh = (rb - lt).clamp(min=0)
-        inter_area = wh[:, :, 0] * wh[:, :, 1]
-
-        # Intersection over Area (How much of Box A is in Box B)
-        # ioa[i, j] = (Box i ∩ Box j) / Area(i)
-        ioa = inter_area / (areas.unsqueeze(1) + 1e-6)
-
-        # Filter logic:
-        # Only remove if Box J is LARGER than Box I and overlap is high
-        diag = torch.eye(boxes.shape[0], device=boxes.device, dtype=torch.bool)
-        larger_mask = areas.unsqueeze(0) >= areas.unsqueeze(1)
-
-        to_remove = (ioa > overlap_thresh) & larger_mask & ~diag
-        return boxes[~to_remove.any(dim=1)]
-
-    def get_gpu_rois_by_area(self, mask, max_candidates=100):
-        # Extract true spatial constraints straight from the active mask object footprint
-        if torch.is_tensor(mask):
-            mask_h, mask_w = mask.shape[-2:]
-        elif isinstance(mask, cv2.cuda.GpuMat):
-            # cv2.cuda.GpuMat.size() returns a tuple of (width, height) standard formatting
-            mask_w, mask_h = mask.size()
-        else:
-            mask_h, mask_w = mask.shape[:2]
-
-        # This prevents find_contours_gpu_equivalent from mutating the mask variables used by other threads.
-        if isinstance(mask, cv2.cuda.GpuMat):
-            # .clone() allocates a new C++ memory surface and forces full continuity
-            isolated_kernel_mask = mask.clone()
-        elif torch.is_tensor(mask):
-            isolated_kernel_mask = mask.clone().contiguous()
-        else:
-            isolated_kernel_mask = mask.copy()
-
-        # Get raw boxes from mask (Direct VRAM bridge)
-        boxes_gpu = find_contours_gpu_equivalent(
-            isolated_kernel_mask,
-            stream=self.bgs_stream,
-            limit_640=640 * 1.5,
+    def print_active_shared_memory(self):
+        main_app_logger.info(
+            "=" * 60,
         )
-
-        # --- FIX: ELIMINATE STREAM RACE ---
-        if boxes_gpu is None or len(boxes_gpu) == 0:
-            return torch.empty((0, 4), device=self.device_input)
-
-        # Wrap existing GPU memory as a float tensor (Zero Copy)
-        # raw_boxes = torch.as_tensor(boxes_gpu, device=self.device_input).float()
-        if self.device_input == "cuda":
-            # Wrap the native device handle and IMMEDIATELY append .clone()
-            # This allocates a brand new, physically isolated VRAM block to secure the bounding boxes
-            raw_boxes = (
-                torch.as_tensor(boxes_gpu, device=self.device_input).float().clone()
-            )
-        else:
-            raw_boxes = torch.as_tensor(boxes_gpu, device=self.device_input).float()
-
-        if raw_boxes is not None and len(raw_boxes) > 0:
-            PADDING_PX = 5
-            # Assumes merged_boxes_tensor is a 2D tensor of shape [N, 4] containing [x1, y1, x2, y2]
-            # Create a matching subtraction/addition padding mask tensor
-            # Subtract from x1, y1 (indices 0, 1) and add to x2, y2 (indices 2, 3)
-            padding_mask = torch.tensor(
-                [-PADDING_PX, -PADDING_PX, PADDING_PX, PADDING_PX],
-                device=raw_boxes.device,
-                dtype=raw_boxes.dtype,
-            )
-
-            # Apply padding to all bounding boxes concurrently via broad-vector math
-            padded_tensor = raw_boxes + padding_mask
-
-            # Guard rails: Clamp boundaries in-place to stay safely within the 8K master frame
-            # Indices 0 and 2 are X coordinates bounded by frame width; 1 and 3 are Y coordinates bounded by frame height
-            padded_tensor[:, 0].clamp_(min=0, max=self.resize_w)
-            padded_tensor[:, 1].clamp_(min=0, max=self.resize_h)
-            padded_tensor[:, 2].clamp_(min=0, max=self.resize_w)
-            padded_tensor[:, 3].clamp_(min=0, max=self.resize_h)
-
-            # Re-assign back to your pipeline's tracking variable
-            raw_boxes = padded_tensor
-
-        # Vectorized Pre-Filter (Removes noise blobs before merging)
-        w = raw_boxes[:, 2] - raw_boxes[:, 0]
-        h = raw_boxes[:, 3] - raw_boxes[:, 1]
-        mask_filter = (w * h > self.min_contour_area) & (w < mask_w) & (h < mask_h)
-        raw_boxes = raw_boxes[mask_filter]
-
-        # Prevents N^2 distance matrix from exploding during high noise
-        if raw_boxes.shape[0] > max_candidates:
-            # Prioritize the largest blobs (most likely to be drones)
-            areas = (raw_boxes[:, 2] - raw_boxes[:, 0]) * (
-                raw_boxes[:, 3] - raw_boxes[:, 1]
-            )
-            _, indices = torch.topk(areas, max_candidates)
-            raw_boxes = raw_boxes[indices]
-        return raw_boxes
-
-    def get_cpu_rois(self, frame, frameNum, mask):
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        raw_boxes_xywh = [
-            list(cv2.boundingRect(c))
-            for c in contours
-            if cv2.contourArea(c) > self.min_contour_area
-        ]
-
-        raw_boxes = [
-            [
-                max(0, int(x) - PADDING_PX),
-                max(0, int(y) - PADDING_PX),
-                min(self.resize_w, int(x + w) + PADDING_PX),
-                min(self.resize_h, int(y + h) + PADDING_PX),
-            ]
-            for x, y, w, h in raw_boxes_xywh
-        ]
-        # raw_boxes = [[x, y, x + w, y + h] for x, y, w, h in raw_boxes_xywh]
-
-        if len(raw_boxes) < 1:
-            return torch.empty((0, 4), device=self.device_input)
-
-        if len(raw_boxes) > 1:
-            limit_640 = (640 * 2.0) / self.scale_x
-            raw_boxes = merge_boxes_cpu(
-                raw_boxes, gap_limit=self.dist_thresh_640, size_limit=limit_640
-            )
-
-        raw_boxes_640p = torch.tensor(raw_boxes, device=self.device_input).float()
-
-        clean_640p = self.filter_contained_boxes(
-            raw_boxes_640p, overlap_thresh=self.config.ROI_CONTAINMENT_THRESH
+        main_app_logger.info(
+            "\033[96m[SHM INVESTIGATOR] Scanning Active OS Shared Memory Filesystem Tables:\033[0m"
         )
-
-        if clean_640p.shape[0] < 1:
-            return torch.empty((0, 4), device=self.device_input)
-
-        # Scale to 8K space
-        return clean_640p * self.scales_tensor
-
-        # Project clusters back to 8K and build centered YOLO windows
-        # final_8k_rois = scale_clusters_to_8k(
-        #     merged_640, frame_w=self.frame_width, frame_h=self.frame_height
-        # )
-        # return torch.tensor(final_8k_rois, device=self.device_input).float()
-
-    def get_detections(
-        self, frame, frame_id, thickness=2, device_input="cuda", merged=None
-    ):
-        """
-        Processes full-frame 8K targets or aggregates smart-filtered bounding-box regions
-        into uniform tensor arrays for batched inference execution.
-        """
-        metadata = {}
-        is_cuda = device_input == "cuda"
-        num_objs = 0
-
-        # =====================================================================
-        # 🚀 PATH 1: FULL RESOLUTION TRACK (sf_enabled = False)
-        # =====================================================================
-        if merged is None:
-            with torch.inference_mode():
-                if isinstance(frame, torch.Tensor):
-                    # # Transpose to channel-first shape format [1, C, H, W] if layout is trailing
-                    # if frame.ndim == 3 and frame.shape[-1] == 3:
-                    #     frame = frame.permute(2, 0, 1).unsqueeze(0).clone().contiguous()
-                    # elif frame.ndim == 3:
-                    #     frame = frame.unsqueeze(0).clone().contiguous()
-
-                    # # Create a memory-contiguous layout view and cast cleanly inside VRAM
-                    # frame = frame.contiguous()
-
-                    # Transpose to channel-first shape format [1, C, H, W] if layout is trailing
-                    if frame.ndim == 3 and frame.shape[-1] == 3:
-                        # CRITICAL BUG FIX: Appending .clone().contiguous() creates a brand new,
-                        # physically isolated tensor memory block. This breaks the link to
-                        # temporary buffers, preventing the VS Code debugger from crashing on evaluation.
-                        frame = frame.permute(2, 0, 1).unsqueeze(0).clone().contiguous()
-                    elif frame.ndim == 3:
-                        frame = frame.unsqueeze(0).clone().contiguous()
-                    else:
-                        # Ensure any multi-dimensional batch views are physically packed
-                        frame = frame.clone().contiguous()
-
-                    if frame.dtype == torch.uint8:
-                        frame = frame.to(
-                            device_input, dtype=torch.float16, non_blocking=True
-                        )
-                        frame.mul_(1.0 / 255.0)  # Safe in-place float normalization
-                    else:
-                        frame = frame.to(device_input, non_blocking=True)
-
-                    img_size = frame.shape[-2:]
-                else:
-                    # CPU / Host NumPy NDArray fallback
-                    img_size = frame.shape[:2]
-
-                # img_size = (self.resize_h, self.resize_w)
-                H, W = img_size
-                scale_display_x = self.resize_w / W  # 640 / 8192
-                scale_display_y = self.resize_h / H  # 640 / 4608
-                results = self.run_model(
-                    frame,
-                    imgsz=img_size,
-                    batch=1,
-                    device_input=device_input,
-                    stream=STREAM_ARG,
-                )
-
-            # Extract full resolution detections
-            if results and len(results) > 0:
-                boxes = results[0].boxes
-                if boxes is not None:
-                    for idx, box in enumerate(boxes):
-                        # coords = box.xywh[0].cpu().tolist()  # [x_center, y_center, width, height]
-                        # cls_id = int(box.cls[0].cpu().item())
-                        # conf = float(box.conf[0].cpu().item())
-                        coords = (
-                            box.xywh.cpu().squeeze().tolist()
-                        )  # Converts [x_center, y_center, w, h] safely
-                        cls_id = int(box.cls.cpu().item())
-                        class_name = self.label_source[cls_id]
-                        confidence = float(box.conf.cpu().item())
-
-                        # Guard against un-squeezed structural lists
-                        if isinstance(coords[0], list):
-                            coords = coords[0]
-
-                        # Convert center bounds coordinates back to upper-left origin layout standard
-                        # and scale to 640x640
-                        disp_x = (coords[0] - (coords[2] / 2.0)) * scale_display_x
-                        disp_y = (coords[1] - (coords[3] / 2.0)) * scale_display_y
-                        disp_w = coords[2] * scale_display_x
-                        disp_h = coords[3] * scale_display_y
-
-                        if disp_w > 2 and disp_h > 2:
-                            # Resized
-                            object_res = [
-                                int(disp_x),  # int(abs_x1 * scale_x),
-                                int(disp_y),  # int(abs_y1 * scale_y),
-                                int(disp_h),  # int(height * scale_y),
-                                int(disp_w),  # int(width * scale_x),
-                                class_name,
-                                confidence,
-                                int(self.resize_h),
-                                int(self.resize_w),
-                            ]
-
-                            obj_id = len(metadata)
-                            num_objs += 1
-                            framenum_str = f"{frame_id:04d}_{obj_id:04d}"
-                            metadata[framenum_str] = {
-                                "frameId": int(frame_id),
-                                "bbId": framenum_str,
-                                "bbox": {
-                                    "x": int(object_res[0]),
-                                    "y": int(object_res[1]),
-                                    "height": int(object_res[2]),
-                                    "width": int(object_res[3]),
-                                    "object": str(object_res[4]),
-                                    "object_det": {
-                                        "confidence": float(object_res[5]),
-                                        "frameH": int(object_res[6]),
-                                        "frameW": int(object_res[7]),
-                                    },
-                                },
-                            }
-
-            if "boxes" in locals():
-                del boxes
-            if "results" in locals():
-                del results
-
-            del frame
-            return metadata, num_objs
-
-        # =====================================================================
-        # PATH 2: SMART FILTER ROIs TRACK (sf_enabled = True) -> PADDED ASPECT PRESERVING 📦
-        # =====================================================================
-        else:
-            roi_patches = []
-            patch_coordinates = []
-            max_batch_size = getattr(self.config, "MODEL_MAX_BATCH_SIZE", 64)
-
-            # 1. Canvas Matrix Pre-processing Isolation
-            if is_cuda and isinstance(frame, torch.Tensor):
-                src_tensor = frame.squeeze(0) if frame.ndim == 4 else frame
-                if src_tensor.shape[-1] == 3:
-                    src_tensor = src_tensor.permute(2, 0, 1)  # Force [C, H, W]
-                src_h, src_w = src_tensor.shape[-2:]
-            else:
-                src_tensor = np.asarray(frame)
-                src_h, src_w = src_tensor.shape[:2]
-
-            # Target layout constraints
-            th, tw = self.resize_h, self.resize_w
-
-            # 2. Extract, Aspect-Scale, and Pad Regions of Interest (ROIs)
-            for box in merged:
-                x1, y1, x2, y2 = map(int, box)
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(src_w, x2), min(src_h, y2)
-
-                box_w, box_h = x2 - x1, y2 - y1
-                if box_w < 8 or box_h < 8:
-                    continue  # Filter out invalid spatial artifacts
-
-                if is_cuda and isinstance(src_tensor, torch.Tensor):
-                    with torch.no_grad():
-                        crop = src_tensor[:, y1:y2, x1:x2]
-
-                        # Calculate aspect-preserving scale factor
-                        scale = min(tw / box_w, th / box_h)
-                        nw, nh = int(box_w * scale), int(box_h * scale)
-                        nw, nh = max(1, nw), max(1, nh)
-
-                        # Dynamic scaling: downsample or upsample using clean bilinear grids
-                        if (box_h, box_w) != (nh, nw):
-                            crop_resized = F.interpolate(
-                                crop.unsqueeze(0).float(),
-                                size=(nh, nw),
-                                mode="bilinear",
-                                align_corners=False,
-                            ).squeeze(0)
-                        else:
-                            crop_resized = crop.float()
-
-                        # Force the canvas tracking allocation to occur safely inside your active stream scope context
-                        with torch.cuda.stream(self.inference_stream):
-                            # Instantiate a clean, pre-allocated padded evaluation canvas context
-                            padded_canvas = torch.zeros(
-                                (3, th, tw), dtype=torch.float32, device=device_input
-                            )
-
-                            # Center the aspect-scaled crop onto the dark zero-padded mask grid
-                            dx = (tw - nw) // 2
-                            dy = (th - nh) // 2
-                            padded_canvas[:, dy : dy + nh, dx : dx + nw] = crop_resized
-
-                            # Convert directly to half-precision to speed up pipeline passes
-                            roi_patches.append(padded_canvas.to(torch.half))
-                else:
-                    # CPU Path: Aspect-preserving resize and padding via OpenCV
-                    crop = src_tensor[y1:y2, x1:x2]
-                    scale = min(tw / box_w, th / box_h)
-                    nw, nh = max(1, int(box_w * scale)), max(1, int(box_h * scale))
-
-                    crop_resized = cv2.resize(
-                        crop, (nw, nh), interpolation=cv2.INTER_NEAREST
-                    )
-
-                    # Center-pad the array block with zeros (black)
-                    # padded_canvas = np.zeros((th, tw, 3), dtype=np.uint8)
-                    padded_canvas = np.empty((th, tw, 3), dtype=np.uint8)
-                    padded_canvas.fill(0)
-                    dx = (tw - nw) // 2
-                    dy = (th - nh) // 2
-                    padded_canvas[dy : dy + nh, dx : dx + nw] = crop_resized
-                    roi_patches.append(padded_canvas)
-
-                # Store the scaling shifts to map detections back to the 8K coordinate grid accurately
-                patch_coordinates.append((x1, y1, box_w, box_h, scale, dx, dy))
-
-            if not roi_patches:
-                return {}, 0
-
-            # 3. Process Patches via Multi-Cam Inference Batch Factory
-            results_pool = []
-            for i in range(0, len(roi_patches), max_batch_size):
-                batch_slices = roi_patches[i : i + max_batch_size]
-                current_batch_len = len(batch_slices)
-
-                if is_cuda and isinstance(batch_slices[0], torch.Tensor):
-                    with torch.inference_mode():
-                        torch.cuda.set_stream(self.inference_stream)
-                        inference_batch = torch.stack(batch_slices).to(
-                            device_input, dtype=torch.float16, non_blocking=True
-                        )
-                        inference_batch.mul_(1.0 / 255.0)  # In-place GPU normalization
-
-                        batch_res = self.run_model(
-                            inference_batch,
-                            imgsz=(th, tw),
-                            batch=current_batch_len,
-                            device_input=device_input,
-                            stream=STREAM_ARG,
-                        )
-                        results_pool.extend(batch_res)
-                        del inference_batch
-                else:
-                    with torch.inference_mode():
-                        # np_batch = np.stack(batch_slices, dtype=np.float32)  #.astype(np.float32) / 255.0
-                        # Pre-allocate the complete batch block surface memory up front:
-                        th, tw = self.resize_h, self.resize_w
-                        current_batch_len = len(batch_slices)
-                        # np_batch = np.zeros((current_chunk_len, th, tw, 3), dtype=np.float32)
-
-                        # Stack the list of [H, W, C] patches into a 4D array [B, H, W, C]
-                        np_batch_uint8 = np.stack(batch_slices)
-
-                        # Transpose from NHWC [B, H, W, C] to NCHW [B, C, H, W] natively in NumPy
-                        np_batch_nchw = np.transpose(np_batch_uint8, (0, 3, 1, 2))
-
-                        # Cast to float32 and normalize concurrently using contiguous memory layout
-                        # np_batch_contiguous = np.ascontiguousarray(np_batch_nchw, dtype=np.float32)
-                        # np_batch_contiguous *= (1.0 / 255.0)
-
-                        # 1. Stack the list of [H, W, C] patches into a 4D array [B, H, W, C]
-                        np_batch_uint8 = np.stack(batch_slices)
-
-                        # 2. Transpose from NHWC [B, H, W, C] to NCHW [B, C, H, W] natively in NumPy
-                        # np_batch_nchw = np.transpose(np_batch_uint8, (0, 3, 1, 2))
-
-                        # # 3. Cast to float32 and normalize concurrently using an in-place pointer
-                        # np_batch_float = np_batch_nchw.astype(np.float32)
-                        # np_batch_float *= 1.0 / 255.0
-
-                        # # --- CRITICAL MEMORY ALIGNMENT LOCK ---
-                        # # Force the contiguous memory layer allocation AFTER all mathematical manipulations are complete.
-                        # # This ensures the underlying C-memory arrays are perfectly packed and sequential, allowing
-                        # # OpenVINO to run zero-copy pointer lookups and bypassing the 48.13ms serialization overhead.
-                        # np_batch_aligned = np.ascontiguousarray(np_batch_float)
-
-                        # # 4. Expose the memory-aligned array directly to PyTorch as a host tensor view
-                        # inference_batch = torch.from_numpy(np_batch_aligned).to(
-                        #     device_input
-                        # )
-
-                        np_batch_ready = np.ascontiguousarray(np_batch_uint8)
-                        np_batch_nchw = np.transpose(np_batch_ready, (0, 3, 1, 2))
-                        np_batch_float = np_batch_nchw.astype(np.float32)
-                        np_batch_float *= 1.0 / 255.0
-                        inference_batch = torch.from_numpy(np_batch_float).to(
-                            device_input
-                        )
-
-                        batch_res = self.run_model(
-                            inference_batch,
-                            imgsz=(th, tw),
-                            batch=current_batch_len,
-                            device_input=device_input,
-                            stream=STREAM_ARG,
-                        )
-                        results_pool.extend(batch_res)
-                        del inference_batch
-
-            # =====================================================================
-            # UNIFIED STREAM BARRIER: Sync ONCE after all hardware tasks are queued
-            # =====================================================================
-            if is_cuda and hasattr(self, "inference_stream"):
-                self.inference_stream.synchronize()
-
-            # 4. Map Patch Bounding Boxes back onto the Global 8K Frame Coordinates Map
-            scale_display_x = tw / float(self.frame_width)
-            scale_display_y = th / float(self.frame_height)
-
-            for idx, res in enumerate(results_pool):
-                # Calculate the exact matching absolute global coordinate array slot index
-                ox, oy, o_width, o_height, scale_f, pad_x, pad_y = patch_coordinates[
-                    idx
+        try:
+            shm_dir = Path("/dev/shm")
+            if shm_dir.exists():
+                # Extract and inventory all live POSIX memory segments allocated right now
+                shm_files = [
+                    f
+                    for f in shm_dir.iterdir()
+                    if f.is_file()
+                    and not f.name.startswith("sem.")
+                    and not f.name.startswith("psm")
                 ]
-                if res.boxes is not None and len(res.boxes) > 0:
-                    all_xyxy = res.boxes.xyxy.cpu().numpy()
-                    all_clss = res.boxes.cls.cpu().numpy().astype(int)
-                    all_confs = res.boxes.conf.cpu().numpy().astype(float)
+                main_app_logger.info(
+                    f" > Discovered Live OS-Mapped Memory Nodes: {len(shm_files)}"
+                )
 
-                    for j in range(len(all_xyxy)):
-                        lx1, ly1, lx2, ly2 = all_xyxy[j]
-                        class_name = self.label_source[all_clss[j]]
-                        confidence = all_confs[j]
+                for f_path in shm_files:
+                    try:
+                        f_stat = f_path.stat()
+                        size_mb = f_stat.st_size / (1024 * 1024)
 
-                        # Reverse the centering padding offset values
-                        lx1_unpadded = lx1 - pad_x
-                        ly1_unpadded = ly1 - pad_y
-                        lx2_unpadded = lx2 - pad_x
-                        ly2_unpadded = ly2 - pad_y
-
-                        # Reverse the aspect ratio scale shift to map back to absolute 8K coordinates
-                        global_x1 = ox + (lx1_unpadded / scale_f)
-                        global_y1 = oy + (ly1_unpadded / scale_f)
-                        global_x2 = ox + (lx2_unpadded / scale_f)
-                        global_y2 = oy + (ly2_unpadded / scale_f)
-
-                        # Project directly onto the 640x640 display monitoring layout canvas
-                        disp_x = global_x1 * scale_display_x
-                        disp_y = global_y1 * scale_display_y
-                        disp_w = (global_x2 - global_x1) * scale_display_x
-                        disp_h = (global_y2 - global_y1) * scale_display_y
-
-                        if disp_w > 0 and disp_h > 0:
-                            object_res = [
-                                int(disp_x),
-                                int(disp_y),
-                                int(disp_h),
-                                int(disp_w),
-                                class_name,
-                                confidence,
-                                int(th),
-                                int(tw),
-                            ]
-                            obj_id = len(metadata)
-                            num_objs += 1
-                            framenum_str = f"{frame_id:04d}_{obj_id:04d}"
-                            metadata[framenum_str] = {
-                                "frameId": int(frame_id),
-                                "bbId": framenum_str,
-                                "bbox": {
-                                    "x": int(object_res[0]),
-                                    "y": int(object_res[1]),
-                                    "height": int(object_res[2]),
-                                    "width": int(object_res[3]),
-                                    "object": str(object_res[4]),
-                                    "object_det": {
-                                        "confidence": float(object_res[5]),
-                                        "frameH": int(object_res[6]),
-                                        "frameW": int(object_res[7]),
-                                    },
-                                },
-                            }
-
-            if "results_pool" in locals():
-                del results_pool
-            if "roi_patches" in locals():
-                roi_patches.clear()
-                del roi_patches
-
-            del frame
-            del src_tensor
-            return metadata, num_objs
-
-    def get_gpu_rois(self, frame, frameNum, mask):
-        # If more than 20% of the screen is moving, don't bother with crops
-        # if current_coverage > 0.6:
-        #     return torch.tensor([[0, 0, self.frame_width, self.frame_height]], device=self.device_input)
-
-        limit_640 = (
-            640 * 2.0
-        ) / self.scale_x  # 40  # self.config.ROI_MERGE_SIZE_LIMIT / self.scale_x
-        raw_boxes = self.get_gpu_rois_by_area(
-            mask, max_candidates=50
-        )  # , limit_640=limit_640)
-        # padding = 5  # self.config.ROI_BB_FULL_RES_PADDING /  self.scale_x
-        # raw_boxes[:, 0] -= padding
-        # raw_boxes[:, 1] -= padding
-        # raw_boxes[:, 2] += padding
-        # raw_boxes[:, 3] += padding
-
-        if raw_boxes.shape[0] < 1:
-            return torch.empty((0, 4), device=self.device_input)
-
-        if raw_boxes.shape[0] > 1:
-            raw_boxes = merge_boxes_gpu(
-                raw_boxes,
-                gap_limit=self.dist_thresh_640,
-                size_limit=limit_640,
+                        # Highlight the files using visual color anchors for scannability
+                        main_app_logger.info(
+                            f"   ⚠️  \033[93m[ALIVE SHM NODE]\033[0m File: {f_path.name:<25} | Size: {size_mb:7.2f} MB"
+                        )
+                    except Exception:
+                        pass
+            else:
+                main_app_logger.info(
+                    "   [ERROR] /dev/shm runtime directory is inaccessible on this host context."
+                )
+        except Exception as e:
+            main_app_logger.info(
+                f"   [WARN] Kernel inspection execution pass failed: {e}"
             )
 
-        clean_640p = self.filter_contained_boxes(
-            raw_boxes, overlap_thresh=self.config.ROI_CONTAINMENT_THRESH
+        # gc.collect()
+        # if torch.cuda.is_available():
+        #     torch.cuda.synchronize()
+        #     torch.cuda.empty_cache()  # Flush the pool BEFORE the guard snapshots it
+
+    def calculate_leaked_memory(
+        self, device, video_name, start_allocated, start_reserved
+    ):
+        _testMethodName = f"{video_name}_{device}"
+        main_app_logger.info("=" * 60)
+        max_allowed_leak = 1024 * 1024  # 1MB buffer allowance
+        msg = "[LEAKAGE INVESTIGATOR] Scanning memory allocations:\n"
+        if device == "gpu" and torch.cuda.is_available():
+            # torch.cuda.synchronize()
+
+            end_allocated = torch.cuda.memory_allocated(0)
+            end_reserved = torch.cuda.memory_reserved(0)
+
+            leak_allocated = end_allocated - start_allocated
+            leak_reserved = end_reserved - start_reserved
+            # max_allowed_leak = 1024 * 1024  # 1MB buffer allowance
+
+            if leak_allocated > max_allowed_leak:
+                msg += (
+                    f"\n🔴 GPU Memory Leak Detected for {_testMethodName}!\n"
+                    f"Check for dangling references or missing 'del' statements\n\n"
+                )
+                # else:
+                #     msg = "\n"
+
+            msg += (
+                f"\tPre-Setup Allocation:  {start_allocated / 1024**2:.2f} MB\n"
+                f"\tPost-Teardown Allocation:  {end_allocated / 1024**2:.2f} MB\n"
+                f"\tNet Leaked VRAM: {leak_allocated / 1024**2:.2f} MB\n"
+                f"\tNet Leaked Reserved Blocks: {leak_reserved / 1024**2:.2f} MB"
+            )
+
+            # main_app_logger.info(msg, )
+        else:
+            process = psutil.Process(os.getpid())
+            end_rss = process.memory_info().rss
+
+            # start_allocated and start_reserved must be populated with baseline RSS in each_test_setup
+            leak_rss = end_rss - start_allocated
+
+            if leak_rss > max_allowed_leak:
+                msg += (
+                    f"\n🔴 CPU Memory Leak Detected for {_testMethodName}!\n"
+                    f"Check for dangling references or missing 'del' statements\n\n"
+                )
+            # else:
+            #     msg = "\n"
+
+            msg += (
+                f" Pre-Setup Host RAM Allocation: {start_allocated / 1024**2:.2f} MB\n"
+            )
+            msg += f" Post-Teardown Host RAM Allocation: {end_rss / 1024**2:.2f} MB\n"
+            msg += f" Net Leaked Host System Memory: {leak_rss / 1024**2:.2f} MB"
+        main_app_logger.info(msg)
+        main_app_logger.info("=" * 60)
+
+    def diagnostic_profiler(self, device, video_name, start_allocated, start_reserved):
+        _testMethodName = f"{video_name}_{device}"
+        self.calculate_leaked_memory(
+            device, video_name, start_allocated, start_reserved
         )
 
-        if clean_640p.shape[0] < 1:
-            return torch.empty((0, 4), device=self.device_input)
-
-        # # Scale to 8K space
-        # # return clean_640p * self.scales_tensor
-        # # margin = 0.10
-        # # offsets = (clean_640p[:, 2:] - clean_640p[:, :2]) * margin
-        # # clean_640p[:, :2] -= offsets
-        # # clean_640p[:, 2:] += offsets
-        # # 1. Add 30-pixel 'breathing room' (in 640p space)
-        # # padding = 40  # self.config.ROI_BB_FULL_RES_PADDING /  self.scale_x
-        # # clean_640p[:, 0] -= padding
-        # # clean_640p[:, 1] -= padding
-        # # clean_640p[:, 2] += padding
-        # # clean_640p[:, 3] += padding
-
-        # # 2. Re-merge the padded boxes (connects nearby drones into one clean crop)
-        # clean_640p = merge_boxes_gpu(
-        #     clean_640p,
-        #     gap_limit=self.dist_thresh_640,
-        #     size_limit=limit_640,  # self.config.ROI_MERGE_SIZE_LIMIT / self.scale_x,
+        # main_app_logger.info("=" * 60, )
+        # main_app_logger.info(
+        #     f"\n\033[95m[DIAGNOSTICS] Starting Automated Leak Analysis for {_testMethodName}...\033[0m",
+        #     ,
         # )
 
-        # # Scale to 8K and clamp
-        # clean_full = clean_640p * self.scales_tensor
-        # # clean_full[:, [0, 2]] = clean_full[:, [0, 2]].clamp(0, self.frame_width)
-        # # clean_full[:, [1, 3]] = clean_full[:, [1, 3]].clamp(0, self.frame_height)
-        # return clean_full
+        # 1. Run objgraph to inspect the Python object reference trees before clearing containers
+        # try:
+        # main_app_logger.info(
+        #     "\033[94m[DIAGNOSTICS] Python Object Registry Standings:\033[0m",
+        # )
+        # objgraph.show_most_common_types(limit=10)
 
-        xmin = clean_640p[:, 0]
-        ymin = clean_640p[:, 1]
-        # w = clean_640p[:, 2]
-        # h = clean_640p[:, 3]
-        # xmax = xmin + w
-        # ymax = ymin + h
-        xmax = clean_640p[:, 2]
-        ymax = clean_640p[:, 3]
+        # Check if the metrics arrays are pinning references inside memory
+        # for tracker_attr in ["all_preds", "all_targets"]:
+        #     if hasattr(self, tracker_attr):
+        #         tgt_list = getattr(self, tracker_attr)
+        #         if len(tgt_list) > 0:
+        #             graph_path = f"/tmp/backrefs_{tracker_attr}_{device}.png"
+        #             main_app_logger.info(
+        #                 f"\033[93m[WARN] '{tracker_attr}' contains {len(tgt_list)} entries. Generating reference graph to: {graph_path}\033[0m"
+        #             )
+        #             objgraph.show_backrefs(
+        #                 [tgt_list], max_depth=3, filename=graph_path
+        #             )
+        # except ImportError:
+        #     main_app_logger.info(
+        #         "\033[91m[DIAGNOSTICS] 'objgraph' package missing. Skipping reference chain mapping. (pip install objgraph)\033[0m"
+        #     )
 
-        # Stack into standard format layout [xmin, ymin, xmax, ymax]
-        standard_boxes = torch.stack([xmin, ymin, xmax, ymax], dim=1)
+        # 2. Dump PyTorch Memory Snapshot before clearing VRAM caches
+        if device == "gpu" and torch.cuda.is_available():
+            try:
+                # snapshot_path = f"/tmp/vram_leak_profile_{self._testMethodName}.pickle"
+                snapshot_path = self.output_path.replace(".mp4", "_vram_profile.html")
+                torch.cuda.memory._dump_snapshot(snapshot_path)
+                main_app_logger.info(
+                    f"\033[92m[DIAGNOSTICS] VRAM Snapshot Trace generated successfully: {snapshot_path}\033[0m"
+                )
+                main_app_logger.info(
+                    "\033[92m--> Upload this file to https://pytorch.org to inspect leak allocation stacks.\033[0m"
+                )
 
-        # 4. Scale to absolute 8K workspace dimensions accurately
-        return standard_boxes * self.scales_tensor
+                with open(snapshot_path, "rb") as f:
+                    snapshot = pickle.load(f)
 
-    def get_gpu_roisv2(self, frame, frameNum, mask):
-        # 1. MORPHOLOGICAL NOISE CLEANUP (Crucial for the hillside)
-        # Apply an in-place GPU Opening filter to dissolve the tiny white spots
-        # while keeping the larger, dense drone clusters perfectly intact.
-        if isinstance(mask, cv2.cuda.GpuMat):
-            # 3x3 or 5x5 Ellipse/Rect kernel eliminates high-frequency noise
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            morph_filter = cv2.cuda.createMorphologyFilter(
-                cv2.MORPH_OPEN, mask.type(), kernel
-            )
-            clean_mask = morph_filter.apply(mask)
-        else:
-            kernel = np.ones((3, 3), np.uint8)
-            clean_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+                # Print an HTML visualization path map of the allocations
+                html_timeline = memory_viz.trace_plot(snapshot)
+                html_path = snapshot_path.replace(".pickle", ".html")
+                with open(html_path, "w", encoding="utf-8") as f:
+                    f.write(html_timeline)
+            except Exception as e:
+                main_app_logger.info(
+                    f"\033[91m[DIAGNOSTICS] Failed to generate PyTorch memory snapshot: {e}\033[0m"
+                )
 
-        # 2. Extract raw candidate boxes using the clean mask matrix surface
-        limit_640 = (640 * 2.0) / self.scale_x
-        raw_boxes = self.get_gpu_rois_by_area(
-            clean_mask, max_candidates=100
-        )  # Increased limit to 100
+    def assess_memory(self, device, video_name, start_allocated, start_reserved):
+        gc.collect()
 
-        if raw_boxes.shape[0] < 1:
-            return torch.empty((0, 4), device=self.device_input)
+        surviving_arrays = [
+            obj
+            for obj in gc.get_objects()
+            # if isinstance(obj, np.ndarray) and obj.size >= 1  #(1920 * 1080)
+            if type(obj) is np.ndarray and obj.ndim > 0
+        ]
+        analyze_tracemalloc_snapshot()
 
-        if raw_boxes.shape[0] > 1:
-            raw_boxes = merge_boxes_gpu(
-                raw_boxes,
-                gap_limit=self.dist_thresh_640,
-                size_limit=limit_640,
-            )
-
-        clean_640p = self.filter_contained_boxes(
-            raw_boxes, overlap_thresh=self.config.ROI_CONTAINMENT_THRESH
+        main_app_logger.info(
+            f"[DIAGNOSTICS] Found {len(surviving_arrays)} uncollected large arrays alive in RAM filesystem."
         )
 
-        if clean_640p.shape[0] < 1:
-            return torch.empty((0, 4), device=self.device_input)
-
-        # 3. CORRECT [X, Y, W, H] TO [X1, Y1, X2, y2] MATH
-        # Map the original width and height parameters back to endpoint coordinates
-        xmin = clean_640p[:, 0]
-        ymin = clean_640p[:, 1]
-        w = clean_640p[:, 2]
-        h = clean_640p[:, 3]
-
-        xmax = xmin + w
-        ymax = ymin + h
-
-        # Pack into full master coordinate system arrays
-        standard_boxes = torch.stack([xmin, ymin, xmax, ymax], dim=1)
-
-        # 4. Project coordinates back to 8K master canvas space accurately
-        return standard_boxes * self.scales_tensor
-
-    def get_gpu_roisv3(self, frame, frameNum, mask):
-        # 1. Extract raw candidate boxes from the mask (Already [x1, y1, x2, y2])
-        limit_640 = (640 * 2.0) / self.scale_x
-        raw_boxes = self.get_gpu_rois_by_area(mask, max_candidates=50)
-
-        if raw_boxes.shape[0] < 1:
-            return torch.empty((0, 4), device=self.device_input)
-
-        # 2. Merge overlapping fragments directly on the GPU
-        if raw_boxes.shape[0] > 1:
-            raw_boxes = merge_boxes_gpu(
-                raw_boxes,
-                gap_limit=self.dist_thresh_640,
-                size_limit=limit_640,
+        for i, arr in enumerate(surviving_arrays):
+            referrers = gc.get_referrers(arr)
+            main_app_logger.info(
+                f"  > Array {i} | Shape: {arr.shape} | Pinned by {len(referrers)} references:"
             )
-
-        # 3. Filter out containment or noise artifacts
-        clean_640p = self.filter_contained_boxes(
-            raw_boxes, overlap_thresh=self.config.ROI_CONTAINMENT_THRESH
-        )
-
-        if clean_640p.shape[0] < 1:
-            return torch.empty((0, 4), device=self.device_input)
-
-        # 4. Direct 8K Space Scaling Matrix Multiplication
-        # Matches the clean CPU architecture on Page 31, Line 2050
-        return clean_640p * self.scales_tensor
-
-    def frame2video(
-        self,
-        device_frame,
-        frameNum,
-        metadata_or_bbs,
-        class_list,
-        # metrics,
-    ):
-        scale_display_x = self.disp_w / 640
-        scale_display_y = self.disp_h / 640
-        try:
-            if self.device_input == "cuda" and torch.is_tensor(device_frame):
-                # 2. Fast Inline VRAM Downscaling into our static memory slot
-                # Reshape to (Batch, Channel, Height, Width) seamlessly without duplicating data
-                gpu_tensor = device_frame[None, :].permute(0, 3, 1, 2).float()
-
-                resized_tensor = torch.nn.functional.interpolate(
-                    gpu_tensor,
-                    size=(self.disp_h, self.disp_w),
-                    mode="nearest",
-                )
-
-                # CONVERTS TO CPU EARLIER (WORKS but lowers fps)
-                # hwc_byte_tensor = resized_tensor.squeeze(0).permute(1, 2, 0).byte()
-                # cpu_tensor = hwc_byte_tensor.cpu()
-                # bgr_contiguous = cpu_tensor.contiguous()
-
-                # Using copy_() avoids creating any runtime allocations or memory-stride drift.
-                self.static_gpu_byte_bchw.copy_(resized_tensor.byte())
-
-                # Safely reshape the pre-allocated, locked GPU memory layout back to standard HWC array topology.
-                # Since the underlying array layout is strictly contiguous, this permute is guaranteed
-                # to be zero-copy on the GPU and free from memory race stalls.
-                bgr_contiguous = self.static_gpu_byte_bchw.squeeze(0).permute(1, 2, 0)
-
-                # 1. Grab the current free pinned slot tracking variables from your reader
-                d2h_idx = self.reader.d2h_selector
-                pinned_tensor_buf = self.reader.d2h_buffers[d2h_idx]
-
-                # c_idx = self.canvas_selector
-                # current_canvas = self.static_host_canvases[c_idx]
-
-                # host_tensor_view = torch.as_tensor(current_canvas, device="cpu")
-
-                # 3. Non-blocking asynchronous PCIe DMA Download directly into our page-locked canvas
-                with torch.cuda.stream(self.reader.download_stream):
-                    # pinned_tensor = torch.from_numpy(current_canvas).cuda()
-                    pinned_tensor_buf.copy_(bgr_contiguous, non_blocking=True)
-
-                # Synchronize only the side download stream layout channel
-                self.reader.download_stream.synchronize()
-
-                cpu_360p_frame = self.reader.d2h_numpys[d2h_idx]
-
-                # 5. Non-Blocking Push straight to your background AsyncVideoWriter thread pool
-                # We pass a direct .copy() slice so the hot loop can instantly reuse the pinned ring buffer
-                display_frame = np.array(cpu_360p_frame, copy=True, order="C")
-
-                if display_frame is not None and display_frame.shape[-1] == 3:
-                    display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
-
-                # --- Draw Detection Overlays ---
-                if isinstance(metadata_or_bbs, dict):
-                    # Object Mode (YOLO Structs)
-                    display_frame = get_metadata_overlay(
-                        display_frame,
-                        metadata_or_bbs,
-                        class_list,
-                        (scale_display_x, scale_display_y),
-                        (self.disp_w, self.disp_h),
-                        is_bgr=True,
+            for ref in referrers:
+                if isinstance(ref, dict):
+                    main_app_logger.info(
+                        f"    - Dict Keys holding this array: {list(ref.keys())[:4]}"
                     )
-
-                elif metadata_or_bbs is not None:
-                    # # Motion / Smart Filtering Overlay Path
-                    display_frame = get_bb_overlay(
-                        display_frame,
-                        metadata_or_bbs,
-                        (scale_display_x, scale_display_y),
-                        (self.disp_w, self.disp_h),
+                else:
+                    main_app_logger.info(
+                        f"    - Variable holding object layout: {type(ref)}",
                     )
+        # ───────────────────────────────────────
 
-                self.async_writer.write_frame(display_frame)
-                # self.canvas_selector = 1 - self.canvas_selector
-                self.reader.d2h_selector = 1 - self.reader.d2h_selector
+        # analyze_tracemalloc_snapshot()
 
-            else:
-                # Reusable baseline track for CPU execution mappings
-                display_frame = cv2.resize(
-                    device_frame,
-                    (self.disp_w, self.disp_h),
-                    interpolation=cv2.INTER_NEAREST,
-                )
-                # if metrics["bbs"] is not None:
-                #     for box in metrics["bbs"]:
-                #         cv2.rectangle(cpu_resized, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 255, 0), 2)
-                # --- Draw Detection Overlays ---
-                if isinstance(metadata_or_bbs, dict):
-                    # Object Mode (YOLO Structs)
-                    display_frame = get_metadata_overlay(
-                        display_frame,
-                        metadata_or_bbs,
-                        class_list,
-                        (scale_display_x, scale_display_y),
-                        (self.disp_w, self.disp_h),
-                        is_bgr=True,
-                    )
-
-                elif metadata_or_bbs is not None:
-                    # # Motion / Smart Filtering Overlay Path
-                    display_frame = get_bb_overlay(
-                        display_frame,
-                        metadata_or_bbs,
-                        (scale_display_x, scale_display_y),
-                        (self.disp_w, self.disp_h),
-                    )
-                self.async_writer.write_frame(display_frame)
-        except Exception:
-            traceback.print_exc()
-        return
-
-    def frame2output(self, device_frame, frame_num, metadata_or_bbs, class_list):
-        """
-        Renders drone detection bounding boxes onto the canvas
-        before dispatching to the live UI shared memory stream.
-        """
-        if not self.active:
-            return
-        scale_display_x = self.disp_w / 640
-        scale_display_y = self.disp_h / 640
-        try:
-            if self.device_input == "cuda" and torch.is_tensor(device_frame):
-                # 2. Fast Inline VRAM Downscaling into our static memory slot
-                # Reshape to (Batch, Channel, Height, Width) seamlessly without duplicating data
-                gpu_tensor = device_frame[None, :].permute(0, 3, 1, 2).float()
-
-                resized_tensor = torch.nn.functional.interpolate(
-                    gpu_tensor,
-                    size=(self.disp_h, self.disp_w),
-                    mode="nearest",
-                )
-
-                # CONVERTS TO CPU EARLIER (WORKS but lowers fps)
-                # hwc_byte_tensor = resized_tensor.squeeze(0).permute(1, 2, 0).byte()
-                # cpu_tensor = hwc_byte_tensor.cpu()
-                # bgr_contiguous = cpu_tensor.contiguous()
-
-                # Using copy_() avoids creating any runtime allocations or memory-stride drift.
-                self.static_gpu_byte_bchw.copy_(resized_tensor.byte())
-
-                # Safely reshape the pre-allocated, locked GPU memory layout back to standard HWC array topology.
-                # Since the underlying array layout is strictly contiguous, this permute is guaranteed
-                # to be zero-copy on the GPU and free from memory race stalls.
-                bgr_contiguous = self.static_gpu_byte_bchw.squeeze(0).permute(1, 2, 0)
-
-                # 1. Grab the current free pinned slot tracking variables from your reader
-                d2h_idx = self.reader.d2h_selector
-                pinned_tensor_buf = self.reader.d2h_buffers[d2h_idx]
-
-                # c_idx = self.canvas_selector
-                # current_canvas = self.static_host_canvases[c_idx]
-
-                # host_tensor_view = torch.as_tensor(current_canvas, device="cpu")
-
-                # 3. Non-blocking asynchronous PCIe DMA Download directly into our page-locked canvas
-                with torch.cuda.stream(self.reader.download_stream):
-                    # pinned_tensor = torch.from_numpy(current_canvas).cuda()
-                    pinned_tensor_buf.copy_(bgr_contiguous, non_blocking=True)
-
-                # Synchronize only the side download stream layout channel
-                self.reader.download_stream.synchronize()
-
-                cpu_360p_frame = self.reader.d2h_numpys[d2h_idx]
-
-                # 5. Non-Blocking Push straight to your background AsyncVideoWriter thread pool
-                # We pass a direct .copy() slice so the hot loop can instantly reuse the pinned ring buffer
-                display_frame = np.array(cpu_360p_frame, copy=True, order="C")
-
-                if display_frame is not None and display_frame.shape[-1] == 3:
-                    display_frame = cv2.cvtColor(display_frame, cv2.COLOR_RGB2BGR)
-
-                # --- Draw Detection Overlays ---
-                if isinstance(metadata_or_bbs, dict):
-                    # Object Mode (YOLO Structs)
-                    display_frame = get_metadata_overlay(
-                        display_frame,
-                        metadata_or_bbs,
-                        class_list,
-                        (scale_display_x, scale_display_y),
-                        (self.disp_w, self.disp_h),
-                        is_bgr=True,
-                    )
-
-                elif metadata_or_bbs is not None:
-                    # # Motion / Smart Filtering Overlay Path
-                    display_frame = get_bb_overlay(
-                        display_frame,
-                        metadata_or_bbs,
-                        (scale_display_x, scale_display_y),
-                        (self.disp_w, self.disp_h),
-                    )
-
-                self.async_writer.write_frame(display_frame, frame_num)
-                # self.canvas_selector = 1 - self.canvas_selector
-                self.reader.d2h_selector = 1 - self.reader.d2h_selector
-
-            else:
-                # Reusable baseline track for CPU execution mappings
-                display_frame = cv2.resize(
-                    device_frame,
-                    (self.disp_w, self.disp_h),
-                    interpolation=cv2.INTER_NEAREST,
-                )
-                # if metrics["bbs"] is not None:
-                #     for box in metrics["bbs"]:
-                #         cv2.rectangle(cpu_resized, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 255, 0), 2)
-                # --- Draw Detection Overlays ---
-                if isinstance(metadata_or_bbs, dict):
-                    # Object Mode (YOLO Structs)
-                    display_frame = get_metadata_overlay(
-                        display_frame,
-                        metadata_or_bbs,
-                        class_list,
-                        (scale_display_x, scale_display_y),
-                        (self.disp_w, self.disp_h),
-                        is_bgr=True,
-                    )
-
-                elif metadata_or_bbs is not None:
-                    # # Motion / Smart Filtering Overlay Path
-                    display_frame = get_bb_overlay(
-                        display_frame,
-                        metadata_or_bbs,
-                        (scale_display_x, scale_display_y),
-                        (self.disp_w, self.disp_h),
-                    )
-                self.async_writer.write_frame(display_frame, frame_num)
-        except Exception:
-            traceback.print_exc()
-        # return
-
-    def pipeline_fn(
-        self,
-        device_frame,
-        overall_frame_num,
-        # is_target_frame,
-        stat_start_time,
-        current_clip_id,
-    ):
-        global all_metadata
-        # current_clip_id = self.clip_id
-        current_clip_key = f"{self.name}_{current_clip_id:03d}.mp4"
-        current_clip_path = f"{self.config.SHARED_OUTPUT}/{current_clip_key}"
-        # --- MOTION MASK GENERATION GATE ---
-        if self.config.sf_enabled:
-            if self.device_input == "cuda":
-                bgs_input_frame = (
-                    device_frame.byte()
-                    if torch.is_tensor(device_frame)
-                    else device_frame
-                )
-                inf_data = self.rbtd_full_gpu(bgs_input_frame)
-                # torch.cuda.current_stream().synchronize()
-                # if isinstance(inf_data, dict) and "mask" in inf_data:
-                #     if torch.is_tensor(inf_data["mask"]):
-                #         inf_data["mask"] = inf_data["mask"].contiguous()
-                # inf_data = self.rbtd_full_gpu(device_frame)
-            else:
-                inf_data = self.rbtd_full_cpu(device_frame)
+        if device == "gpu":
+            self.print_active_gpu_tensor_memory()
         else:
-            inf_data = {}
+            # --- CPU RAM PATH METRICS ---
+            # main_app_logger.info("=" * 60, )
+            # main_app_logger.info("\n[RAM INVESTIGATOR] Scanning Host CPU Memory Standings:", )
+            # process = psutil.Process(os.getpid())
+            # current_rss = process.memory_info().rss / (1024 * 1024)  # Host RAM in MB
+            # main_app_logger.info(f" > Current Process Resident Set Size (RSS): {current_rss:.2f} MB", )
+            self.print_active_cpu_tensor_memory()
 
-        # --- PIPELINE AT TARGET RATE ---
-        # if not is_target_frame:
-        #     return
+        self.print_active_shared_memory()
 
-        # if is_target_frame:
-        # self.next_process_idx += self.step_size
-        # self.frame_count_target += 1  # 1-indexed
-        # self.frame_in_clip_count += 1
-        inf_data["frameNum"] = overall_frame_num  # self.frame_count_target
+        # AUTOMATED DIAGNOSTIC PROFILING PHASE (TRIGGERED ON TEST TEARDOWN)
+        self.diagnostic_profiler(device, video_name, start_allocated, start_reserved)
 
-        # --- CLIP GENERATION ---
-        if self.config.ENABLE_QUERYING:
-            if self.config.DEBUG_FLAG and (
-                self.frame_in_clip_count % 15 == 0 or self.frame_in_clip_count == 1
-            ):
-                print(
-                    f"[CLIPPER] Frame progress tracking index: {self.frame_in_clip_count}/{self.max_frames_per_clip} (Overall Frame: {overall_frame_num})",
-                    flush=True,
-                )
-
-            self.prep_frame_for_video(device_frame, overall_frame_num)
-
-            if self.frame_in_clip_count > self.max_frames_per_clip:
-                global clip_completion_tracker
-                if current_clip_key not in clip_completion_tracker:
-                    clip_completion_tracker[current_clip_key] = {
-                        "video": False,
-                        "meta": False,
-                        "start_time": time.time(),
-                    }
-
-                clip_completion_tracker[current_clip_key]["meta"] = True
-                print(
-                    f" [BARRIER-SEAL] All metadata extracted for {current_clip_key}. Evaluating convergence...",
-                    flush=True,
-                )
-                self._evaluate_barrier_and_dispatch(
-                    current_clip_key,
-                    current_clip_path,
-                    self.resize_w,
-                    self.resize_h,
-                )
-
-                self.start_new_clip(current_clip_id)
-
-        if not self.config.DISABLE_DETECTION:
-            # --- FULL-RESOLUTION ROI EXTRACTION MAPS ---
-            bbs_full_res = None
-            if self.config.sf_enabled:
-                if self.device_input == "cuda":
-                    bbs_full_res = self.get_gpu_rois(
-                        inf_data["full_frame"],
-                        inf_data["frameNum"],
-                        inf_data["mask"],
-                    )
-                else:
-                    bbs_full_res = self.get_cpu_rois(
-                        inf_data["full_frame"],
-                        inf_data["frameNum"],
-                        inf_data["mask"],
-                    )
-
-            # Isolate raw coordinate matrices out of device graphs to prevent exit race conditions
-            clean_bbs = []
-            if self.config.sf_enabled and bbs_full_res is not None:
-                if torch.is_tensor(bbs_full_res):
-                    clean_bbs = bbs_full_res.detach().cpu().numpy()
-                else:
-                    clean_bbs = np.array(bbs_full_res)
-
-            # If inline optimizations left the tensor in channels-first format (B, C, H, W),
-            # restore it to standard standard layout standard (H, W, C) so get_detections
-            # can decode bounding boxes accurately without corrupting weights.
-            det_frame = device_frame
-            # Cast float canvases back to standard unsigned byte tracking arrays
-            # so get_detections can safely run its internal float normalizations.
-            if torch.is_tensor(det_frame):
-                det_frame = det_frame.byte()
-
-                if det_frame.ndim == 4:
-                    det_frame = det_frame.squeeze(0).permute(1, 2, 0)
-                elif det_frame.shape[0] == 3:
-                    det_frame = det_frame.permute(1, 2, 0)
-
-                # print(f"[DEBUG] {current_clip_key}: {len(clean_bbs)} ROIs detected!")
-
-            if self.config.DETECTION_TYPE != "motion":
-                # # Object Mode: Run YOLO and prepare metadata
-                # if "full_frame" in inf_data:
-                #     det_frame = inf_data["full_frame"]
-                # else:
-                #     det_frame = (
-                #         device_frame.clone()
-                #         if torch.is_tensor(device_frame)
-                #         else device_frame.copy()
-                #     )
-
-                merged = clean_bbs if self.config.sf_enabled else None
-                # num_bbs = 0 if merged is None else len(clean_bbs)
-                # print(f"[DEBUG] {current_clip_key} 'merged' num bbs: {num_bbs}")
-                metadata, num_objs = self.get_detections(
-                    det_frame,
-                    self.frame_in_clip_count,  # self.frame_count_target,
-                    merged=merged,
-                    thickness=self.config.THICKNESS,
-                    device_input=self.config.device_input,
-                )
-
-                # num_objs = len(list(metadata.keys()))
-                self.total_objects_detected += num_objs
-                if self.config.DEBUG_FLAG:
-                    meta_keys = ", ".join(list(metadata.keys()))
-                    print(
-                        f"[DEBUG] {current_clip_key} metadata keys: {meta_keys}",
-                        flush=True,
-                    )
-                if current_clip_key not in all_metadata:
-                    all_metadata[current_clip_key] = {"object": {}, "face": {}}
-
-                all_metadata[current_clip_key]["object"].update(metadata)
-                # data_to_draw = metadata
-                # if self.config.DEBUG_FLAG or
-                if overall_frame_num % 50 == 0:
-                    print(
-                        f"[METADATA-DEBUG A] Logged tracking structures for Frame #{overall_frame_num} into dictionary key: {current_clip_key}. Number detections: {self.total_objects_detected} (+{num_objs})",
-                        flush=True,
-                    )
-
-                # print(f"Sending to queue", flush=True)
-
-            if self.device_input == "cuda":
-                # torch.cuda.synchronize()
-                self.inference_stream.synchronize()
-
-            data_to_draw = (
-                clean_bbs if self.config.DETECTION_TYPE == "motion" else metadata
-            )
-
-            if self.config.TEST_MODE:
-                self.frame2video(
-                    det_frame,
-                    inf_data["frameNum"],
-                    data_to_draw,
-                    self.label_source,
-                )
-            else:
-                self.frame2output(
-                    det_frame,
-                    inf_data["frameNum"],
-                    data_to_draw,
-                    self.label_source,
-                )
-
-            # self.update_frame(stat_start_time)
-
-    # VIDEO CLIPPING
+    # VIDEO CLIPPING --------------------------------------------
     def start_new_clip(self, clip_id):
         """
         Seals the current AI tracking state layout and safely moves the instance metadata references
@@ -3557,32 +3659,13 @@ class DeviceBaseHandler:
         """
         global clip_completion_tracker, all_metadata
 
-        # Capture context pointers prior to counter mutation steps
-        old_clip_id = clip_id  # self.clip_id
-        old_clip_key = f"{self.name}_{old_clip_id:03d}.mp4"
-        # old_clip_path = f"{self.config.SHARED_OUTPUT}/{old_clip_key}"
-
-        print(
-            f" [CLIPPER] Rotating AI context engine tracking timeline layer. Sealing metadata for: {old_clip_key}",
-            flush=True,
-        )
-
-        # Seal the AI processing side of the tracker
-        # if old_clip_key not in clip_completion_tracker:
-        #     clip_completion_tracker[old_clip_key] = {"video": False, "meta": False, "start_time": time.time()}
-
-        # clip_completion_tracker[old_clip_key]["meta"] = True
-
-        # # Evaluate the barrier in case the video segment completed before the AI loop reached this gate
-        # self._evaluate_barrier_and_dispatch(old_clip_key, old_clip_path, self.resize_w, self.resize_h)
-
         # Mutate tracker instance metrics parameters for the upcoming segment chunk window
         # self.clip_id += 1
         self.frame_in_clip_count = 1
         self._check_shm_safety(threshold_percent=90)
 
         log_to_logger(
-            f"New clip created: clip frame {self.frame_in_clip_count} ({self.frame_count_target})) of {self.max_frames_per_clip}",
+            f"New clip created: clip frame {self.frame_in_clip_count} of {self.max_frames_per_clip} (Overall target frame: {self.frame_count_target})",
             level="info",
         )
 
@@ -3592,92 +3675,142 @@ class DeviceBaseHandler:
             return
 
         if not hasattr(self, "write_queue") or self.write_queue is None:
-            print(
+            main_app_logger.info(
                 " [CLIPPER-INIT] Missing write_queue footprint. Provisioning runtime workspace buffer...",
-                flush=True,
             )
-            self.write_queue = queue.Queue(maxsize=300)
+            # self.write_queue = queue.Queue(maxsize=300)
+            # write_queue_size = int(self.target_fps / 2) if self.device_input == "cpu" else int(self.target_fps / 2)
+            write_queue_size = int(2 * self.target_fps)
+            self.write_queue = queue.Queue(maxsize=write_queue_size)  # 300)
             self.writer_done = False
 
         if not self.config.TEST_MODE and (
             not hasattr(self, "send_metadata_queue") or self.send_metadata_queue is None
         ):
-            print(
+            main_app_logger.info(
                 " [CLIPPER-INIT] Binding instance metadata reference array layer dynamically...",
-                flush=True,
             )
-            self.send_metadata_queue = queue.Queue()
+            self.send_metadata_queue = queue.Queue(maxsize=50)
 
         if not hasattr(self, "stop_writer") or self.stop_writer is None:
             self.stop_writer = threading.Event()
 
-        if (
-            not hasattr(self, "writer_thread")
-            or self.writer_thread is None
-            or not self.writer_thread.is_alive()
-        ):
-            print(
-                " [CLIPPER-INIT] Target worker runtime thread is offline. Provisioning core consumer loop thread...",
-                flush=True,
-            )
-            self.writer_thread = threading.Thread(
-                target=self.video_writer_core_loop,
-                args=(self.stop_writer,),
-                daemon=True,
-            )
-            self.writer_thread.start()
+        # if (
+        #     not hasattr(self, "writer_process")
+        #     or self.writer_process is None
+        #     or not self.writer_process.is_alive()
+        # ):
+        #     main_app_logger.info(
+        #         " [CLIPPER-INIT] Target worker runtime thread is offline. Provisioning core consumer loop thread...",
+        #     )
+        #     self.writer_process = threading.Thread(
+        #         target=self.video_writer_core_loop,
+        #         args=(self.stop_writer,),
+        #         daemon=True,
+        #     )
+        #     self.writer_process.start()
 
-        if getattr(self, "video_writer", None) is None:
-            print(
-                " [CLIPPER-INIT] Downstream execution handle is blank. Initializing FFmpeg subprocess daemon...",
-                flush=True,
-            )
-            self._initialize_writer()
+        # if getattr(self, "video_writer", None) is None:
+        #     main_app_logger.info(
+        #         " [CLIPPER-INIT] Downstream execution handle is blank. Initializing FFmpeg subprocess daemon...",
+        #     )
+        #     self._initialize_writer()
 
-        self.clip_executor.submit(self._async_clipper_worker, device_frame, frame_num)
+        if not self.active or self._is_stopped:
+            return
 
-    def _async_clipper_worker(self, device_frame, frame_num):
+        # self.clip_executor.submit(self._async_clipper_worker, device_frame, frame_num)
         try:
+            if hasattr(self, "clip_executor") and self.clip_executor is not None:
+                self.clip_executor.submit(
+                    self._async_clipper_worker, device_frame, frame_num
+                )
+        except RuntimeError as e:
+            # If the executor was shut down in the fraction of a millisecond
+            # between our check and the submit, catch it silently and drop the frame.
+            if "cannot schedule new futures" in str(e):
+                pass
+            else:
+                # If it's a different RuntimeError, we still want to see it
+                raise e
+        except Exception:
+            # Catch other unexpected submission errors
+            # pass
+            traceback.print_exc()
+
+    @torch.inference_mode()
+    def _async_clipper_worker_v1(self, device_frame, frame_num):
+        """
+        A worker that resizes a full-resolution frame and places it in a queue
+        for the video writer. Runs in a separate thread.
+        """
+        # ring_idx = (frame_num - 1) % self.ring_depth
+        try:
+            # If a shutdown has started, attributes might be gone. Exit cleanly.
+            if (
+                not self.active
+                or not hasattr(self, "processing_stream")
+                or self.processing_stream is None
+            ):
+                return
+
             if self.device_input == "cuda":
-                with torch.cuda.stream(self.processing_stream):
-                    if device_frame.shape[-1] == 3:
-                        gpu_ch_first = device_frame.permute(2, 0, 1).contiguous()
-                    else:
-                        gpu_ch_first = device_frame.contiguous()
+                # with torch.cuda.stream(self.processing_stream):
+                if (
+                    hasattr(self, "processing_stream")
+                    and self.processing_stream is not None
+                ):
+                    torch.cuda.set_stream(self.processing_stream)
+                if device_frame.shape[-1] == 3:
+                    gpu_ch_first = device_frame.permute(2, 0, 1).contiguous()
+                else:
+                    gpu_ch_first = device_frame.contiguous()
 
-                    self.gpu_float_staging[0, :, :, :].copy_(
-                        gpu_ch_first, non_blocking=True
-                    )
+                self.gpu_float_staging[0, :, :, :].copy_(
+                    gpu_ch_first, non_blocking=True
+                )
 
-                    gpu_resized = F.interpolate(
-                        self.gpu_float_staging,
-                        size=(self.resize_h, self.resize_w),
-                        mode="bilinear",
-                        align_corners=False,
-                    ).squeeze(0)
+                gpu_resized = F.interpolate(
+                    self.gpu_float_staging,
+                    size=(self.resize_h, self.resize_w),
+                    # mode="bilinear",
+                    # align_corners=False,
+                    mode="nearest",
+                ).squeeze(0)
 
-                    gpu_final = gpu_resized.clamp(0, 255).to(torch.uint8)
+                gpu_final = gpu_resized.clamp(0, 255).to(torch.uint8)
 
-                    # If the tensor shape follows PyTorch's standard format (Channels, Height, Width),
-                    # we reverse the channel order [0, 1, 2] to [2, 1, 0] (RGB -> BGR)
-                    if gpu_final.ndim == 3 and gpu_final.shape[0] == 3:
-                        gpu_final = gpu_final[[2, 1, 0], :, :]
+                # If the tensor shape follows PyTorch's standard format (Channels, Height, Width),
+                # we reverse the channel order [0, 1, 2] to [2, 1, 0] (RGB -> BGR)
+                if gpu_final.ndim == 3 and gpu_final.shape[0] == 3:
+                    gpu_final = gpu_final[[2, 1, 0], :, :]
 
-                    gpu_contiguous = gpu_final.permute(1, 2, 0).contiguous()
+                gpu_contiguous = gpu_final.permute(1, 2, 0).contiguous()
 
-                    active_tensor = self.pinned_tensors[self.gpu_ring_idx]
-                    active_tensor.copy_(gpu_contiguous, non_blocking=True)
+                active_tensor = self.pinned_tensors[self.gpu_ring_idx]
+                active_tensor.copy_(gpu_contiguous, non_blocking=True)
 
                 if self.slot_events is not None:
                     self.slot_events[self.gpu_ring_idx].record(self.processing_stream)
 
-                self.write_queue.put(
-                    {
-                        "ring_slot_idx": self.gpu_ring_idx,
-                        "frame_num": frame_num,
-                        "pipe_handle": self.video_writer,
-                    }
-                )
+                # with self.write_queue_backlog_counter.get_lock():
+                #     self.write_queue_backlog_counter.value += 1
+                # self.write_queue.put(
+                #     {
+                #         "ring_slot_idx": self.gpu_ring_idx,
+                #         "frame_num": frame_num,
+                #         "pipe_handle": self.video_writer,
+                #     }
+                # )
+                try:
+                    # Put the NumPy array directly into the queue
+                    self.write_queue.put_nowait(active_tensor)
+
+                    # (Optional) Increment your backlog counter if you still use it
+                    with self.write_queue_backlog_counter.get_lock():
+                        self.write_queue_backlog_counter.value += 1
+                except queue.Full:
+                    pass  # Drop the frame if the writer process is lagging
                 self.gpu_ring_idx = (self.gpu_ring_idx + 1) % self.ring_depth
             else:
                 active_matrix = self.pinned_matrices[self.cpu_ring_idx]
@@ -3688,21 +3821,201 @@ class DeviceBaseHandler:
                     interpolation=cv2.INTER_NEAREST,
                 )
 
-                self.write_queue.put(
-                    {
-                        "ring_slot_idx": self.cpu_ring_idx,
-                        "frame_num": frame_num,
-                        "pipe_handle": self.video_writer,
-                    }
-                )
+                # with self.write_queue_backlog_counter.get_lock():
+                #     self.write_queue_backlog_counter.value += 1
+                # self.write_queue.put(
+                #     {
+                #         "ring_slot_idx": self.cpu_ring_idx,
+                #         "frame_num": frame_num,
+                #         "pipe_handle": self.video_writer,
+                #     }
+                # )
+                try:
+                    # Put the NumPy array directly into the queue
+                    self.write_queue.put_nowait(active_matrix)
+
+                    # (Optional) Increment your backlog counter if you still use it
+                    with self.write_queue_backlog_counter.get_lock():
+                        self.write_queue_backlog_counter.value += 1
+                except queue.Full:
+                    pass  # Drop the frame if the writer process is lagging
+
                 self.cpu_ring_idx = (self.cpu_ring_idx + 1) % self.ring_depth
 
         except Exception as e:
-            print(
+            main_app_logger.info(
                 f"[CRITICAL-CLIPPER-WORKER] Resizing execution loop dropped: {e}",
-                flush=True,
             )
             traceback.print_exc()
+
+        finally:
+            # This worker handles large 8K frames. Deleting all local tensor
+            # references here is critical to prevent VRAM accumulation.
+            if "device_frame" in locals():
+                del device_frame
+            if "gpu_ch_first" in locals():
+                del gpu_ch_first
+            if "gpu_resized" in locals():
+                del gpu_resized
+            if "gpu_final" in locals():
+                del gpu_final
+            if "gpu_contiguous" in locals():
+                del gpu_contiguous
+
+    @torch.inference_mode()
+    def _async_clipper_worker(self, device_frame, frame_num):
+        """
+        A worker that resizes a full-resolution frame and places it in a queue
+        for the video writer. Runs in a separate thread.
+        """
+        # ring_idx = (frame_num - 1) % self.ring_depth
+        try:
+            # If a shutdown has started, attributes might be gone. Exit cleanly.
+            if (
+                not self.active
+                or not hasattr(self, "processing_stream")
+                or self.processing_stream is None
+            ):
+                return
+
+            if self.device_input == "cuda":
+                # with torch.cuda.stream(self.processing_stream):
+                if (
+                    hasattr(self, "processing_stream")
+                    and self.processing_stream is not None
+                ):
+                    torch.cuda.set_stream(self.processing_stream)
+                if device_frame.shape[-1] == 3:
+                    gpu_ch_first = device_frame.permute(2, 0, 1).contiguous()
+                else:
+                    gpu_ch_first = device_frame.contiguous()
+
+                self.gpu_float_staging[0, :, :, :].copy_(
+                    gpu_ch_first, non_blocking=True
+                )
+
+                gpu_resized = F.interpolate(
+                    self.gpu_float_staging,
+                    size=(self.resize_h, self.resize_w),
+                    # mode="bilinear",
+                    # align_corners=False,
+                    mode="nearest",
+                ).squeeze(0)
+
+                gpu_final = gpu_resized.clamp(0, 255).to(torch.uint8)
+
+                # If the tensor shape follows PyTorch's standard format (Channels, Height, Width),
+                # we reverse the channel order [0, 1, 2] to [2, 1, 0] (RGB -> BGR)
+                if gpu_final.ndim == 3 and gpu_final.shape[0] == 3:
+                    gpu_final = gpu_final[[2, 1, 0], :, :]
+
+                gpu_contiguous = gpu_final.permute(1, 2, 0).contiguous()
+
+                active_tensor = self.pinned_tensors[self.gpu_ring_idx]
+                active_tensor.copy_(gpu_contiguous, non_blocking=True)
+
+                if self.slot_events is not None:
+                    self.slot_events[self.gpu_ring_idx].record(self.processing_stream)
+
+                # with self.write_queue_backlog_counter.get_lock():
+                #     self.write_queue_backlog_counter.value += 1
+                # self.write_queue.put(
+                #     {
+                #         "ring_slot_idx": self.gpu_ring_idx,
+                #         "frame_num": frame_num,
+                #         "pipe_handle": self.video_writer,
+                #     }
+                # )
+
+                # try:
+                #     # Put the NumPy array directly into the queue
+                #     self.write_queue.put_nowait(active_tensor)
+
+                #     # (Optional) Increment your backlog counter if you still use it
+                #     with self.write_queue_backlog_counter.get_lock():
+                #         self.write_queue_backlog_counter.value += 1
+                # except queue.Full:
+                #     pass # Drop the frame if the writer process is lagging
+
+                # 1. Get the next available ring buffer slot atomically
+                with self.clipper_idx_lock:
+                    slot_idx = self.clipper_ring_idx.value
+                    self.clipper_ring_idx.value = (
+                        self.clipper_ring_idx.value + 1
+                    ) % self.clipper_ring_depth
+
+                # 2. Get the NumPy view for that slot and copy the data into it
+                target_buffer = self.clipper_shm_np_views[slot_idx]
+                np.copyto(target_buffer, active_tensor)
+
+                # 3. Put the INTEGER INDEX into the queue (extremely fast)
+                self.write_queue.put_nowait(slot_idx)
+
+                self.gpu_ring_idx = (self.gpu_ring_idx + 1) % self.ring_depth
+            else:
+                active_matrix = self.pinned_matrices[self.cpu_ring_idx]
+                cv2.resize(
+                    device_frame,
+                    (self.resize_w, self.resize_h),
+                    dst=active_matrix,
+                    interpolation=cv2.INTER_NEAREST,
+                )
+
+                # with self.write_queue_backlog_counter.get_lock():
+                #     self.write_queue_backlog_counter.value += 1
+                # self.write_queue.put(
+                #     {
+                #         "ring_slot_idx": self.cpu_ring_idx,
+                #         "frame_num": frame_num,
+                #         "pipe_handle": self.video_writer,
+                #     }
+                # )
+
+                # try:
+                #     # Put the NumPy array directly into the queue
+                #     self.write_queue.put_nowait(active_matrix)
+
+                #     # (Optional) Increment your backlog counter if you still use it
+                #     with self.write_queue_backlog_counter.get_lock():
+                #         self.write_queue_backlog_counter.value += 1
+                # except queue.Full:
+                #     pass # Drop the frame if the writer process is lagging
+
+                # 1. Get the next available ring buffer slot atomically
+                with self.clipper_idx_lock:
+                    slot_idx = self.clipper_ring_idx.value
+                    self.clipper_ring_idx.value = (
+                        self.clipper_ring_idx.value + 1
+                    ) % self.clipper_ring_depth
+
+                # 2. Get the NumPy view for that slot and copy the data into it
+                target_buffer = self.clipper_shm_np_views[slot_idx]
+                np.copyto(target_buffer, active_matrix)
+
+                # 3. Put the INTEGER INDEX into the queue (extremely fast)
+                self.write_queue.put_nowait(slot_idx)
+
+                self.cpu_ring_idx = (self.cpu_ring_idx + 1) % self.ring_depth
+
+        except Exception as e:
+            main_app_logger.info(
+                f"[CRITICAL-CLIPPER-WORKER] Resizing execution loop dropped: {e}",
+            )
+            traceback.print_exc()
+
+        finally:
+            # This worker handles large 8K frames. Deleting all local tensor
+            # references here is critical to prevent VRAM accumulation.
+            if "device_frame" in locals():
+                del device_frame
+            if "gpu_ch_first" in locals():
+                del gpu_ch_first
+            if "gpu_resized" in locals():
+                del gpu_resized
+            if "gpu_final" in locals():
+                del gpu_final
+            if "gpu_contiguous" in locals():
+                del gpu_contiguous
 
     def _initialize_writer(self):
         """
@@ -3751,7 +4064,7 @@ class DeviceBaseHandler:
             self.clip_filename_pattern,
         ]
 
-        # print(f" [FFMPEG-INIT] Spawning binary pipeline targeted at: {self.clip_filename_pattern}", flush=True)
+        # main_app_logger.info(f" [FFMPEG-INIT] Spawning binary pipeline targeted at: {self.clip_filename_pattern}")
 
         try:
             # log_dir = "/home/logs"
@@ -3769,9 +4082,8 @@ class DeviceBaseHandler:
                 bufsize=0,
             )
             self.video_writer = self.ffmpeg_proc.stdin
-            print(
+            main_app_logger.info(
                 " [FFMPEG-INIT] Subprocess online. Log stream parser engine initialization sequencing...",
-                flush=True,
             )
 
             # Fire memory loop monitor
@@ -3785,9 +4097,8 @@ class DeviceBaseHandler:
                 level="info",
             )
         except Exception as e:
-            print(
+            main_app_logger.info(
                 f"[CRITICAL-FFMPEG] Process spawn aborted at kernel boundary: {e}",
-                flush=True,
             )
             self.video_writer = None
 
@@ -3866,9 +4177,8 @@ class DeviceBaseHandler:
                                     )  # Rest the polling thread to preserve CPU cycles
 
                                 if not file_stable:
-                                    print(
+                                    main_app_logger.info(
                                         f" [PARSER-WARN] IO Flush timeout exceeded for {completed_clip_key}. Forcing dispatch anyway.",
-                                        flush=True,
                                     )
                                 # =========================================================================
 
@@ -3884,9 +4194,8 @@ class DeviceBaseHandler:
                                     True
                                 )
                                 if self.config.DEBUG_FLAG:
-                                    print(
+                                    main_app_logger.info(
                                         f"[PARSER] Memory pipe intercepted completed segment confirmation: {completed_clip_key}",
-                                        flush=True,
                                     )
 
                                 # Run convergence evaluation pass
@@ -3897,128 +4206,147 @@ class DeviceBaseHandler:
                                     self.resize_h,
                                 )
                         except Exception as calc_err:
-                            print(
+                            main_app_logger.info(
                                 f"[PARSER-WARN] Index calculation lookback anomaly skipped: {calc_err}",
-                                flush=True,
                             )
 
                 except Exception as parse_err:
-                    print(
+                    main_app_logger.info(
                         f"[PARSER-ERROR] Failed to extract target token patterns out of logging stream: {parse_err}",
-                        flush=True,
                     )
                     continue
         if self.config.DEBUG_FLAG:
-            print(
+            main_app_logger.info(
                 " [LOG-PARSER] Memory loop pipe interface closed down smoothly.",
-                flush=True,
             )
 
-    def video_writer_core_loop(self, stop_evt):
-        """
-        Thread-safe background min-heap consumer with adaptive sequence hole recovery.
-        """
-        print(
-            " [WRITER-LOOP] Background tracking consumer loop active and polling memory queues...",
-            flush=True,
-        )
-        try:
-            while not stop_evt.is_set() or not self.write_queue.empty():
-                try:
-                    data = None
-                    try:
-                        data = self.write_queue.get(timeout=0.02)
-                    except (queue.Empty, AttributeError):
-                        continue
+    # def video_writer_core_loop(self, stop_evt):
+    #     """Thread-safe background min-heap consumer with adaptive sequence hole recovery
 
-                    if data is None:
-                        continue
+    #     and leak-proof lifecycle task tracking signals.
+    #     """
+    #     main_app_logger.info(
+    #         " [WRITER-LOOP] Background tracking consumer loop active and polling memory queues...",
+    #     )
+    #     try:
+    #         # Use a safe helper function to check if the queue is both active and not empty
+    #         def is_queue_active_and_populated():
+    #             if self.write_queue is None:
+    #                 return False
+    #             try:
+    #                 return not self.write_queue.empty()
+    #             except (AttributeError, ValueError):
+    #                 # In case the queue was just destroyed by the main thread
+    #                 return False
 
-                    control_data = data.get("control")
-                    if control_data == "FLUSH":
-                        print(
-                            " [WRITER-LOOP] Intercepted downstream engine flush token code signature.",
-                            flush=True,
-                        )
-                        if "pipe_handle" in data and data["pipe_handle"]:
-                            try:
-                                data["pipe_handle"].close()
-                            except Exception:
-                                pass
-                        self.write_queue.task_done()
-                        continue
+    #         while not stop_evt.is_set() or not is_queue_active_and_populated():
+    #             try:
+    #                 data = None
+    #                 try:
+    #                     data = self.write_queue.get(timeout=0.02)
+    #                 except (queue.Empty, AttributeError):
+    #                     continue
 
-                    slot_target = data.get("ring_slot_idx")
-                    sock_handle = data.get("pipe_handle")
-                    # frame_num = data.get("frame_num")
+    #                 if data is None:
+    #                     continue
 
-                    if (
-                        sock_handle is None
-                        and getattr(self, "video_writer", None) is not None
-                    ):
-                        sock_handle = self.video_writer
+    #                 # --- DETACHED PROCESSING LOGIC ENVELOPE ------------------
+    #                 try:
+    #                     control_data = data.get("control")
+    #                     if control_data == "FLUSH":
+    #                         main_app_logger.info(
+    #                             " [WRITER-LOOP] Intercepted downstream engine flush token code signature.",
+    #                         )
+    #                         if "pipe_handle" in data and data["pipe_handle"]:
+    #                             try:
+    #                                 data["pipe_handle"].close()
+    #                             except Exception:
+    #                                 pass
+    #                         continue
 
-                    if slot_target is not None and sock_handle is not None:
-                        if self.device_input == "cuda" and self.slot_events is not None:
-                            self.slot_events[slot_target].synchronize()
+    #                     slot_target = data.get("ring_slot_idx")
+    #                     sock_handle = data.get("pipe_handle")
 
-                        if (
-                            self.ffmpeg_proc is None
-                            or self.ffmpeg_proc.poll() is not None
-                        ):
-                            print(
-                                " [WRITER-WARN] Downstream execution loop pipe was broken out-of-band. Launching recovery routine...",
-                                flush=True,
-                            )
-                            self._initialize_writer()
-                            sock_handle = self.video_writer
-                            if sock_handle is None:
-                                self.write_queue.task_done()
-                                continue
+    #                     if (
+    #                         sock_handle is None
+    #                         and getattr(self, "video_writer", None) is not None
+    #                     ):
+    #                         sock_handle = self.video_writer
 
-                        try:
-                            raw_buffer_view = memoryview(
-                                self.pinned_matrices[slot_target]
-                            )
-                            sock_handle.write(raw_buffer_view)
-                            sock_handle.flush()
+    #                     if slot_target is not None and sock_handle is not None:
+    #                         if (
+    #                             self.device_input == "cuda"
+    #                             and self.slot_events is not None
+    #                         ):
+    #                             self.slot_events[slot_target].synchronize()
 
-                        except (OSError, ValueError) as pipe_err:
-                            print(
-                                f" [PIPE-ERROR] Write operation dropped on ring index slot {slot_target}: {pipe_err}",
-                                flush=True,
-                            )
-                            pass
+    #                         if (
+    #                             self.ffmpeg_proc is None
+    #                             or self.ffmpeg_proc.poll() is not None
+    #                         ):
+    #                             main_app_logger.info(
+    #                                 " [WRITER-WARN] Downstream execution loop pipe was broken out-of-band. Launching recovery routine...",
+    #                             )
+    #                             self.initialize_writer()
+    #                             sock_handle = self.video_writer
+    #                             if sock_handle is None:
+    #                                 continue
 
-                        self.write_queue.task_done()
-                    else:
-                        self.write_queue.task_done()
+    #                         try:
+    #                             raw_buffer_view = memoryview(
+    #                                 self.pinned_matrices[slot_target]
+    #                             )
+    #                             sock_handle.write(raw_buffer_view)
+    #                             sock_handle.flush()
+    #                         except (OSError, ValueError) as pipe_err:
+    #                             main_app_logger.info(
+    #                                 f" [PIPE-ERROR] Write operation dropped on ring index slot {slot_target}: {pipe_err}",
+    #                             )
+    #                         finally:
+    #                             if "raw_buffer_view" in locals():
+    #                                 del raw_buffer_view
 
-                except Exception as e:
-                    print(
-                        f"[WRITER-EXCEPTION] Worker engine cycle processing failure: {e}",
-                        flush=True,
-                    )
-                    continue
+    #                     del slot_target, sock_handle
 
-            try:
-                if hasattr(self, "socket_path") and os.path.exists(self.socket_path):
-                    os.remove(self.socket_path)
-            except Exception:
-                pass
+    #                     with self.write_queue_backlog_counter.get_lock():
+    #                         self.write_queue_backlog_counter.value -= 1
+    #                         if (
+    #                             self.write_queue_backlog_counter.value % 30 == 0
+    #                         ):  # Every ~2 seconds
+    #                             gc.collect()
+    #                             if torch.cuda.is_available():
+    #                                 torch.cuda.empty_cache()
 
-            self.writer_done = True
-            print(
-                " [WRITER-LOOP] Thread pool queue completely drained. Processing safe exit termination sequence...",
-                flush=True,
-            )
+    #                 # --- ENSURE PRECISE TASK TRACKING REGISTRATION ALLOCATION ---
+    #                 finally:
+    #                     if "data" in locals():
+    #                         del data
+    #                     # This executes exactly once per queue iteration pass, completely
+    #                     # eliminating "task_done() called too many times" exceptions.
+    #                     self.write_queue.task_done()
 
-        except Exception as fatal_err:
-            print(
-                f"[FATAL-WRITER-CRASH] Unhandled background crash: {fatal_err}",
-                flush=True,
-            )
-            traceback.print_exc()
+    #             except Exception as e:
+    #                 main_app_logger.info(
+    #                     f" [WRITER-EXCEPTION] Worker engine cycle processing failure: {e}",
+    #                 )
+    #                 continue
+
+    #         if hasattr(self, "socket_path") and os.path.exists(self.socket_path):
+    #             try:
+    #                 os.remove(self.socket_path)
+    #             except Exception:
+    #                 pass
+
+    #         self.writer_done = True
+    #         main_app_logger.info(
+    #             " [WRITER-LOOP] Thread pool queue completely drained. Processing safe exit termination sequence...",
+    #         )
+
+    #     except Exception as fatal_err:
+    #         main_app_logger.info(
+    #             f"[FATAL-WRITER-CRASH] Unhandled background crash: {fatal_err}",
+    #         )
+    #         traceback.print_exc()
 
     def _evaluate_barrier_and_dispatch(self, clip_key, clip_path, frame_w, frame_h):
         """
@@ -4039,14 +4367,23 @@ class DeviceBaseHandler:
         # Check convergence layout: Trigger upload sequence only if both pipelines sealed operations
         if tracker["video"] and tracker["meta"]:
             if self.config.DEBUG_FLAG:
-                print(
+                main_app_logger.info(
                     f" [BARRIER-CONVERGENCE] Fully synchronized state reached for asset: {clip_key}",
-                    flush=True,
                 )
 
             # Extract and unmap metadata tracking payloads safely from shared RAM memory space
-            clip_metadata = all_metadata.pop(clip_key, None)
-            clip_completion_tracker.pop(clip_key, None)
+            # clip_metadata = all_metadata.pop(clip_key, None)
+            # clip_completion_tracker.pop(clip_key, None)
+            clip_metadata = all_metadata.get(clip_key)
+            # Immediately delete the data from the global dictionaries to release VRAM
+            if clip_key in all_metadata:
+                del all_metadata[clip_key]
+            if clip_key in clip_completion_tracker:
+                del clip_completion_tracker[clip_key]
+
+            gc.collect()
+            if "cuda" in self.device_input:
+                torch.cuda.empty_cache()
 
             if not self.config.TEST_MODE and clip_metadata:
                 # Re-insert the fully constructed framework into the active VDMS queue worker pool
@@ -4059,14 +4396,12 @@ class DeviceBaseHandler:
                     global send_metadata_queue
                     send_metadata_queue.put((clip_path, frame_w, frame_h))
 
-                print(
+                main_app_logger.info(
                     f" [BARRIER-INGEST] Unified data packages successfully submitted for DB processing: {clip_key}",
-                    flush=True,
                 )
             elif not self.config.TEST_MODE:
-                print(
+                main_app_logger.info(
                     f" [BARRIER-WARN] Synchronization completed but all_metadata structure for {clip_key} was empty!",
-                    flush=True,
                 )
         elif not self.config.TEST_MODE:
             waiting_on = (
@@ -4074,208 +4409,12 @@ class DeviceBaseHandler:
                 if not tracker["video"]
                 else "AI frame processing execution"
             )
-            print(
+            main_app_logger.info(
                 f" [BARRIER-WAIT] {clip_key}: Milestone checked. Awaiting {waiting_on} before issuing DB ingestion call.",
-                flush=True,
             )
 
 
 class GPUStreamHandler(DeviceBaseHandler):
-    def allocate_gpu(self):
-        """
-        Allocates persistent GpuMat buffers and CUDA streams to
-        enable zero-copy GPU processing.
-        """
-        self.stream = cv2.cuda.Stream()
-        self.ingest_stream = torch.cuda.Stream()
-        self.inference_stream = torch.cuda.Stream()
-        self.bgs_stream = cv2.cuda.Stream()
-        self.gpu_fullres_frame = cv2.cuda.GpuMat(
-            self.frame_height, self.frame_width, cv2.CV_8UC3
-        )
-        # self.resized_gpumat = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8UC3)
-        self.resized_frame = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8UC3)
-        self.resized_frame.setTo(0, self.bgs_stream)
-        self.fgMask = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8UC1)
-        self.prev_bkgd = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8UC1)
-        if self.config.BKGD_SUB_INCLUDE_HISTORY_METHOD == "and":
-            self.prev_bkgd.setTo((1,))
-        else:
-            self.prev_bkgd.setTo((0,))
-        self.mask_history = deque(
-            maxlen=self.config.BKGD_SUB_INCLUDE_HISTORY_TEMPORAL_SIZE
-        )
-        self.mask_history.append(self.prev_bkgd)
-        self.gpu_threshold_dst_frame = cv2.cuda.GpuMat(
-            self.resize_h, self.resize_w, cv2.CV_8UC1
-        )
-        self.gpu_morphed_frame = cv2.cuda.GpuMat(
-            self.resize_h, self.resize_w, cv2.CV_8UC1
-        )
-
-        self.upload_stream = cv2.cuda.Stream()
-        self.upload_event = cv2.cuda.Event()
-
-        # self.queue_capacity = int(2 * self.target_fps)  # 60
-        self.num_buffers = int(2 * self.target_fps)  # self.queue_capacity + 5
-        self.gpu_buffer_pool = [
-            cv2.cuda.GpuMat(self.frame_height, self.frame_width, cv2.CV_8UC3)
-            for _ in range(self.num_buffers)
-        ]
-        self.buffer_idx = 0
-
-        self.frame_buffer_pool = [
-            torch.empty(
-                (3, self.frame_height, self.frame_width),
-                dtype=torch.uint8,
-                device="cuda",
-            )
-            for _ in range(2)
-        ]
-        self.pool_idx = 0
-
-        # Create a matching pool of pinned host memory for the 8K frames
-        self.host_buffer_pool = [
-            cv2.cuda.HostMem(self.frame_height, self.frame_width, cv2.CV_8UC3)
-            for _ in range(self.num_buffers)
-        ]
-
-        # Create continuous buffers to prevent stride artifacts during 8K downloads
-        self.pinned_downloaded_resizedframe_np = cv2.cuda.createContinuous(
-            self.resize_h, self.resize_w, cv2.CV_8UC3
-        )
-        self.pinned_downloaded_frame_np = cv2.cuda.createContinuous(
-            self.resize_h, self.resize_w, cv2.CV_8UC1
-        )
-        cv2.cuda.createContinuous(
-            self.resize_h, self.resize_w, cv2.CV_8UC1, self.gpu_threshold_dst_frame
-        )
-        cv2.cuda.createContinuous(
-            self.resize_h, self.resize_w, cv2.CV_8UC1, self.gpu_morphed_frame
-        )
-
-        # This prevents the AI thread from overwriting the encoder's data.
-        self.gpu_encoder_8k_buf = cv2.cuda.createContinuous(
-            self.frame_height, self.frame_width, cv2.CV_8UC3
-        )
-
-        # Continuous allocation prevents stride/padding artifacts
-        self.gpu_display_frame = cv2.cuda.createContinuous(
-            self.disp_h, self.disp_w, cv2.CV_8UC3
-        )
-
-        # Create a dedicated background stream for encoding tasks
-        self.encode_stream = cv2.cuda.Stream()
-
-        # Allocate a permanent float32/float16 channel layout space directly on VRAM
-        self.static_gpu_360p = torch.empty(
-            (1, 3, self.disp_h, self.disp_w),
-            dtype=torch.float32,
-            device="cuda",
-        )
-        self.static_gpu_byte_bchw = torch.empty(
-            (1, 3, self.disp_h, self.disp_w),
-            dtype=torch.uint8,
-            device="cuda",
-        ).contiguous()
-
-        # Create two isolated tracking canvases to handle the ping-pong data stream
-        self.static_host_canvases = [
-            np.zeros((self.disp_h, self.disp_w, 3), dtype=np.uint8),
-            np.zeros((self.disp_h, self.disp_w, 3), dtype=np.uint8),
-        ]
-        self.canvas_selector = 0
-
-        # Register BOTH buffers as page-locked memory
-        cv2.cuda.registerPageLocked(self.static_host_canvases[0])
-        cv2.cuda.registerPageLocked(self.static_host_canvases[1])
-
-    def prepare_gpu_pipeline(self):
-        self.operation_device_map = PipelineMapping(
-            resize_device="gpu",
-            bkgd_subtraction_device="gpu",
-            threshold_device="gpu",
-            erodeAndDilate_device="gpu",
-            detection_device="gpu",
-        )  # rbtd_detection_gpu
-
-        self.device_input = "cuda"
-
-        self.allocate_gpu()
-
-        # Subtraction
-        # history = int(2 * self.target_fps)  # 300  # int(5 * self.target_fps)
-        self.lr = self.config.BKGD_SUB_MOG2_LR  # 1 / history
-        self.backSub = cv2.cuda.createBackgroundSubtractorMOG2(
-            history=self.config.BKGD_SUB_MOG2_HISTORY,  # Clear ghosts of fast drones in ~2 seconds (2*fps)
-            varThreshold=int(
-                1.15 * self.config.BKGD_SUB_MOG2_VARTHRESHOLD
-            ),  # High threshold to ignore "shimmer" and compression noise  # default 16
-            # CUDA implementation of MOG2 often requires a higher varThreshold to achieve the same "cleanliness" as the CPU (15-20%)
-            detectShadows=self.config.BKGD_SUB_MOG2_DETECTSHADOWS,  # default True
-        )
-
-        self.dilate_filter = cv2.cuda.createMorphologyFilter(
-            cv2.MORPH_DILATE, cv2.CV_8U, self.dilate_kernel
-        )
-        self.dilate_filter_for_enhanced_mask = cv2.cuda.createMorphologyFilter(
-            cv2.MORPH_DILATE, cv2.CV_8UC1, self.dilate_kernel_for_enhanced_mask
-        )
-        # # self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        # self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        # self.morph_filter = cv2.cuda.createMorphologyFilter(
-        #     cv2.MORPH_DILATE, cv2.CV_8UC1, self.morph_kernel
-        # )
-        # self.labels_gpu = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_32S)
-        self.labels_gpu = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8U)
-        self.labels_gpu.setTo(0, self.bgs_stream)
-
-    def gpu_warmup(self):
-        # WARM UP (Crucial for first-run latency)
-        # JIT kernels are compiled on the first call
-        h, w = self.resize_h, self.resize_w
-
-        self.gpu_warmup_input_frame_np = cv2.cuda.createContinuous(h, w, cv2.CV_8UC3)
-
-        if self.gpu_warmup_input_frame_np is not None:
-            self.gpu_warmup_input_frame_np[:] = [255, 0, 0]
-
-            gpu_warmup_input_frame = cv2.cuda.GpuMat(h, w, cv2.CV_8U)
-            gpu_warmup_input_frame.upload(self.gpu_warmup_input_frame_np)
-            cv2.cuda.createContinuous(h, w, cv2.CV_8U, gpu_warmup_input_frame)
-
-            # Trigger compiler
-            gpu_warmup_frame = cv2.cuda.GpuMat(h, w, cv2.CV_8U)
-            cv2.cuda.createContinuous(h, w, cv2.CV_8U, gpu_warmup_frame)
-
-            cv2.cuda.resize(
-                gpu_warmup_input_frame,
-                (self.resize_w, self.resize_h),
-                stream=self.stream,
-                dst=gpu_warmup_frame,
-                interpolation=cv2.INTER_NEAREST,
-            )
-            # Thresholding
-            gpu_threshold_dst_frame = cv2.cuda.GpuMat(h, w, cv2.CV_8U)
-            cv2.cuda.createContinuous(h, w, cv2.CV_8U, gpu_threshold_dst_frame)
-            cv2.cuda.threshold(
-                gpu_warmup_frame,
-                self.config.THRESHOLD_VALUE,
-                self.config.THRESHOLD_MAX_VALUE,
-                cv2.THRESH_BINARY,
-                gpu_threshold_dst_frame,
-                self.stream,
-            )
-
-            gpu_morphed_frame = cv2.cuda.GpuMat(h, w, cv2.CV_8U)
-            cv2.cuda.createContinuous(h, w, cv2.CV_8U, gpu_morphed_frame)
-            self.dilate_filter.apply(
-                gpu_threshold_dst_frame, gpu_morphed_frame, self.stream
-            )
-            self.stream.waitForCompletion()
-
-        torch.cuda.empty_cache()
-
     def cleanup_gpu(self):
         """
         Explicitly releases all GPU-allocated memory to prevent
@@ -4290,7 +4429,7 @@ class GPUStreamHandler(DeviceBaseHandler):
                 # 🏎️ Force the NVIDIA driver to deallocate this specific memory segment
                 attr_value.release()
                 setattr(self, attr_name, None)
-                print(f"✅ Released GpuMat: {attr_name}")
+                main_app_logger.info(f"✅ Released GpuMat: {attr_name}")
 
         if hasattr(self, "gpu_fullres_frame") and self.gpu_fullres_frame is not None:
             try:
@@ -4328,8 +4467,8 @@ class GPUStreamHandler(DeviceBaseHandler):
                     mat.release()
             self.gpu_crop_batch = []
 
-        if hasattr(self, "stream"):
-            self.stream.waitForCompletion()
+        # if hasattr(self, "stream"):
+        #     self.stream.waitForCompletion()
 
         self.pinned_downloaded_resizedframe_np = None
         self.gpu_threshold_dst_frame = None
@@ -4346,549 +4485,21 @@ class GPUStreamHandler(DeviceBaseHandler):
 
         # Optional: Final flush of the CUDA caching allocator
         if torch.cuda.is_available():
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
-
-    def apply_background_subtraction_gpuv1(
-        self, include_history=True, method="and", stream=None
-    ):
-        stream = stream if isinstance(stream, cv2.cuda.Stream) else self.stream
-        self.fgMask = self.backSub.apply(
-            self.resized_frame, float(self.lr), stream=stream
-        )
-
-        if include_history:
-            # If this is the first run, clone the mask instead of ANDing with an empty/white buffer
-            # if len(self.mask_history) < 1:
-            #     self.prev_bkgd.setTo(255, stream)  # Clear the initial white buffer
-
-            for m in list(self.mask_history):
-                # Dilate the historical mask on GPU
-                dilated = self.dilate_filter_for_enhanced_mask.apply(m, stream=stream)
-
-                if method == "or":
-                    # Bitwise OR on GPU
-                    cv2.cuda.bitwise_or(
-                        self.prev_bkgd, dilated, self.prev_bkgd, stream=stream
-                    )
-                else:
-                    # Bitwise AND on GPU
-                    cv2.cuda.bitwise_and(
-                        self.prev_bkgd, dilated, self.prev_bkgd, stream=stream
-                    )
-
-            self.mask_history.append(self.fgMask.clone())
-
-            min_val, max_val, _, _ = cv2.cuda.minMaxLoc(self.prev_bkgd)
-            if max_val != min_val and max_val > 0:
-                # bitor = cv2.cuda.bitwise_or(
-                #     self.fgMask, self.prev_bkgd, stream=stream
-                # )
-                # bitand = cv2.cuda.bitwise_and(
-                #     self.fgMask, self.prev_bkgd, stream=stream
-                # )
-                # not_bitand = cv2.cuda.bitwise_not(self.prev_bkgd, stream=stream)
-                # self.fgMask = cv2.cuda.subtract(self.fgMask, bitand, stream=stream)
-                self.fgMask = cv2.cuda.bitwise_or(
-                    self.fgMask, self.prev_bkgd, stream=stream
-                )
-                # self.fgMask = cv2.cuda.bitwise_or(
-                #     self.fgMask, self.mask_history[-2], stream=stream
-                # )
-                # if method == "or":
-                #     self.fgMask = cv2.cuda.bitwise_and(
-                #         self.fgMask, self.prev_bkgd, stream=stream
-                #     )
-                # else:
-                #     self.fgMask = cv2.cuda.bitwise_or(
-                #         self.fgMask, self.prev_bkgd, stream=stream
-                #     )
-
-    def apply_background_subtraction_gpu(
-        self, motion_input, include_history=True, method="and", stream=None
-    ):
-        stream = stream if isinstance(stream, cv2.cuda.Stream) else self.stream
-        raw_mask = self.backSub.apply(
-            motion_input,
-            0.005,  # float(self.lr),
-            stream=stream,
-        )
-
-        if include_history:
-            # If this is the first run, clone the mask instead of ANDing with an empty/white buffer
-            # if len(self.mask_history) < 1:
-            #     self.prev_bkgd.setTo(255, stream)  # Clear the initial white buffer
-            self.prev_bkgd.setTo(0, stream=self.bgs_stream)
-            for m in list(self.mask_history):
-                # Dilate the historical mask on GPU
-                dilated = self.dilate_filter_for_enhanced_mask.apply(m, stream=stream)
-
-                if method == "or":
-                    # Bitwise OR on GPU
-                    cv2.cuda.bitwise_or(
-                        self.prev_bkgd, dilated, self.prev_bkgd, stream=stream
-                    )
-                else:
-                    # Bitwise AND on GPU
-                    cv2.cuda.bitwise_and(
-                        self.prev_bkgd, dilated, self.prev_bkgd, stream=stream
-                    )
-
-            self.mask_history.append(raw_mask.clone())
-            raw_mask = cv2.cuda.bitwise_or(
-                raw_mask, self.prev_bkgd, stream=self.bgs_stream
-            )
-            return raw_mask
-
-            # min_val, max_val, _, _ = cv2.cuda.minMaxLoc(self.prev_bkgd)
-            # if max_val != min_val and max_val > 0:
-            #     # bitor = cv2.cuda.bitwise_or(
-            #     #     self.fgMask, self.prev_bkgd, stream=stream
-            #     # )
-            #     # bitand = cv2.cuda.bitwise_and(
-            #     #     self.fgMask, self.prev_bkgd, stream=stream
-            #     # )
-            #     # not_bitand = cv2.cuda.bitwise_not(self.prev_bkgd, stream=stream)
-            #     # self.fgMask = cv2.cuda.subtract(self.fgMask, bitand, stream=stream)
-            #     self.fgMask = cv2.cuda.bitwise_or(
-            #         self.fgMask, self.prev_bkgd, stream=stream
-            #     )
-            #     # self.fgMask = cv2.cuda.bitwise_or(
-            #     #     self.fgMask, self.mask_history[-2], stream=stream
-            #     # )
-            #     # if method == "or":
-            #     #     self.fgMask = cv2.cuda.bitwise_and(
-            #     #         self.fgMask, self.prev_bkgd, stream=stream
-            #     #     )
-            #     # else:
-            #     #     self.fgMask = cv2.cuda.bitwise_or(
-            #     #         self.fgMask, self.prev_bkgd, stream=stream
-            #     #     )
-
-    def rbtd_full_gpuv1(self, frame):
-        """
-        GPU-Accelerated Motion Detection Pipeline (Producer).
-
-        This function performs high-speed background subtraction (BGS) on a downscaled
-        version of the 8K frame to identify regions of interest (ROIs).
-
-        Args:
-            frame (np.ndarray): The raw 8K input frame.
-            frameNum (float): Chronological timestamp or ID.
-
-        Returns:
-            dict: Contains the frame ID, the GPU-resident motion mask, and the original 8K frame.
-        """
-        # stream = self.stream
-
-        with torch.no_grad():  # , torch.cuda.stream(self.bgs_stream):
-            # frame is [3, 4320, 7680]
-            resized_torch = F.interpolate(
-                frame.unsqueeze(0).float(),
-                size=(self.resize_h, self.resize_w),
-                mode="nearest",
-                # mode="bilinear",
-                # align_corners=False,
-            ).squeeze(0)
-            # resized_torch = F.interpolate(
-            #     frame.to(memory_format=torch.channels_last),
-            #     size=(self.resize_h, self.resize_w),
-            #     mode="nearest",
-            #     # align_corners=False
-            # )
-
-            # CRITICAL: Change format from [3, 640, 640] to [640, 640, 3]
-            # .contiguous() is mandatory here to reorganize the actual memory bits
-            resized_torch = resized_torch.permute(1, 2, 0).byte().contiguous()
-            gpu_mat_view = cv2.cuda.createGpuMatFromCudaMemory(
-                self.resize_h, self.resize_w, cv2.CV_8UC3, resized_torch.data_ptr()
-            )
-
-            # Bridge the TINY 640p frame to OpenCV
-            # Moving 8K (100MB) to CPU takes 114ms.
-            # Moving 640p (1.2MB) to CPU takes <0.2ms.
-            # This preserves your 15 FPS target.
-            # small_cpu = resized_torch.permute(1, 2, 0).cpu().numpy()
-            # self.resized_frame.upload(small_cpu)
-            # gpu_mat_bridge = torch2gpumat(resized_torch.byte())
-            gpu_mat_view.copyTo(self.bgs_stream, self.resized_frame)
-            self.apply_background_subtraction_gpu(
-                include_history=self.config.BKGD_SUB_INCLUDE_HISTORY,
-                method=self.config.BKGD_SUB_INCLUDE_HISTORY_METHOD,
-                stream=self.bgs_stream,
-            )
-
-        # Clean up the motion mask using Thresholding and Morphology (Dilation)
-        # Fused Cleanup (Threshold + Dilate)
-        # This replaces: cv2.cuda.threshold AND cv2.cuda.dilate
-        w, h = self.fgMask.size()
-        pitch = self.fgMask.step
-        tpb = (16, 16)
-        bpg = ((w + 15) // 16, (h + 15) // 16)
-
-        # Bridge GpuMat to CuPy for the kernel
-        fg_ptr = self.fgMask.cudaPtr()
-        with cupy.cuda.ExternalStream(self.bgs_stream.cudaPtr()):
-            fg_cp = cupy.ndarray(
-                (h, w),
-                dtype=cupy.uint8,
-                memptr=cupy.cuda.MemoryPointer(
-                    cupy.cuda.UnownedMemory(fg_ptr, pitch * h, self), 0
-                ),
-                strides=(pitch, 1),
-            )
-
-            # Launch Fused Kernel
-            labels_ptr = self.labels_gpu.cudaPtr()
-            # Ensure this matches the size of fg_cp
-            labels_cp = cupy.ndarray(
-                (h, w),
-                dtype=cupy.uint8,
-                memptr=cupy.cuda.MemoryPointer(
-                    cupy.cuda.UnownedMemory(labels_ptr, self.labels_gpu.step * h, self),
-                    0,
-                ),
-                strides=(self.labels_gpu.step, 1),
-            )
-            # with cupy.cuda.ExternalStream(self.stream.cudaPtr()):
-            # Launch your kernel on the same physical GPU stream as OpenCV BGS
-            DETECTION_ACCEL_KERNEL(
-                bpg,
-                tpb,
-                (fg_cp, labels_cp, pitch, w, h, self.config.THRESHOLD_VALUE),
-            )
-            # Ensure CuPy is done before the stream returns to OpenCV/PyTorch
-            # cupy.cuda.get_current_stream().synchronize()
-
-        # if self.debug_range[0] <= self.frame_count <= self.debug_range[1]:
-        #     after_cpu = self.labels_gpu.download()
-        #     # Multiply by 50 to make distinct object labels visible
-        #     visible_labels = (after_cpu * 50).clip(0, 255).astype(np.uint8)
-        #     cv2.imwrite(
-        #         f"{self.out_imgdir}/mask_AFTER_frame_{self.frame_count}.png",
-        #         visible_labels,
-        #     )
-
-        return {
-            # "frameNum": frameNum,  # overall frame
-            "mask": self.labels_gpu,  # GpuMat pointer to cleaned mask
-            # "full_frame": frame,  # Kept for high-res cropping
-            "full_frame": frame,  # current_gpu_frame,
-        }
-
-    def rbtd_full_gpu(self, device_frame):
-        """
-        Asynchronously handles downsampling, conversion, background subtraction, and
-        morphology while writing out intermediate files for stage-by-stage debugging.
-        """
-        if self.config.DEBUG_FLAG:
-            # Create a dedicated directory structure for this stage's debug snapshots
-            stage_debug_dir = self.result_dir / "debug_stages" / self._testMethodName
-            stage_debug_dir.mkdir(parents=True, exist_ok=True)
-        f_num = self.frame_count_target
-
-        # 1. BRIDGE THE PYTORCH TO OPENCV VRAM GAP (ZERO-COPY & STRIDE-ALIGNED)
-        if torch.is_tensor(device_frame):
-            h_raw, w_raw, ch = device_frame.shape
-            cuda_mem_ptr = device_frame.data_ptr()
-            cv_type = cv2.CV_8UC3 if ch == 3 else cv2.CV_8UC1
-
-            # Explicitly pass structural step row pitch to avoid memory tearing artifacts
-            row_step_bytes = device_frame.stride()[0] * device_frame.element_size()
-            src_gpu_mat = cv2.cuda.createGpuMatFromCudaMemory(
-                h_raw, w_raw, cv_type, cuda_mem_ptr, step=row_step_bytes
-            )
-        else:
-            src_gpu_mat = device_frame
-            ch = src_gpu_mat.channels()
-
-        # [STAGE 1 DEBUG] Save incoming source frame immediately after GpuMat mapping
-        if self.config.DEBUG_FLAG and f_num <= self.config.DEBUG_FRAME_LIMIT:
-            src_cpu = src_gpu_mat.download()
-            # If the source is in RGB, flip channels to BGR so cv2.imwrite saves true colors
-            if ch == 3:
-                src_cpu = cv2.cvtColor(src_cpu, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(
-                str(stage_debug_dir / f"frame_{f_num:04d}_stage1_src.jpg"), src_cpu
-            )
-
-        # 2. INSTANTIATE GPUMAT CONTROLLERS WITH STRIDED LAYOUT HEADERS
-        recycled_resize_mat = cv2.cuda.GpuMat(
-            self.resize_h, self.resize_w, cv2.CV_8UC3 if ch == 3 else cv2.CV_8UC1
-        )
-        gray_resize_mat = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8UC1)
-        raw_mask = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8UC1)
-        thresh_mask = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8UC1)
-        clean_mask = cv2.cuda.GpuMat(self.resize_h, self.resize_w, cv2.CV_8UC1)
-
-        # 3. RUN ASYNCHRONOUS DOWN-SAMPLING GATE
-        cv2.cuda.resize(
-            src_gpu_mat,
-            dst=recycled_resize_mat,
-            dsize=(self.resize_w, self.resize_h),
-            interpolation=cv2.INTER_NEAREST,
-            stream=self.bgs_stream,
-        )
-
-        # [STAGE 2 DEBUG] Check Downsampled Frame
-        if self.config.DEBUG_FLAG and f_num <= self.config.DEBUG_FRAME_LIMIT:
-            self.bgs_stream.waitForCompletion()  # Synchronize stream briefly to download safely
-            resize_cpu = recycled_resize_mat.download()
-            if ch == 3:
-                resize_cpu = cv2.cvtColor(resize_cpu, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(
-                str(stage_debug_dir / f"frame_{f_num:04d}_stage2_resize.jpg"),
-                resize_cpu,
-            )
-
-        # 4. COLOR LAYOUT CORRECTION (COLLAPSE CHANNELS SAFELY)
-        if recycled_resize_mat.channels() == 3:
-            # NOTE: If your input tensor is RGB, use COLOR_RGB2GRAY.
-            # If it's already converted to BGR inside your framework handlers, keep COLOR_BGR2GRAY.
-            cv2.cuda.cvtColor(
-                recycled_resize_mat,
-                cv2.COLOR_BGR2GRAY,
-                dst=gray_resize_mat,
-                stream=self.bgs_stream,
-            )
-            motion_input = gray_resize_mat
-        else:
-            motion_input = recycled_resize_mat
-
-        # [STAGE 3 DEBUG] Check Grayscale Input going into Background Subtractor
-        if self.config.DEBUG_FLAG and f_num <= self.config.DEBUG_FRAME_LIMIT:
-            self.bgs_stream.waitForCompletion()
-            gray_cpu = motion_input.download()
-            cv2.imwrite(
-                str(stage_debug_dir / f"frame_{f_num:04d}_stage3_gray.jpg"), gray_cpu
-            )
-
-        # 5. EXECUTE BACKGROUND SUBTRACTION
-        # raw_mask = self.backSub.apply(
-        #     motion_input,
-        #     0.005,  # float(self.lr)
-        #     stream=self.bgs_stream,
-        # )
-
-        raw_mask = self.apply_background_subtraction_gpu(
-            motion_input,
-            include_history=self.config.BKGD_SUB_INCLUDE_HISTORY,
-            method=self.config.BKGD_SUB_INCLUDE_HISTORY_METHOD,
-            stream=self.bgs_stream,
-        )
-        # [STAGE 4 DEBUG] Check Raw Output directly from Subtractor Kernel
-        # if self.config.DEBUG_FLAG and f_num <= self.config.DEBUG_FRAME_LIMIT:
-        #     self.bgs_stream.waitForCompletion()
-        #     raw_mask_cpu = raw_mask.download()
-        #     cv2.imwrite(str(stage_debug_dir / f"frame_{f_num:04d}_stage4_raw_mask.jpg"), raw_mask_cpu)
-
-        # 6. MASK HISTORY ACCUMULATION LIFECYCLE
-        # include_history = self.config.BKGD_SUB_INCLUDE_HISTORY
-        # method = self.config.BKGD_SUB_INCLUDE_HISTORY_METHOD
-        # if include_history:
-        #     self.prev_bkgd.setTo(0, stream=self.bgs_stream)
-        #     for m in list(self.mask_history):
-        #         dilated = self.dilate_filter_for_enhanced_mask.apply(
-        #             m, stream=self.bgs_stream
-        #         )
-        #         if method == "or":
-        #             cv2.cuda.bitwise_or(
-        #                 self.prev_bkgd, dilated, self.prev_bkgd, stream=self.bgs_stream
-        #             )
-        #         else:
-        #             cv2.cuda.bitwise_and(
-        #                 self.prev_bkgd, dilated, self.prev_bkgd, stream=self.bgs_stream
-        #             )
-
-        #     self.mask_history.append(raw_mask.clone())
-        #     raw_mask = cv2.cuda.bitwise_or(
-        #         raw_mask, self.prev_bkgd, stream=self.bgs_stream
-        #     )
-
-        # [STAGE 5 DEBUG] Check Mask after History ORing/ANDing steps
-        if self.config.DEBUG_FLAG and f_num <= self.config.DEBUG_FRAME_LIMIT:
-            self.bgs_stream.waitForCompletion()
-            hist_mask_cpu = raw_mask.download()
-            cv2.imwrite(
-                str(stage_debug_dir / f"frame_{f_num:04d}_stage5_history_mask.jpg"),
-                hist_mask_cpu,
-            )
-
-        # 7. MORPHOLOGICAL TRANSFORMATIONS & BINARY FILTERS
-        cv2.cuda.threshold(
-            raw_mask,
-            self.config.THRESHOLD_VALUE,
-            self.config.THRESHOLD_MAX_VALUE,
-            cv2.THRESH_BINARY,
-            thresh_mask,
-            stream=self.bgs_stream,
-        )
-
-        # [STAGE 6 DEBUG] Check Binary Threshold Output
-        if self.config.DEBUG_FLAG and f_num <= self.config.DEBUG_FRAME_LIMIT:
-            self.bgs_stream.waitForCompletion()
-            thresh_cpu = thresh_mask.download()
-            cv2.imwrite(
-                str(stage_debug_dir / f"frame_{f_num:04d}_stage6_threshold.jpg"),
-                thresh_cpu,
-            )
-
-        self.dilate_filter.apply(thresh_mask, clean_mask, self.bgs_stream)
-
-        # 8. ENFORCE INDEPENDENT WORKSPACE MEMORY VIEWS
-        isolated_kernel_mask = cv2.cuda.GpuMat(
-            self.resize_h, self.resize_w, cv2.CV_8UC1
-        )
-        clean_mask.copyTo(dst=isolated_kernel_mask, stream=self.bgs_stream)
-
-        # [STAGE 7 DEBUG] Check Final Dilated Output Mask
-        if self.config.DEBUG_FLAG and f_num <= self.config.DEBUG_FRAME_LIMIT:
-            self.bgs_stream.waitForCompletion()
-            final_mask_cpu = isolated_kernel_mask.download()
-            cv2.imwrite(
-                str(stage_debug_dir / f"frame_{f_num:04d}_stage7_final_mask.jpg"),
-                final_mask_cpu,
-            )
-
-        return {
-            "mask": isolated_kernel_mask,
-            "full_frame": device_frame,
-        }
-
-    def findContours_gpu(self, mask, method="fused"):
-        # self.stream.waitForCompletion()
-        h, w = mask.size()
-        ptr = mask.cudaPtr()
-        pitch = mask.step
-        mask_cp = cupy.ndarray(
-            (h, w),
-            dtype=cupy.uint8,
-            memptr=cupy.cuda.MemoryPointer(
-                cupy.cuda.UnownedMemory(ptr, pitch * h, self), 0
-            ),
-            strides=(pitch, 1),
-        )
-
-        labeled, num_labels = cupyx.scipy.ndimage.label(mask_cp, output=cupy.int32)
-        # labeled = labeled.astype(cupy.int32)
-        # labeled.strides is in bytes. For int32, we need row-start in bytes.
-        labeled_pitch_bytes = labeled.strides[0]
-
-        if num_labels == 0:
-            return torch.empty((0, 4), device="cuda")
-
-        # Pre-allocate bounds with sentinels
-        x1, y1 = (
-            cupy.full((num_labels + 1,), w, dtype=cupy.int32),
-            cupy.full((num_labels + 1,), h, dtype=cupy.int32),
-        )
-        x2, y2 = (
-            cupy.full((num_labels + 1,), -1, dtype=cupy.int32),
-            cupy.full((num_labels + 1,), -1, dtype=cupy.int32),
-        )
-
-        # BOUNDS_KERNEL(((w+15)//16, (h+15)//16), (16, 16), (labeled, w, h, num_labels, x1, y1, x2, y2))
-        BOUNDS_KERNEL(
-            ((w + 15) // 16, (h + 15) // 16),
-            (16, 16),
-            (
-                labeled.data.ptr,
-                labeled_pitch_bytes,
-                w,
-                h,
-                num_labels,
-                x1.data.ptr,
-                y1.data.ptr,
-                x2.data.ptr,
-                y2.data.ptr,
-            ),
-        )
-        # cupy.cuda.get_current_stream().synchronize()
-        # cupy.cuda.Stream.null.synchronize()
-        # Convert to torch
-        boxes = torch.stack(
-            [
-                torch.as_tensor(x1[1:], device="cuda"),
-                torch.as_tensor(y1[1:], device="cuda"),
-                torch.as_tensor(x2[1:], device="cuda"),
-                torch.as_tensor(y2[1:], device="cuda"),
-            ],
-            dim=1,
-        ).float()
-
-        # --- CRITICAL FIX: Filter out boxes that weren't updated by the kernel ---
-        # A valid box must have x2 >= x1
-        valid_mask = boxes[:, 2] >= boxes[:, 0]
-        boxes = boxes[valid_mask]
-
-        # if boxes.shape[0] > 0:
-        #     print(f"[GPU] Found {boxes.shape[0]} boxes", flush=True)
-        return boxes
 
 
 class CPUStreamHandler(DeviceBaseHandler):
-    def allocate_cpu(self):
-        # pass
-        self.resized_frame = np.zeros((3, self.resize_h, self.resize_w), dtype="uint8")
-        # cv2.cuda.createContinuous(
-        #     self.resize_h, self.resize_w, cv2.CV_8UC3
-        # )
-
-        self.fgMask = np.zeros(
-            (self.resize_h, self.resize_w), dtype="uint8"
-        )  # For resize
-
-        if self.config.BKGD_SUB_INCLUDE_HISTORY_METHOD == "and":
-            self.prev_bkgd = np.ones(
-                (self.resize_h, self.resize_w), dtype="uint8"
-            )  # * 255
-        else:
-            self.prev_bkgd = np.zeros((self.resize_h, self.resize_w), dtype="uint8")
-
-        # self.prev_bkgd = np.ones((self.resize_h, self.resize_w), dtype="uint8") * 255
-
-        self.mask_history = deque(
-            maxlen=self.config.BKGD_SUB_INCLUDE_HISTORY_TEMPORAL_SIZE
-        )
-        self.mask_history.append(self.prev_bkgd)
-
-    def prepare_cpu_pipeline(self):  # , method="mog2"):
-        self.operation_device_map = PipelineMapping()  # "full_cpu"
-        self.device_input = self.operation_device_map.detection_device
-
-        self.allocate_cpu()
-
-        # Subtraction
-        # if method == "knn":
-        #     history = 300  # int(5 * self.target_fps)
-        #     background_thresh = 350
-        #     NSamples = 10
-        #     kNNSamples = 2
-        #     self.lr = 1 / history
-
-        #     self.backSub = cv2.createBackgroundSubtractorKNN(
-        #         history=history,  # default 500
-        #         dist2Threshold=background_thresh,  # default 400
-        #         detectShadows=False,  # default True
-        #     )
-        #     self.backSub.setkNNSamples(kNNSamples)
-        #     self.backSub.setNSamples(NSamples)
-        # elif method == "mog2":
-        # history = int(2 * self.target_fps)
-        # background_thresh = 10
-        self.lr = self.config.BKGD_SUB_MOG2_LR
-
-        self.backSub = cv2.createBackgroundSubtractorMOG2(
-            history=self.config.BKGD_SUB_MOG2_HISTORY,  # Clear ghosts of fast drones in ~2 seconds (2*fps)
-            varThreshold=self.config.BKGD_SUB_MOG2_VARTHRESHOLD,  # High threshold to ignore "shimmer" and compression noise  # default 16
-            detectShadows=self.config.BKGD_SUB_MOG2_DETECTSHADOWS,  # default True
-        )
-        # else:
-        #     raise ValueError(f"Provided method ({method}) is not available.")
-
     def cleanup_cpu(self):
         """
         Purges large 8K NumPy buffers and CPU-based AI resources.
         """
+        self._pinned_small_frame = None
+        self._pinned_fg_mask = None
+        self._pinned_blurred_mask = None
+        self._pinned_threshold_mask = None
+        self._pinned_dilated_mask = None
+
         # Nullify specific class references to allow Garbage Collection
         self.executor = None
         self.clip_executor = None
@@ -4907,225 +4518,3 @@ class CPUStreamHandler(DeviceBaseHandler):
         # Clear the BGS history
         if hasattr(self, "mask_history"):
             self.mask_history.clear()
-
-    def apply_background_subtraction_cpuv1(self, include_history=True, method="and"):
-        self.fgMask = self.backSub.apply(
-            self.cpu_resized_frame, learningRate=float(self.lr)
-        )
-
-        if include_history:
-            # If this is the first run, clone the mask instead of ANDing with an empty/white buffer
-            # if len(self.mask_history) < 1:
-            #     self.prev_bkgd.setTo(0, stream)  # Clear the initial white buffer
-
-            for m in list(self.mask_history):
-                # Dilate the historical mask on CPU
-                dilated = cv2.dilate(
-                    m, self.dilate_kernel_for_enhanced_mask, iterations=1
-                )
-
-                if method == "or":
-                    # Bitwise OR on CPU
-                    cv2.bitwise_or(self.prev_bkgd, dilated, dst=self.prev_bkgd)
-                else:
-                    # Bitwise AND on CPU
-                    cv2.bitwise_and(self.prev_bkgd, dilated, dst=self.prev_bkgd)
-
-            self.mask_history.append(self.fgMask.copy())
-
-            if (
-                self.prev_bkgd.max() != self.prev_bkgd.min()
-                and self.prev_bkgd.max() > 0
-            ):
-                combined_mask_bool = (self.fgMask > 0) | (self.prev_bkgd > 0)
-                self.fgMask = combined_mask_bool.astype(np.uint8) * 255
-
-    def apply_background_subtraction_cpu(
-        self, motion_input, include_history=True, method="and"
-    ):
-        raw_mask = self.backSub.apply(
-            motion_input, learningRate=self.config.BKGD_SUB_MOG2_LR
-        )
-
-        if include_history:
-            # If this is the first run, clone the mask instead of ANDing with an empty/white buffer
-            # if len(self.mask_history) < 1:
-            #     self.prev_bkgd.setTo(0, stream)  # Clear the initial white buffer
-            self.prev_bkgd = np.zeros((self.resize_h, self.resize_w), dtype="uint8")
-            for m in list(self.mask_history):
-                # Dilate the historical mask on CPU
-                dilated = cv2.dilate(
-                    m, self.dilate_kernel_for_enhanced_mask, iterations=1
-                )
-
-                if method == "or":
-                    # Bitwise OR on CPU
-                    cv2.bitwise_or(self.prev_bkgd, dilated, dst=self.prev_bkgd)
-                else:
-                    # Bitwise AND on CPU
-                    cv2.bitwise_and(self.prev_bkgd, dilated, dst=self.prev_bkgd)
-
-            self.mask_history.append(raw_mask.copy())
-
-            # if (
-            #     self.prev_bkgd.max() != self.prev_bkgd.min()
-            #     and self.prev_bkgd.max() > 0
-            # ):
-            #     combined_mask_bool = (self.fgMask > 0) | (self.prev_bkgd > 0)
-            #     self.fgMask = combined_mask_bool.astype(np.uint8) * 255
-            raw_mask = cv2.bitwise_or(raw_mask, self.prev_bkgd)
-            return raw_mask
-
-    def rbtd_full_cpuv1(self, frame):
-        """
-        CPU-Based Motion Detection Pipeline (Producer).
-
-        Performs background subtraction on the CPU to identify moving objects.
-        Ideal for saving VRAM or for environments without high-end NVIDIA GPUs.
-
-        Args:
-            frame (np.ndarray): The raw 8K input frame.
-            frameNum (float): Unique ID for the current frame.
-
-        Returns:
-            dict: Motion data containing the frame ID, CPU-based mask, and original 8K frame.
-        """
-        # Resize the 8K frame to a smaller 'model' size (e.g., 640x640)
-        # Using INTER_NEAREST as it is the fastest CPU interpolation method.
-        # H, W = self.resize_h, self.resize_w
-        self.cpu_resized_frame = cv2.resize(
-            frame, (self.resize_w, self.resize_h), interpolation=cv2.INTER_NEAREST
-        )
-        # if self.config.ENABLE_QUERYING and self.video_writer:
-        #     self.write_queue.put(self.cpu_resized_frame.copy())
-
-        # Apply Background Subtraction on CPU
-        self.apply_background_subtraction_cpu(
-            include_history=self.config.BKGD_SUB_INCLUDE_HISTORY,
-            method=self.config.BKGD_SUB_INCLUDE_HISTORY_METHOD,
-        )
-
-        # ----------------
-        # NOISE FILTERING: Median Blur
-        # Kills small single-pixel noise specs
-        # self.fgMask = cv2.medianBlur(self.fgMask, 5)
-
-        # # MORPHOLOGY: Opening (Erode then Dilate)
-        # kernel = np.ones((3,3), np.uint8)
-
-        # # Remove small specs
-        # self.fgMask = cv2.erode(self.fgMask, kernel, iterations=2)
-
-        # # Re-expand and connect nearby moving pixels
-        # self.fgMask = cv2.dilate(self.fgMask, kernel, iterations=2)
-        # return {"mask": self.fgMask, "full_frame": frame}
-        # ----------------
-
-        # Clean up the motion mask using Thresholding and Morphology (Dilation)
-        _, mask = cv2.threshold(
-            self.fgMask,
-            self.config.THRESHOLD_VALUE,
-            self.config.THRESHOLD_MAX_VALUE,
-            cv2.THRESH_BINARY,
-        )
-        mask = cv2.dilate(mask, self.dilate_kernel, iterations=1)
-
-        return {
-            # "frameNum": frameNum,  # overall frame
-            "mask": mask,
-            "full_frame": frame,  # Kept for high-res cropping
-        }
-
-    # def rbtd_full_cpu(self, frame):
-    #     # --- PHASE 1: NATIVE CACHE-PINNED RESIZE ---
-    #     # Fetch the exact background resolution constraints natively required by your config
-    #     # We assume self.resize_w and self.resize_h reflect your locked tracking target dimensions
-    #     target_w, target_h = self.resize_w, self.resize_h
-
-    #     # Safe Multi-Threaded Canvas Initialization Guard:
-    #     # Dynamically instantiate the static persistent memory matrices on the first frame pass.
-    #     # This completely stops the Python heap engine from allocating new arrays on subsequent frames.
-    #     if not hasattr(self, "_pinned_small_frame") or self._pinned_small_frame.shape[
-    #         :2
-    #     ] != (target_h, target_w):
-    #         self._pinned_small_frame = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-    #         self._pinned_fg_mask = np.zeros((target_h, target_w), dtype=np.uint8)
-    #         self._pinned_dilated_mask = np.zeros((target_h, target_w), dtype=np.uint8)
-    #         self._pinned_global_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-
-    #     # Force a zero-allocation resize into our pre-allocated, sequential cache-line matrix buffer
-    #     cv2.resize(
-    #         frame,
-    #         (target_w, target_h),
-    #         dst=self._pinned_small_frame,
-    #         interpolation=cv2.INTER_NEAREST,
-    #     )
-
-    #     # --- PHASE 2: STRIPPED SINGLE-THREAD BACKGROUND ARITHMETIC ---
-    #     # Run background subtraction straight into our static memory address lane
-    #     # We pass your configured learning rate (BKGD_SUB_MOG2_LR) to lock the temporal parameters
-    #     self._pinned_fg_mask = self.backSub.apply(
-    #         self._pinned_small_frame,
-    #         # dst=self._pinned_fg_mask,
-    #         learningRate=self.config.BKGD_SUB_MOG2_LR,
-    #     )
-
-    #     # Execute morphology dilation inline within our zero-allocation ring workspace [PDF: 0.1.18]
-    #     cv2.dilate(
-    #         self._pinned_fg_mask,
-    #         self.dilate_kernel,
-    #         dst=self._pinned_dilated_mask,
-    #         iterations=1,
-    #     )
-
-    #     return {"full_frame": frame, "mask": self._pinned_dilated_mask}
-
-    def rbtd_full_cpu(self, frame):
-        # --- PHASE 1: NATIVE CACHE-PINNED RESIZE ---
-        # Fetch the exact background resolution constraints natively required by your config
-        # We assume self.resize_w and self.resize_h reflect your locked tracking target dimensions
-        target_w, target_h = self.resize_w, self.resize_h
-
-        # Safe Multi-Threaded Canvas Initialization Guard:
-        # Dynamically instantiate the static persistent memory matrices on the first frame pass.
-        # This completely stops the Python heap engine from allocating new arrays on subsequent frames.
-        if not hasattr(self, "_pinned_small_frame") or self._pinned_small_frame.shape[
-            :2
-        ] != (target_h, target_w):
-            self._pinned_small_frame = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-            self._pinned_fg_mask = np.zeros((target_h, target_w), dtype=np.uint8)
-            self._pinned_dilated_mask = np.zeros((target_h, target_w), dtype=np.uint8)
-            self._pinned_global_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-
-        # Force a zero-allocation resize into our pre-allocated, sequential cache-line matrix buffer
-        cv2.resize(
-            frame,
-            (target_w, target_h),
-            dst=self._pinned_small_frame,
-            interpolation=cv2.INTER_NEAREST,
-        )
-
-        # --- PHASE 2: STRIPPED SINGLE-THREAD BACKGROUND ARITHMETIC ---
-        # Run background subtraction straight into our static memory address lane
-        # We pass your configured learning rate (BKGD_SUB_MOG2_LR) to lock the temporal parameters
-        # self._pinned_fg_mask = self.backSub.apply(
-        #     self._pinned_small_frame,
-        #     # dst=self._pinned_fg_mask,
-        #     learningRate=self.config.BKGD_SUB_MOG2_LR,
-        # )
-
-        self._pinned_fg_mask = self.apply_background_subtraction_cpu(
-            self._pinned_small_frame,
-            include_history=self.config.BKGD_SUB_INCLUDE_HISTORY,
-            method=self.config.BKGD_SUB_INCLUDE_HISTORY_METHOD,
-        )
-
-        # Execute morphology dilation inline within our zero-allocation ring workspace [PDF: 0.1.18]
-        cv2.dilate(
-            self._pinned_fg_mask,
-            self.dilate_kernel,
-            dst=self._pinned_dilated_mask,
-            iterations=1,
-        )
-
-        return {"full_frame": frame, "mask": self._pinned_dilated_mask}

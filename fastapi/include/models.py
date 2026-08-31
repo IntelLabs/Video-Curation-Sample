@@ -6,13 +6,13 @@ import sys
 from pathlib import Path
 
 import tensorrt as trt
+from torch import cuda
+from ultralytics import YOLO
+from ultralytics.utils.checks import check_requirements
 
 sys.path.insert(1, str(Path(__file__).parent.parent))
 from include.default_configs import ENABLE_QUERYING_DEFAULT
 from include.utils import PipelineConfig, get_freest_gpu, str2bool
-from torch import cuda
-from ultralytics import YOLO
-from ultralytics.utils.checks import check_requirements
 
 
 # OBJECT DETECTION

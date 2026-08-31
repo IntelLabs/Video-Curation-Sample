@@ -1,15 +1,17 @@
 .venv*
-.vscode
 *.log
 **/__pycache__/
 **/_*
+**/* copy*
 **/DockerImageTars/
 build/*
 fastapi/resources/models/intel
 fastapi/resources/models/ultralytics
+fastapi/tests/*_data/
 fastapi/tests/*_results*
 fastapi/tests/*_test_imgs
 fastapi/tests/*.mp4
+fastapi/tests/run_test_*.*
 finetune/.env
 finetune/app/*-Results
 inputs/camera_config.yaml

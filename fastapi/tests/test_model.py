@@ -1,49 +1,505 @@
-import argparse
-import csv
-import gc
-import inspect
+# ==============================================================================
+# SUPPRESS WARNINGS
+# import warnings
+
+import pytest
+
+# warnings.filterwarnings(
+#     "ignore", category=FutureWarning, message=".*reduce_op` is deprecated.*"
+# )
+
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore:.*anyio:_pytest.warning_types.PytestAssertRewriteWarning"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore:Context managers for TensorRT types are deprecated:DeprecationWarning"
+    ),
+    pytest.mark.filterwarnings(
+        "ignore:Exception ignored in.*SharedMemory.__del__:UserWarning"
+    ),
+    # Global message fallback pattern captures local execution frames
+    pytest.mark.filterwarnings("ignore:.*reduce_op.*:FutureWarning"),
+]
+
+# ==============================================================================
+# LOGGING
 import logging
 import os
 import sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    # format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d) - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+
+# Suppress low-delay reference block warnings from OpenCV/PyAV/FFmpeg
+# os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
+# os.environ["OPENCV_LOG_LEVEL"] = "OFF"
+logging.getLogger("libav").setLevel(logging.CRITICAL)
+logging.getLogger("libav.hevc").setLevel(logging.CRITICAL)
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
+logging.getLogger("ultralytics").setLevel(logging.WARNING)
+# logger = trt.Logger(trt.Logger.WARNING)
+# trt.init_libnvinfer_plugins(logger, "")
+main_app_logger = logging.getLogger(__name__)
+
+# ==============================================================================
+# IMPORTS
+
+# os.environ["OMP_NUM_THREADS"] = "2"
+# os.environ["MKL_NUM_THREADS"] = "2"
+# os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+# try:
+#     torch.set_num_interop_threads(2)  # 1)
+#     torch.set_num_threads(4)  # 2)
+# except RuntimeError:
+#     # Safe graceful fallback if a process-level fork duplicated context maps
+#     pass
+import argparse
+import asyncio
+import csv
+import faulthandler
+import gc
+import multiprocessing as mp
+import sys
+import threading
 import time
-import types
+import traceback
+import tracemalloc
 from pathlib import Path
 
-import pytest
-import tensorrt as trt
+import cv2
+import psutil
 import torch
 
-sys.path.insert(1, str(Path(__file__).parent.parent))
+# import torch
+
+# Retrieve repo packages
+REPO_DIR = str(Path(__file__).parent.parent)
+sys.path.insert(1, REPO_DIR)
+from base_test import (
+    BaseTest,
+)
 from include.default_configs import (
     CUSTOM_MODEL_FLAG_DEFAULT,
     DEBUG_DEFAULT,
     MODEL_NAME_DEFAULT,
     THRESHOLD_VALUE,
 )
+from include.detectors import GeneralObjectDetector
 from include.handlers import (
-    CPUStreamHandler,
-    DeviceBaseHandler,
-    GPUStreamHandler,
+    get_test_handler,
 )
-from include.models import get_model
-from include.utils import PipelineConfig
+from include.utils import (
+    PipelineConfig,
+    str2bool,
+)
+
+# objgraph = install_and_load_pip_package("objgraph", attribute_name=None)
+# torch.set_grad_enabled(False)
+
+# ==============================================================================
+# MONKEY PATCH
+# Cache the hardware availability state globally.
+# This prevents internal framework loops from triggering driver/NVML checks per frame.
+# _cuda_available = torch.cuda.is_available()
+
+
+# def _patched_is_available():
+#     return _cuda_available
+
+
+# torch.cuda.is_available = _patched_is_available
+
+# ==============================================================================
+# SETUP
+# Hooks directly into the OS kernel signals to force Python to print a full
+# stack traceback right before it dies, allowing you to see which line of
+# Python code caused the hard crash
+faulthandler.enable()
 
 try:
+    # Retain standard spawn mode to prevent CUDA context driver deadlocks
     torch.multiprocessing.set_start_method("spawn", force=True)
 except RuntimeError:
     pass
 
-logging.getLogger("matplotlib").setLevel(logging.WARNING)
-logger = trt.Logger(trt.Logger.WARNING)
-trt.init_libnvinfer_plugins(logger, "")
-
-
-DEBUG_FLAG_DEFAULT = True if DEBUG_DEFAULT == "1" else False
-os.environ["OMP_NUM_THREADS"] = "1"
-
 force_export = False
+# target_width, target_height = 7680, 4320
+STATE_CAPTURE = False
+
+# Force Python's multiprocessing layer to quiet tracking cleanup race conditions
+os.environ["PYTHONWARNINGS"] = "ignore"
+sys.warnoptions.append("ignore")
 
 
+# =========================================================================
+# ISOLATED BACKGROUND WORKER
+# =========================================================================
+
+
+def isolated_detection_worker(init_args, test_args, res_queue):
+    device = test_args["device"]
+    detection_type = test_args["detection_type"]
+    sf_enabled = test_args["sf_enabled"]
+    # gt_enabled = test_args["gt_enabled"]
+
+    if device == "gpu" and torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.ipc_collect()
+        torch.cuda.empty_cache()
+    gc.collect()
+
+    # Establish an accurate post-initialization hardware baseline
+    if str2bool(os.getenv("ENABLE_PROFILING", "False")):
+        tracemalloc.start()
+
+        start_allocated, start_reserved = 0, 0
+        if device == "gpu" and torch.cuda.is_available():
+            torch.cuda.memory._record_memory_history(
+                enabled=True,
+                trace_alloc_max_entries=250000,
+                trace_alloc_record_context=True,
+            )
+
+            # This captures your baseline AFTER initialize_variables() is done
+            start_allocated = torch.cuda.memory_allocated(0)
+            start_reserved = torch.cuda.memory_reserved(0)
+
+            try:
+                cv2.cuda.setBufferPoolUsage(False)
+            except AttributeError:
+                pass
+        else:
+            gc.collect()
+            process = psutil.Process(os.getpid())
+            start_allocated = (
+                process.memory_info().rss
+            )  # Reuse start_allocated container for host memory baseline
+            start_reserved = 0
+
+    try:
+        instance, _ = get_test_handler(TestModel(), device)
+
+        instance.source = init_args["source"]
+        instance.name = init_args["name"]
+        instance.result_dir = Path(init_args["result_dir"])
+        instance.active_streams = init_args["active_streams"]
+        instance.__class__.benchmarks = init_args["benchmarks"]  # Sandbox the metrics
+
+        # vid_dir = instance.result_dir / device
+        # vid_dir.mkdir(parents=True, exist_ok=True)
+        # os.environ["TEST_SUITE_RENDER_DIR"] = str(vid_dir)
+
+        # if instance.source.startswith("rtsp"):
+        #     short_name = "rtsp"
+        # else:
+        #     short_name = Path(instance.source).stem
+
+        # config definition
+        model_name = os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT)
+        config = PipelineConfig(
+            SHARED_OUTPUT=str(instance.result_dir),  # defined in context
+            CUSTOM_MODEL_FLAG=os.getenv("CUSTOM_MODEL_FLAG", CUSTOM_MODEL_FLAG_DEFAULT),
+            DEVICE=device.upper(),
+            OMIT_DETECTIONS_FLAG=True,
+            TEST_MODE=True,
+            DEBUG=os.getenv("DEBUG", DEBUG_DEFAULT),
+            DEBUG_FRAME_LIMIT=int(os.getenv("DEBUG_FRAME_LIMIT", 100)),
+            ENABLE_QUERYING=False,
+            MODEL_NAME=model_name,
+            SMART_FILTERING_ENABLED=sf_enabled,
+            THRESHOLD_VALUE=int(os.getenv("THRESHOLD_VALUE", THRESHOLD_VALUE)),
+            DETECTION_TYPE=detection_type,
+        )
+
+        # INITIALIZE CLASS (mimic DeviceBaseHandler.__init__) ------------------------------
+        instance.is_rtsp = str(instance.source).startswith("rtsp:/")
+        instance.active = True
+        instance.config = config
+
+        # kwarg definition
+        instance._testMethodName = f"{model_name}_{detection_type}_{device}"
+        # instance.video_output_name = (
+        #     f"{instance._testMethodName}_{short_name}.mp4"
+        # )
+
+        instance.loop = asyncio.get_event_loop()
+        instance.frame_ready_event = asyncio.Event()
+        instance._is_stopped = False
+        instance._stop_lock = threading.Lock()  # Local lock for this instance
+        instance.main_startup_event = mp.Event()
+
+        instance.device = instance.config.DEVICE
+        instance.device_input = instance.config.device_input
+        instance.disp_w, instance.disp_h = instance.config.DISPLAY_FRAME_SIZE
+        instance.resize_h, instance.resize_w = [
+            instance.config.MODEL_H,
+            instance.config.MODEL_W,
+        ]
+
+        instance.setup_reader(
+            instance.config.TARGET_FPS,
+            instance.config.CLIP_DURATION,
+            startup_event=instance.main_startup_event,
+        )
+        instance.initialize_variables()
+        instance.setup_threads()
+        instance.last_heartbeat = time.perf_counter()
+
+        if STATE_CAPTURE:
+            main_app_logger.info(
+                "[DIAGNOSTIC] Registering system state baseline layout..."
+            )
+            instance.baseline_before_start = instance.capture_state_snapshot()
+
+        # def profiler_fn():
+        #     profiler = None
+        #     try:
+        #         if str2bool(os.getenv("ENABLE_PROFILING", "False")):
+        #             Profiler = install_and_load_pip_package(
+        #                 "pyinstrument", attribute_name="Profiler"
+        #             )
+
+        #             profiler = Profiler(interval=0.005)  # 5ms sampling interval
+
+        #             # Telling the statistical sampler to skip recording exception blocks completely
+        #             # stops stack_sampler.py from ballooning RAM over long production runs.
+        #             if hasattr(profiler, "_sampler") and profiler._sampler:
+        #                 profiler._sampler.trace_exceptions = False
+
+        #             profiler.start()
+
+        #         # orig_fn(profiler)
+        #         instance.run_realtime_inference(
+        #             sf_enabled=instance.config.sf_enabled,
+        #             profiler=profiler,
+        #             gt_enabled=gt_enabled,
+        #         )
+
+        #         if str2bool(os.getenv("ENABLE_PROFILING", "False")):
+        #             # 2. Redirect standard error to the filter trap right before report compilation
+        #             original_stderr = sys.stderr
+        #             sys.stderr = ResourceTrackerFilter(original_stderr)
+
+        #             try:
+        #                 # Force standard stdout to flush out any lingering teardown messages
+        #                 # BEFORE pyinstrument dumps its massive ASCII tree block.
+        #                 sys.stdout.flush()
+
+        #                 # main_app_logger.info(profiler.output_text(color=True))
+        #                 # profiler.main_app_logger.info(color=True)
+        #                 # prof_output = profiler.output_text(color=True)
+        #                 # main_app_logger.info(
+        #                 #     f"\n=== LATENCY BREAKDOWN FOR {self.name} ({device}) ===\n{prof_output}\n",
+        #                 #
+        #                 # )
+
+        #                 # Save a clean, interactive tree map for visual analysis
+        #                 output_html_path = instance.output_path.replace(
+        #                     ".mp4", "_profile.html"
+        #                 )
+        #                 # output_html_path = f"/tmp/profile_{video_name}_{device}.html"
+        #                 profiler.write_html(output_html_path)
+        #                 main_app_logger.info(
+        #                     f"[PROFILER] Performance tree map exported to {output_html_path}",
+        #                 )
+
+        #             finally:
+        #                 sys.stderr = original_stderr
+        #                 if "profiler" in locals():
+        #                     try:
+        #                         # Force the Python interpreter to detach pyinstrument's sampling hooks
+        #                         sys.setprofile(None)
+
+        #                         # Completely decouple internal statistical sessions to drop C-heap frames
+        #                         if hasattr(profiler, "_last_session"):
+        #                             profiler._last_session = None
+        #                         if hasattr(profiler, "last_session"):
+        #                             profiler.last_session = None
+
+        #                         # Forcibly clear out internal memoryview strings caching tree metrics
+        #                         if (
+        #                             hasattr(profiler, "session")
+        #                             and profiler.session is not None
+        #                         ):
+        #                             if hasattr(profiler.session, "frame_groups"):
+        #                                 profiler.session.frame_groups = None
+        #                             if hasattr(profiler.session, "samples"):
+        #                                 profiler.session.samples = []
+
+        #                             # Purge compiled tree metrics structures
+        #                             profiler.session = None
+        #                         del profiler
+        #                     except Exception:
+        #                         pass
+
+        #                     # Trigger an immediate native Linux heap compression pass
+        #                     # This grabs the newly abandoned pyinstrument C-heap blocks and
+        #                     # flushes them to the OS before the fixture assessment snapshot fires!
+        #                     gc.collect()
+        #                     try:
+        #                         libc = ctypes.CDLL("libc.so.6")
+        #                         libc.malloc_trim(0)
+        #                     except Exception:
+        #                         pass
+
+        #     except Exception:
+        #         traceback.print_exc()
+
+        # if str2bool(os.getenv("ENABLE_PROFILING", "False")) and hasattr(
+        #     instance, "process_thread"
+        # ):
+        #     # Re-initialize the thread context using our safe profile wrapper proxy
+        #     instance.process_thread = threading.Thread(target=profiler_fn, daemon=True)
+
+        # instance.VIDEO_GT_DETAILS = None
+        # instance.duration_target = 30
+
+        # instance.start()
+
+        # while instance.active or not instance._is_stopped:
+        #     time.sleep(0.25)
+        #     if getattr(instance, "status", None) == "DONE":
+        #         break
+
+        #     if hasattr(instance, "process_thread") and instance.process_thread is not None:
+        #         if not instance.process_thread.is_alive():
+        #             main_app_logger.info(
+        #                 "[TEST HARNESS] Background worker exited. Breaking loop.",
+        #             )
+        #             break
+
+        # instance.stop_threads(["process_thread"])
+
+        #  Run the actual model loader
+        instance.processor = GeneralObjectDetector(
+            instance.config,
+            device=instance.device_input,
+            timer_enabled=False,
+            resize_hw=(instance.resize_h, instance.resize_w),
+            frame_hw=(instance.frame_height, instance.frame_width),
+            target_fps=instance.target_fps,
+            result_dir=instance.result_dir,
+            run_name=instance._testMethodName,
+            debug_frame_limit=-1,
+        )
+
+        total_session_start = time.perf_counter()
+
+        print("Running model...", flush=True)
+        results = instance.processor.model.predict(
+            source=instance.source,
+            imgsz=(instance.frame_height, instance.frame_width),
+            batch=1,
+            device=instance.config.device_input,
+            stream=any(x in instance.source for x in [".mp4", "rtsp"]),
+            conf=instance.config.DETECTION_THRESHOLD,
+            iou=instance.config.IOU_THRESHOLD,
+            show=False,
+            save=True,
+            project=str(instance.config.SHARED_OUTPUT),
+            name="predict_results",
+            exist_ok=True,  # overwrite if folder exists
+            data={
+                "names": {
+                    i: name for i, name in enumerate(instance.processor.label_source)
+                }
+            },
+        )
+
+        frame_cnt = 0
+        total_model_preprocess = 0.0
+        total_model_inference = 0.0
+        total_model_postprocess = 0.0
+        for result in results:
+            frame_cnt += 1
+            # Each iteration computes and yields the next frame's latency
+            total_model_preprocess += result.speed.get("preprocess", 0.0)
+            total_model_inference += result.speed.get("inference", 0.0)
+            total_model_postprocess += result.speed.get("postprocess", 0.0)
+
+        # Capture the true real-world duration across all operational processing layers
+        real_world_latency_ms = (time.perf_counter() - total_session_start) * 1000
+
+        print("Summarizing run...", flush=True)
+        instance._finalize_benchmarks(
+            real_world_latency_ms,
+            frame_cnt,
+            total_model_preprocess,
+            total_model_inference,
+            total_model_postprocess,
+        )
+        instance.stop()
+
+        # Force early hardware driver sweep before unbinding threads
+        if instance.device_input == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+        gc.collect()
+
+        try:
+            if STATE_CAPTURE:
+                # --- CAPTURE STATE POINT B (Right before cleanup) ---
+                main_app_logger.info(
+                    "[DIAGNOSTIC] Gathering active execution workspace layouts..."
+                )
+                state_after_stop = instance.capture_state_snapshot()
+
+                # 3. Print the granular delta analysis out to your terminal screen
+                new_keys_generated, mutated_keys, static_keys = (
+                    instance.print_lifecycle_delta(
+                        instance.baseline_before_start,
+                        state_after_stop,
+                        return_keys=True,
+                    )
+                )
+                # self.config.DEBUG_FLAG and
+                if len(new_keys_generated) > 0 or len(mutated_keys) > 0:
+                    # Inform the blueprint engine to eliminate every difference found between Point A and B
+                    instance.stop_blueprint_executor(new_keys_generated, mutated_keys)
+        except Exception:
+            traceback.print_exc()
+
+        assert instance.status == "DONE"
+
+        # TEARDOWN
+        instance.execute_teardown()
+
+        if str2bool(os.getenv("ENABLE_PROFILING", "False")):
+            gc.collect()
+            if (
+                device == "gpu" and torch.cuda.is_available()
+            ):  # self.device_input == "cuda" and torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            instance.assess_memory(
+                device, instance.name, start_allocated, start_reserved
+            )
+
+        if len(instance.__class__.benchmarks) > 0:
+            final_metrics = instance.__class__.benchmarks[-1]
+            res_queue.put({"status": "success", "metrics": final_metrics})
+        else:
+            res_queue.put({"status": "error", "error": "No benchmarks generated."})
+
+    except Exception as e:
+        res_queue.put(
+            {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+        )
+        res_queue.put(
+            {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+        )
+
+
+# =========================================================================
+# PYTEST TEST HARNESS
+# =========================================================================
 @pytest.fixture(scope="class")
 def setup_context(request):
     """Replaces setUpClass: Runs once per test class."""
@@ -52,11 +508,6 @@ def setup_context(request):
     test_dir = Path(__file__).parent
     main_path = test_dir.parent
     video_dir = main_path / "inputs"
-
-    request.cls._shared_model = None
-    request.cls._shared_model_path = None
-    request.cls._shared_model_device = None
-    request.cls._shared_model_sf_enabled = None
 
     request.cls.source = os.getenv("VIDEO_FILENAME", "anduril_swarm_8K.mp4")
     is_rtsp = "rtsp://" in request.cls.source
@@ -76,7 +527,6 @@ def setup_context(request):
         request.cls.name = "rtsp"
         request.cls.is_rtsp = True
 
-    # Add any shared state to the class
     model_name = os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT)
     request.cls.result_dir = test_dir / f"{current_test_filename}_results/{model_name}"
     request.cls.result_dir.mkdir(parents=True, exist_ok=True)
@@ -87,7 +537,7 @@ def setup_context(request):
     request.cls.csv_path = request.cls.result_dir / request.cls.csv_filename
 
     # Initialize class vars
-    request.cls.active = True
+    # request.cls.active = True
     request.cls.active_streams = {}
 
     # RUN ALL PARAMETERIZED TESTS ----------------------------------------
@@ -95,254 +545,99 @@ def setup_context(request):
 
     # FINAL CSV EXPORT  --------------------------------------------------
     if request.cls.benchmarks:
+        # Filter and exclude rows that were interrupted or failed initialization due to an early pytest skip
+        request.cls.benchmarks = [
+            r for r in request.cls.benchmarks if r and "Test Name" in r
+        ]
         results = request.cls.benchmarks
-        keys = results[0].keys()
+        if results:
+            keys = results[0].keys()
 
-        with open(str(request.cls.csv_path), "w", newline="") as f:
-            dict_writer = csv.DictWriter(f, fieldnames=keys)
-            dict_writer.writeheader()
-            dict_writer.writerows(results)
+            with open(str(request.cls.csv_path), "w", newline="") as f:
+                dict_writer = csv.DictWriter(f, fieldnames=keys)
+                dict_writer.writeheader()
+                dict_writer.writerows(results)
 
-        print(f"\n[FINAL] Benchmarks saved to {request.cls.csv_filename}", flush=True)
-
-
-@pytest.fixture(autouse=True)
-def each_test_setup(request):
-    test_class_self = request.instance
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-
-    device = request.node.callspec.params.get("device")
-    os.environ["DEVICE"] = device
-    detection_type = "object"  # request.node.callspec.params.get("detection_type")
-    sf_enabled = False  # request.node.callspec.params.get("sf_enabled")
-
-    model_name = os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT)
-    test_class_self._testMethodName = f"{model_name}_{detection_type}_{device}"
-
-    render_dir = test_class_self.result_dir / f"{device}"
-    render_dir.mkdir(exist_ok=True)
-
-    test_class_self.config = PipelineConfig(
-        # GENERAL
-        SHARED_OUTPUT=render_dir,  # os.getenv("SHARED_OUTPUT",SHARED_OUTPUT_DEFAULT),
-        CUSTOM_MODEL_FLAG=os.getenv("CUSTOM_MODEL_FLAG", CUSTOM_MODEL_FLAG_DEFAULT),
-        DEVICE=device.upper(),
-        OMIT_DETECTIONS_FLAG=True,
-        TEST_MODE=False,
-        DEBUG=os.getenv("DEBUG", DEBUG_DEFAULT),
-        DEBUG_FRAME_LIMIT=os.getenv("DEBUG_FRAME_LIMIT", 100),
-        # VIDEO WRITER
-        # CLIP_DURATION=None,
-        # VDMS
-        ENABLE_QUERYING=False,
-        DBHOST="0.0.0.0",
-        DBPORT=55555,
-        # MODEL
-        MODEL_NAME=model_name,
-        # MODEL_H=360,
-        # PIPELINE
-        SMART_FILTERING_ENABLED=sf_enabled,
-        THRESHOLD_VALUE=int(os.getenv("THRESHOLD_VALUE", THRESHOLD_VALUE)),
-        # VISUALIZATION
-        DETECTION_TYPE=detection_type,
-    )
-
-    test_class_self.device = test_class_self.config.DEVICE
-    test_class_self.device_input = test_class_self.config.device_input
-    test_class_self.resize_h, test_class_self.resize_w = [
-        test_class_self.config.MODEL_H,
-        test_class_self.config.MODEL_W,
-    ]
-
-    # Resolve concrete handler class type
-    HandlerClass = GPUStreamHandler if device == "gpu" else CPUStreamHandler
-    # HandlerClass.pipeline_fn = test_class_self.__class__.pipeline_fn
-
-    # Dynamically re-bind backend methods to this execution instance
-    handler_classes = [HandlerClass, DeviceBaseHandler]
-    all_method_names = set()
-
-    for cls in handler_classes:
-        for name, attr in inspect.getmembers(cls, predicate=inspect.isfunction):
-            all_method_names.add(name)
-
-    for method_name in all_method_names:
-        source_obj = (
-            HandlerClass if hasattr(HandlerClass, method_name) else DeviceBaseHandler
-        )
-        if hasattr(source_obj, method_name):
-            raw_func = getattr(source_obj, method_name)
-            if (
-                not hasattr(test_class_self.__class__, method_name)
-                or method_name == "pipeline_fn"
-            ):
-                setattr(
-                    test_class_self,
-                    method_name,
-                    types.MethodType(raw_func, test_class_self),
-                )
-
-    # 3. FORCE NATIVE PIPELINE PROVISIONING
-    test_class_self.setup_reader(
-        test_class_self.config.TARGET_FPS, test_class_self.config.CLIP_DURATION
-    )
-    test_class_self.initialize_variables()
-    test_class_self.setup_model(None)
-    test_class_self.prepare_pipeline()
-
-    # test_class_self.run _realtime_inference = types.MethodType(
-    #     test_class_self.__class__.run_realtime_inference, test_class_self
-    # )
-
-    test_class_self.setup_threads()
-
-    # RUN PARAMETERIZED TEST ----------------------------------------
-    yield
-
-    # tearDown LOGIC --------------------------------------------------
-    print(
-        f"\n--- [TearDown] Memory Before Cleanup ({test_class_self._testMethodName}) ---"
-    )
-
-    # test_class_self.stop()
-
-    #  Nullify the model reference to trigger automatic cleanup
-    if hasattr(test_class_self, "model") and test_class_self.model is not None:
-        # Check if it's an Ultralytics model with a predictor
-        predictor = getattr(test_class_self.model, "predictor", None)
-        if predictor is not None:
-            try:
-                predictor.results = []
-            except AttributeError:
-                pass
-        del test_class_self.model
-        test_class_self.model = None
-
-    #  Clear the singleton references to force a reload
-    TestModelDetections._shared_model = None
-    TestModelDetections._shared_model_path = None
-    TestModelDetections._shared_model_device = None
-
-    # Force Python to run destructors NOW while streams are still alive
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()  # Final sync to clear event queue
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()  # Critical for shared memory cleanup
-        time.sleep(0.2)
+            print(
+                f"\n[FINAL] Benchmarks saved to {request.cls.csv_filename}", flush=True
+            )
 
 
 @pytest.mark.usefixtures("setup_context")
-class TestModelDetections:
-    # SETUP --------------------------------------------
+class TestModel(BaseTest):
+    """
+    Pytest runner that spawns the isolated worker, waits for completion,
+    and merges the returned metrics into the main class for CSV/Chart generation.
+    """
 
-    @pytest.mark.parametrize(
-        "device",
-        [
-            ("cpu"),
-            ("gpu"),
-        ],
-    )
+    benchmarks = []  # Class-level attribute required by _finalize_benchmarks
+
+    @pytest.mark.parametrize("device", ["gpu", "cpu"])
     def test_model(self, device):
-        """Unified test runner for all configurations."""
+        # Pull the values dynamically assigned by the setup_context fixture
+        init_args = {
+            "source": self.__class__.source,
+            "name": self.__class__.name,
+            "result_dir": str(self.__class__.result_dir),
+            "active_streams": {},
+            "benchmarks": self.__class__.benchmarks,
+        }
 
-        #  Run the actual model loader
-        self.get_model_by_device(device, sf_enabled=self.config.sf_enabled)
+        os.environ["DEVICE"] = device
+        detection_type = "object"  # request.node.callspec.params.get("detection_type")
+        sf_enabled = False  # request.node.callspec.params.get("sf_enabled")
+        gt_enabled = False
 
-        total_session_start = time.perf_counter()
+        test_args = {
+            "device": device,
+            "detection_type": detection_type,
+            "sf_enabled": sf_enabled,
+            "gt_enabled": gt_enabled,
+        }
 
-        results = self.model.predict(
-            source=self.source,
-            imgsz=(self.frame_height, self.frame_width),
-            batch=1,
-            device=self.config.device_input,
-            stream=True,
-            conf=self.config.DETECTION_THRESHOLD,
-            iou=self.config.IOU_THRESHOLD,
-            show=False,
-            save=True,
-            project=str(self.config.SHARED_OUTPUT),
-            name="predict_results",
-            exist_ok=True,  # overwrite if folder exists
-            data={"names": {i: name for i, name in enumerate(self.label_source)}},
+        main_app_logger.info(
+            f"\n{'=' * 60}\n"
+            f"[TEST HARNESS] Spawning isolated high-speed process for {self.__class__.name} (SF: {sf_enabled})...\n"
+            f"{'=' * 60}"
         )
 
-        frame_cnt = 0
-        total_model_preprocess = 0.0
-        total_model_inference = 0.0
-        total_model_postprocess = 0.0
-        for result in results:
-            frame_cnt += 1
-            # Each iteration computes and yields the next frame's latency
-            total_model_preprocess += result.speed.get("preprocess", 0.0)
-            total_model_inference += result.speed.get("inference", 0.0)
-            total_model_postprocess += result.speed.get("postprocess", 0.0)
+        # Spawn a pristine Python process (identical to test_pipeline.py's stream_worker)
+        ctx = mp.get_context("spawn")
+        res_queue = ctx.Queue()
 
-        # Capture the true real-world duration across all operational processing layers
-        real_world_latency_ms = (time.perf_counter() - total_session_start) * 1000
-
-        self._finalize_benchmarks(
-            real_world_latency_ms,
-            frame_cnt,
-            total_model_preprocess,
-            total_model_inference,
-            total_model_postprocess,
+        worker_p = ctx.Process(
+            target=isolated_detection_worker, args=(init_args, test_args, res_queue)
         )
+
+        worker_p.start()
+        worker_p.join()  # Block Pytest until the isolated pipeline finishes
+
+        # Extract and merge results
+        if not res_queue.empty():
+            result = res_queue.get()
+
+            if result["status"] == "error":
+                pytest.fail(
+                    f"Pipeline crashed in worker process:\n{result.get('error')}\n{result.get('traceback')}"
+                )
+            else:
+                metrics = result["metrics"]
+
+                self.__class__.benchmarks.append(metrics)
+
+                main_app_logger.info(
+                    f"[TEST HARNESS] Worker returned successfully. Model Est. FPS: {metrics.get('Model Est. FPS')}"
+                )
+
+                # Basic functionality assertions
+                assert metrics is not None, "Metrics dictionary should not be None."
+                assert int(metrics.get("Frames Processed", 0)) > 0, (
+                    "No frames were written to output."
+                )
+        else:
+            pytest.fail("Worker process died unexpectedly without returning metrics.")
 
     # HELPERS --------------------------------------------
-    def get_model_by_device(self, device, sf_enabled=False):
-        """Singleton loader: only loads if device changes or model is missing."""
-        if (
-            sf_enabled
-            and (self.frame_width * self.frame_height)
-            <= self.config.SMART_FILTERING_PIXEL_CONSTRAINT
-        ):
-            sf_enabled = False
-
-        if (
-            TestModelDetections._shared_model is not None
-            and TestModelDetections._shared_model_device == device
-            and TestModelDetections._shared_model_sf_enabled == sf_enabled
-        ):
-            self.model = TestModelDetections._shared_model
-            self.model_path = TestModelDetections._shared_model_path
-            return
-
-        run_platform_name = "engine" if "cuda" in self.device_input else "openvino"
-
-        if self.config.CUSTOM_MODEL_FLAG:
-            dir_path = "/home/resources/models/ultralytics/custom_models"
-        else:
-            dir_path = f"/home/resources/models/ultralytics/{self.config.MODEL_NAME}/{self.config.MODEL_PRECISION}"
-
-        (
-            TestModelDetections._shared_model,
-            TestModelDetections._shared_model_path,
-            self.label_source,
-        ) = get_model(
-            Path(dir_path),
-            self.config.MODEL_NAME,
-            run_platform_name,
-            self.device_input,
-            batch=self.config.MODEL_MAX_BATCH_SIZE,
-            force_export=force_export,
-            sf_enabled=sf_enabled,
-            model_h=self.resize_h,
-            model_w=self.resize_w,
-        )
-
-        TestModelDetections._shared_model_device = device
-        TestModelDetections._shared_model_sf_enabled = sf_enabled
-        self.model = TestModelDetections._shared_model
-        # self.model.half()
-        self.model_path = TestModelDetections._shared_model_path
-
-        W, H = self.resize_w, self.resize_h
-        if not sf_enabled:
-            W, H = self.frame_width, self.frame_height
-        self.model_warmup(H, W)
-
     def _finalize_benchmarks(
         self,
         real_world_latency_ms,
@@ -391,271 +686,24 @@ class TestModelDetections:
     def setup_threads(self):
         """Overrides handlers.py to bind threads dynamically to the test instance."""
         pass
-        # self.setup_shared_memory()  # Natively sets up Manager dictionary and buffers
-
-        # # Executor for Async YOLO tasks and FFmpeg re-encoding
-        # self.executor = ThreadPoolExecutor(max_workers=self.config.MAX_WORKERS)
-        # # self.clip_executor = ThreadPoolExecutor(max_workers=self.config.MAX_WORKERS)
-
-        # print(
-        #     f"sf_enabled: {self.config.sf_enabled}\tTEST_MODE: {self.config.TEST_MODE}",
-        #     flush=True,
-        # )
-
-        # # Open up looking-ahead buffer horizons to eliminate 8K queue backpressure stalls
-        # self.signal_queue = mp.Queue(maxsize=128)  # 10)
-        # self.render_queue = mp.Queue(maxsize=256)  # 64)
-
-        # test_dir = os.getenv(
-        #     "TEST_SUITE_RENDER_DIR", str(Path(self.config.SHARED_OUTPUT))
-        # )
-        # os.makedirs(test_dir, exist_ok=True)
-
-        # if self.source.startswith("rtsp"):
-        #     short_name = "rtsp"
-        # else:
-        #     short_name = Path(self.source).stem
-        # video_output_name = f"{self._testMethodName}_{short_name}_{self.device}.mp4"
-        # out_path = os.path.join(test_dir, video_output_name)
-        # self.output_path = (
-        #     out_path  # f"{self.config.SHARED_OUTPUT}/{short_name}_{self.device}.mp4"
-        # )
-
-        # log_to_logger(
-        #     f"[TEST MODE] Detection results saved to: {out_path}", level="info"
-        # )
-
-        # # =====================================================================
-        # # DYNAMIC THREAD TARGET REDIRECTION
-        # # =====================================================================
-        # # Lambda forces the background processing thread to evaluate your custom staging loop natively
-        # self.process_thread = threading.Thread(
-        #     target=lambda: self.run_realtime_inference(
-        #         sf_enabled=self.config.sf_enabled
-        #     ),
-        #     daemon=True,
-        # )
-        # # self.render_proc = mp.Process(  # threading.Thread(
-        # #     target=rendering_worker,
-        # #     args=(
-        # #         self.render_queue,
-        # #         (self.disp_w, self.disp_h),
-        # #         self.output_path,
-        # #         self.target_fps,
-        # #     ),
-        # #     daemon=True,
-        # # )
-        # # self.render_proc = threading.Thread(target=lambda: None, daemon=True)
-        # # self.display_proc = threading.Thread(target=lambda: None, daemon=True)
-        # self.render_proc = DummyProcess()
-        # self.display_proc = DummyProcess()
-
-        # self.async_writer = AsyncVideoWriter(
-        #     self.output_path,
-        #     cv2.VideoWriter_fourcc(*"avc1"),
-        #     float(self.target_fps),
-        #     (self.disp_w, self.disp_h),
-        # )
-        # # self.async_writer = None
 
     def start(self):
         """
         Starts the decoupled ingestion and inference threads in the correct order.
         """
         # PRE-SYNC: Ensure GPU is idle before timing starts
-        if self.device_input == "cuda":
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+        if self.device_input == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
 
         # Start the hardware-decoupled reader first
-        self.reader.start()
-
-        # if self.config.ENABLE_QUERYING:
-        #     self._initialize_writer()
-
-        # # Small delay to allow the reader's deque to populate
-        # time.sleep(0.1)
-
-        # # Start the producer and consumer threads
-        # if hasattr(self, "process_thread") and not self.process_thread.is_alive():
-        #     self.process_thread.start()
-
-        # if not self.config.DISABLE_DETECTION:
-        #     self.render_proc.start()
-
-        #     self.display_proc.start()
-
-        # if (
-        #     self.config.ENABLE_QUERYING
-        #     and not self.config.TEST_MODE
-        #     and not self.metadata_thread.is_alive()
-        # ):
-        #     self.metadata_thread.start()
-
-        # if self.config.ENABLE_QUERYING and not self.writer_thread.is_alive():
-        #     self.writer_thread.start()
+        # self.reader.start()
 
         return self
 
-    def stop(self):
-        """Overrides handlers.py to flush thread objects safely without deadlocking."""
-        with self._stop_lock:
-            if self._is_stopped:
-                return
 
-            print(
-                f"\n[TEST HARNESS] Initiating rapid thread flush for {self.name}",
-                flush=True,
-            )
-            self.active = False
-
-            # 1. Rapidly clear the async video writer thread queue first
-            # if hasattr(self, "async_writer") and self.async_writer is not None:
-            #     try:
-            #         self.async_writer.release()
-            #     except Exception:
-            #         pass
-
-            # =====================================================================
-            # DECUPLED MULTI-PROCESS TEARDOWN LIFECYCLE SEQUENCE
-            # =====================================================================
-            # 1. FIRST: Drain and synchronize your thread pool tasks so EVERY frame drops into the IPC queue
-            if hasattr(self, "display_pool") and self.display_pool is not None:
-                try:
-                    if hasattr(self.display_pool, "_work_queue"):
-                        backlog = self.display_pool._work_queue.qsize()
-                        if backlog > 0:
-                            print(
-                                f"\n\033[94m[STAGE 1/4] Synchronizing display pool threads. Draining {backlog} background tasks...\033[0m",
-                                flush=True,
-                            )
-                            backlog_s = time.perf_counter()
-                            while (
-                                self.display_pool._work_queue.qsize() > 0
-                                or len(self.reorder_staging_buffer) > 0
-                            ):
-                                # Yield a brief slice to let worker threads complete downscaling
-                                time.sleep(0.01)
-                            backlog_e = time.perf_counter() - backlog_s
-                            print(f"\t\033[94mTook {backlog_e} secs\033[0m", flush=True)
-                    print(
-                        "\033[92m[SUCCESS] All background image transformations completed cleanly.\033[0m",
-                        flush=True,
-                    )
-                    self.display_pool.shutdown(wait=True)
-                except Exception as e:
-                    print(
-                        f"[TEARDOWN ERROR] Thread pool synchronization failed: {e}",
-                        flush=True,
-                    )
-                setattr(self, "display_pool", None)
-
-            # 1. FIRST: Instantly dispatch the shutdown token so the worker process knows to flush entries
-            if hasattr(self, "render_queue") and self.render_queue is not None:
-                try:
-                    print(
-                        f"\n\033[94m[STAGE 1/3] Dispatching shutdown sentinel (None) to rendering process worker (Backlog: {self.render_queue.qsize()} frames)...\033[0m",
-                        flush=True,
-                    )
-                    # Delivering the poison pill immediately tells FFmpeg to drain remaining blocks sequentially
-                    self.render_queue.put(None, timeout=2.0)
-                except Exception as queue_err:
-                    print(
-                        f"\033[91m[TEARDOWN ERROR] Failed staging shutdown token: {queue_err}\033[0m",
-                        flush=True,
-                    )
-
-            # 2. SECOND: Allow the background multiprocessing queue to empty outstanding items naturally
-            if hasattr(self, "render_queue") and self.render_queue is not None:
-                try:
-                    print(
-                        "\n\033[94m[STAGE 2/3] Finalizing file output. Draining remaining frames from IPC memory lane...\033[0m",
-                        flush=True,
-                    )
-                    t_drain = time.perf_counter()
-                    # Wait up to 15 seconds for the worker process to pull every remaining matrix out of the pipe
-                    while (
-                        not self.render_queue.empty()
-                        and (time.perf_counter() - t_drain) < 15.0
-                    ):
-                        time.sleep(
-                            0.01
-                        )  # Micro-yield grants immediate execution priority to the background process core
-                except Exception:
-                    pass
-
-            # 3. THIRD: Block the main thread safely and allow the detached process to finish disk I/O operations
-            if hasattr(self, "render_proc") and self.render_proc is not None:
-                try:
-                    join_duration = 0.0
-                    if self.render_proc.is_alive():
-                        print(
-                            "\033[94m[STAGE 2/2] Main thread blocking. Synchronizing hard drive file headers...\033[0m",
-                            flush=True,
-                        )
-                        t_join_start = time.perf_counter()
-                        self.render_proc.join(
-                            timeout=15.0
-                        )  # Safe timeout lets video containers finalize cleanly
-                        join_duration = time.perf_counter() - t_join_start
-                    else:
-                        print(
-                            "\033[94m[STAGE 2/2] Main thread clear...\033[0m",
-                            flush=True,
-                        )
-
-                    if self.render_proc.is_alive():
-                        print(
-                            "\n\033[91m[CRITICAL STALL] Render worker process hung on disk write! Forcing termination...\033[0m",
-                            flush=True,
-                        )
-                        self.render_proc.terminate()
-                        self.render_proc.join()
-                    else:
-                        print(
-                            f"\033[92m[FINAL] Video compilation finished cleanly! Hard drive commit took {join_duration:.2f} seconds.\033[0m",
-                            flush=True,
-                        )
-
-                        expected_disk_path = Path(self.output_path)
-                        if expected_disk_path.exists():
-                            size_mb = expected_disk_path.stat().st_size / (1024 * 1024)
-                            print(
-                                f"\033[92m[DISK VERIFIED] Destination asset compiled: {expected_disk_path.name} ({size_mb:.2f} MB)\033[0m\n",
-                                flush=True,
-                            )
-                    self.render_proc.close()
-                except Exception as proc_err:
-                    print(
-                        f"\033[91m[TEARDOWN ERROR] Failed closing background process container: {proc_err}\033[0m",
-                        flush=True,
-                    )
-                setattr(self, "render_proc", None)
-
-            # 4. FOURTH: Clean up remaining pipeline executors and queues safely
-            if hasattr(self, "render_queue") and self.render_queue is not None:
-                try:
-                    self.render_queue.close()
-                    self.render_queue.cancel_join_thread()
-                except Exception:
-                    pass
-                setattr(self, "render_queue", None)
-
-            if hasattr(self, "executor") and self.executor is not None:
-                try:
-                    self.executor.shutdown(wait=True)
-                except Exception:
-                    pass
-                setattr(self, "executor", None)
-
-            self.status = "DONE"
-            self._is_stopped = True
-            print(
-                "[TEST HARNESS] Teardown complete. Releasing session cleanly.\n",
-                flush=True,
-            )
-
-
+# =========================================================================
+# MAIN
+# =========================================================================
 if __name__ == "__main__":
     # TEST ARGUMENTS
     parser = argparse.ArgumentParser(description="Run Video Detection Pipeline Tests")
@@ -684,40 +732,12 @@ if __name__ == "__main__":
     )
 
     # Filter tests
-    # parser.add_argument(
-    #     "--type",
-    #     type=str,
-    #     choices=["object", "motion"],
-    #     dest="detection_type",
-    #     help="Filter by detection type (object or motion)",
-    # )
     parser.add_argument(
         "--device",
         type=str,
         choices=["cpu", "gpu"],
         help="Filter by device (cpu or gpu)",
     )
-    # parser.add_argument(
-    #     "--sf",
-    #     action="store_true",
-    #     default=None,
-    #     dest="sf_enabled",
-    #     help="Filter by Smart Filtering",
-    # )
-
-    # # DEBUGGING
-    # parser.add_argument(
-    #     "--debug",
-    #     action="store_true",
-    #     help="Enable debug message and save intermediate images for Smart Filtering tests",
-    # )
-    # parser.add_argument(
-    #     "-n",
-    #     type=int,
-    #     default=100,
-    #     dest="debug_frame_limit",
-    #     help="Number of frames used for debugging [Default: 100]",
-    # )
 
     args = parser.parse_args()
 
@@ -742,6 +762,8 @@ if __name__ == "__main__":
         "-s",
         "-v",
         "--log-cli-level=DEBUG",
+        "-W",
+        "ignore::_pytest.warning_types.PytestAssertRewriteWarning",
         __file__,
     ]  # -s -v --log-cli-level=DEBUG
     if run_args:

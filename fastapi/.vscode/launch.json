@@ -6,6 +6,22 @@
   "configurations": [
     {
       // Test the model for both CPU and GPU on provided RTSP URL or video file
+      "name": "Eval Pipeline",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tests/test_eval.py",
+      "cwd": "${workspaceFolder}/tests",
+      "python": "/opt/venv/bin/python",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": false,
+      "args": [
+        "--type", "object",
+        "--device", "gpu"
+      ]
+    },
+    {
+      // Test the model for both CPU and GPU on provided RTSP URL or video file
       "name": "Test Model",
       "type": "debugpy",
       "request": "launch",
@@ -19,7 +35,7 @@
         // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
         // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
         // "--source", "<TEST_VIDEO>.mp4",
-
+        "--device", "gpu"
       ]
     },
     {
@@ -37,7 +53,7 @@
         // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
         // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
         // "--source", "<TEST_VIDEO>.mp4"
-
+        "--device", "gpu"
       ]
     },
     {
@@ -51,11 +67,15 @@
       "console": "integratedTerminal",
       "justMyCode": false,
       "subProcess": false,
+      "env":{
+        "PYTHONTRACEMALLOC":"20",
+      },
       "args": [
         // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
         // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
         // "--source", "<TEST_VIDEO>.mp4"
-
+        "--device", "gpu",
+        "--type", "object"
       ]
     },
     {
@@ -80,12 +100,13 @@
         // 4: --device, --sf, --type (object or motion)
 
         "--duration", "1",
-
+        "--device", "gpu",
+        "--type", "object"
       ]
     },
     {
       // Test Smart Filtering within pipeline to display the ROIs
-      "name": "Test Pipeline: Smart filtering Only",
+      "name": "Test Pipeline: Smart filtering Only (Scenario 4)",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/tests/test_pipeline.py",
@@ -103,8 +124,41 @@
         // 4: --device, --sf, --type (object or motion)
         "--scenario", "4",
         "--sf",
-        "--type", "motion",
+        "--type", "object",
+
+        "--duration", "1",
+        "--device", "gpu"
       ]
-    }
+    },
+    {
+      // Test Smart Filtering within pipeline to display the ROIs
+      "name": "Test Pipeline: Scenario 3",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tests/test_pipeline.py",
+      "cwd": "${workspaceFolder}/tests",
+      "python": "/opt/venv/bin/python",
+      "console": "integratedTerminal",
+      "subProcess": false,
+      "justMyCode": false,
+      "args": [
+        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
+        // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
+        // "--source", "<TEST_VIDEO>.mp4",
+
+        "--scenario", "3",
+        "--type", "object",
+
+        "--duration", "1",
+        "--device", "gpu"
+      ]
+    },
+    {
+      "name": "Python Debugger: Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal"
+    },
   ]
 }

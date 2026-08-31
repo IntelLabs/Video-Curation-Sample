@@ -1,0 +1,26 @@
+{
+    "cSpell.ignorePaths": [
+        "./build/**",
+        "./.git/**",
+        "./.devcontainer/Dockerfile",
+        "./deployment/Dockerfiles/**",
+        "./frontend/html/**"
+    ],
+    "cSpell.dictionaryDefinitions": [
+        {
+        "name": "codespell-file",
+        "path": "${workspaceRoot}/.codespell-ignore",
+        "description": "Forcing cspell to read the codespell file"
+        }
+    ],
+    "cSpell.dictionaries": [
+        "codespell-file"
+    ],
+    "cSpell.words": [
+        "bchw",
+        "callspec",
+        "fourcc",
+        "gbps",
+        "rbtd"
+    ]
+}

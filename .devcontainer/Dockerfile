@@ -42,13 +42,15 @@ RUN apt-get update && \
         gfortran && \
     # Install necessary CUDA packages
     curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -o /tmp/cuda-keyring.deb && \
-        dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb && \
-    apt-get update && \
+    dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb
+
+ARG CUDA_MAJOR_VERSION=12
+ARG CUDA_MINOR_VERSION=8
+
+RUN apt-get update && \
     apt-get install -y -q --no-install-recommends \
-        cuda-toolkit-12-4 \
-        libcudnn9-dev-cuda-12 \
-        libnpp-dev-12-4 \
-        && \
+        cuda-toolkit-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION} \
+        libcudnn9-dev-cuda-${CUDA_MAJOR_VERSION} && \
     rm -rf /var/lib/apt/lists/* && apt-get clean
 
 RUN python3 -m venv ${VIRTUAL_ENV} && \
@@ -57,6 +59,10 @@ RUN python3 -m venv ${VIRTUAL_ENV} && \
     "torch==2.10.0" \
     "torchvision==0.25.0" \
     "numpy==1.26.4"
+
+# Ensure paths capture the version dynamically
+ENV PATH="/usr/local/cuda/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
 
 # OPENCV W/ CUDA SUPPORT
 ENV PYTHON_VERSION=3.10
@@ -74,6 +80,7 @@ RUN git clone --branch ${OPENCV_VERSION} --depth 1 https://github.com/opencv/ope
 WORKDIR ${DEPENDENCY_DIR}/opencv/build
 RUN ln -s /usr/include/x86_64-linux-gnu/cudnn*.h /usr/local/cuda/include/ && \
     ln -s /usr/lib/x86_64-linux-gnu/libcudnn*.so* /usr/local/cuda/lib64/
+
 RUN cmake -D CMAKE_BUILD_TYPE=RELEASE \
     -D CMAKE_INSTALL_PREFIX="${VIRTUAL_ENV}" \
     -D OPENCV_EXTRA_MODULES_PATH="${DEPENDENCY_DIR}/opencv_contrib/modules" \
@@ -84,7 +91,7 @@ RUN cmake -D CMAKE_BUILD_TYPE=RELEASE \
     -D WITH_TBB=ON \
     -D WITH_V4L=ON \
     -D OPENCV_DNN_CUDA=ON \
-    -D CUDA_ARCH_BIN=70,75,80,86,89,90 \
+    -D CUDA_ARCH_BIN=80,86,89,90 \
     -D CUDA_FAST_MATH=ON \
     -D CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda \
     -D CUDNN_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
@@ -93,8 +100,8 @@ RUN cmake -D CMAKE_BUILD_TYPE=RELEASE \
     -D BUILD_opencv_cudaarithm=ON \
     -D BUILD_opencv_cudafilters=ON \
     -D BUILD_opencv_cudacodec=ON \
-    -D WITH_NVCUVID=ON \
-    -D WITH_NVCUVENC=ON \
+    -D WITH_NVCUVID=OFF \
+    -D WITH_NVCUVENC=OFF \
     -D WITH_VAAPI=ON \
     -D WITH_FFMPEG=ON \
     -D BUILD_opencv_python3=ON \
@@ -108,11 +115,12 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN mkdir -p /tmp/cv2_deps && \
     PY_CV2_SO=$(find "${VIRTUAL_ENV}" -name "cv2*.so" | head -n 1) && \
     ldd "${PY_CV2_SO}" | grep "=> /" | awk '{print $3}' | xargs -I '{}' cp -v '{}' /tmp/cv2_deps/ && \
-    cp -v /usr/local/cuda/lib64/libnpp*.so* /tmp/cv2_deps/ && \
-    cp -v /usr/local/cuda/lib64/libcudart.so* /tmp/cv2_deps/ && \
-    cp -P /usr/local/cuda/lib64/libnvrtc.so* /tmp/cv2_deps/ && \
+    # FIX: Robust fallback copying to grab NPP/CUDA libs regardless of whether they land in /usr/local or system path channels
+    (cp -v /usr/local/cuda/lib64/libnpp*.so* /tmp/cv2_deps/ || cp -v /usr/lib/x86_64-linux-gnu/libnpp*.so* /tmp/cv2_deps/) && \
+    (cp -v /usr/local/cuda/lib64/libcudart.so* /tmp/cv2_deps/ || cp -v /usr/lib/x86_64-linux-gnu/libcudart.so* /tmp/cv2_deps/) && \
+    (cp -P /usr/local/cuda/lib64/libnvrtc.so* /tmp/cv2_deps/ || cp -P /usr/lib/x86_64-linux-gnu/libnvrtc.so* /tmp/cv2_deps/) && \
+    (cp -v /usr/local/cuda/lib64/libcublas*.so* /tmp/cv2_deps/ || cp -v /usr/lib/x86_64-linux-gnu/libcublas*.so* /tmp/cv2_deps/) && \
     cp -v /usr/lib/x86_64-linux-gnu/libnvidia-encode.so* /tmp/cv2_deps/ || true
-
 
 # Clean up
 RUN rm -rf ${DEPENDENCY_DIR}
@@ -121,44 +129,53 @@ RUN rm -rf ${DEPENDENCY_DIR}
 FROM openvisualcloud/xeon-ubuntu2204-media-nginx:23.1@sha256:d19eb597dc210134063803630ae2ea1ec84dfd4189138f59551e2f5ed047284a
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG CUDA_MAJOR_VERSION=12
+ARG CUDA_MINOR_VERSION=8
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:/usr/local/cuda/bin:${PATH}"
 
 # Install Runtime Libraries, FFmpeg/VA-API headers, and cuDNN
 # Includes libva and ffmpeg libraries required for HEVC decoding
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    python3 \
-    libgl1 \
-    libglib2.0-0 \
-    libtbb12 \
-    # Critical for Hardware Decoding (HEVC)
-    libva2 \
-    libva-drm2 \
-    libva-x11-2 \
-    libavcodec58 \
-    libavformat58 \
-    libswscale5 \
-    libv4l-0 && \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        python3 \
+        libgl1 \
+        libglib2.0-0 \
+        libtbb12 \
+        # Critical for Hardware Decoding (HEVC)
+        libva2 \
+        libva-drm2 \
+        libva-x11-2 \
+        libavcodec58 \
+        libavformat58 \
+        libswscale5 \
+        libv4l-0 && \
     # Install necessary CUDA packages
     curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -o /tmp/cuda-keyring.deb && \
-        dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb && \
+    dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb && \
     apt-get update && \
-    apt-get install -y -q --no-install-recommends libcudnn9-cuda-12 \
+    apt-get install -y -q --no-install-recommends \
+        libcudnn9-cuda-${CUDA_MAJOR_VERSION} \
         libavcodec-dev \
         libavformat-dev \
-        libavutil-dev  nvidia-cuda-dev && \
+        libavutil-dev  \
+        cuda-nvcc-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION} && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the entire pre-compiled virtual environment from the build stage
 COPY --from=build ${VIRTUAL_ENV} ${VIRTUAL_ENV}
-# Copy NPP (NVIDIA Performance Primitives) libs - Required for OpenCV CUDA
-# COPY --from=build /usr/local/cuda/lib64/libnpp*.so* /usr/local/cuda/lib64/
+
 # Copy additional required CUDA math/parallel libs
 RUN mkdir -p /usr/local/cuda/lib64
 COPY --from=build /tmp/cv2_deps/* /usr/local/cuda/lib64/
+
+# Tells the host engine to expose all GPUs and utility binaries (like nvidia-smi)
+ENV NVIDIA_VISIBLE_DEVICES=all
+# FIX: Cleaned duplicate line later in file to ensure capabilities are consistently initialized
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${VIRTUAL_ENV}/lib:${LD_LIBRARY_PATH}"
 RUN ldconfig
 
@@ -168,7 +185,6 @@ ENV DEVICE="${DEVICE}"
 # Set the working directory in the container
 WORKDIR /home
 COPY requirements.txt /home/
-ENV NVIDIA_DRIVER_CAPABILITIES=all
 
 # RUN pip3 install --no-cache-dir "pytest>=9.0.3" && \
 #     pip3 install --no-cache-dir --require-hashes -r /home/requirements.CPU.txt --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple && \
