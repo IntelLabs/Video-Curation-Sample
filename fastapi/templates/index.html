@@ -146,7 +146,7 @@
         "    const response = await fetch(self.location.origin + '/dashboard_stats'); " +
         "    if (response.ok) { " +
         "      const stats = await response.json(); " +
-        "      const activeIds = Object.keys(stats); " +
+        "      const activeIds = Object.keys(stats).filter(id => stats[id] && stats[id].is_streaming === true); " +
         "      if (activeIds.length > 0) { " +
         "        /* ACTIVE: Poll fast (1s) */ " +
         "        currentDelay = 1000; " +
@@ -163,7 +163,7 @@
         "  timeoutId = setTimeout(fetchData, currentDelay); " +
         "} " +
         "self.onmessage = function(e) { " +
-        "  if (e.data.action === 'start' || e.data.action === 'force') { " +
+        "  if (e.data.action === 'start' || e.data.action === 'force' || e.data.action === 'resume') { " +
         "    clearTimeout(timeoutId); " + // Cancel any pending slow poll
         "    fetchData(); " +             // Run immediately
         "  } " +
@@ -185,7 +185,7 @@
             document.querySelectorAll('.camera-card').forEach(card => {
                 const id = card.id.replace('card-', '');
                 const streamStats = stats[id];
-                if (!activeIds.includes(id) || (streamStats && streamStats.is_streaming === false)) {
+                if (!activeIds.includes(id) || !streamStats || (streamStats && streamStats.is_streaming === false)) {
                     console.log("Removing dead stream:", id);
                     card.remove();
                 }

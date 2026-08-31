@@ -1,6 +1,13 @@
+# ==============================================================================
+# SUPPRESS WARNINGS
 import warnings
 
 warnings.filterwarnings("ignore", message="The value of the smallest subnormal for")
+warnings.filterwarnings(
+    "ignore", category=FutureWarning, message=".*reduce_op` is deprecated.*"
+)
+
+# ==============================================================================
 
 import asyncio
 import json
@@ -20,6 +27,8 @@ from include.utils import PipelineConfig, StreamRequest, str2bool
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.templating import Jinja2Templates
+
+# ==============================================================================
 
 MODEL_CLASSES_FILE = "/var/www/cache/model_classes.json"
 
@@ -62,7 +71,7 @@ else:
 # Standardizes logs across the application and uvicorn server
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d) - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 main_app_logger = logging.getLogger("fastapi_app")
@@ -110,36 +119,58 @@ async def stream_video(data: StreamRequest, request: Request):
         dict: Status message and the updated list of active stream keys.
     """
     url, name = data.url, data.name
+
+    gc.collect()  # Final garbage collection
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # async with request.app.state.stream_lock:
     active_streams = request.app.state.active_streams
+
+    if name in active_streams:
+        print(f"[STREAM_VIDEO]: Clearing old stream for {name}...")
+        active_streams[name].stop()
+        active_streams[name].stop_threads(["process_thread"])
+        active_streams[name] = None
+        del active_streams[name]
 
     # Only initialize if the stream isn't already being processed
     if name not in active_streams:
-        print(f"Starting background worker for {name}...")
+        print(f"[STREAM_VIDEO]: Starting background worker for {name}...")
 
-        # Check if a global model instance should be passed to the handler
-        if RUN_CONFIG.SHARED_MODEL:
-            handler = VideoStreamHandler(
-                url,
-                name,
-                active_streams,
-                config=RUN_CONFIG,
-                model=app.state.model,
-            )
-        else:
-            handler = VideoStreamHandler(
-                url,
-                name,
-                active_streams,
-                config=RUN_CONFIG,
-            )
+        try:
+            # Check if a global model instance should be passed to the handler
+            if RUN_CONFIG.SHARED_MODEL:
+                handler = VideoStreamHandler(
+                    url,
+                    name,
+                    active_streams,
+                    config=RUN_CONFIG,
+                    model=app.state.model,
+                )
+            else:
+                handler = VideoStreamHandler(
+                    url,
+                    name,
+                    active_streams,
+                    config=RUN_CONFIG,
+                )
 
-        # Start the background thread (OpenCV capture + AI inference)
-        handler.start()
+            # Start the background thread (OpenCV capture + AI inference)
+            handler.start()
+            print("[STREAM_VIDEO]: Worker running...")
 
-        # Register the handler in the global state for cross-endpoint access
-        app.state.active_streams[name] = handler
+            # Register the handler in the global state for cross-endpoint access
+            request.app.state.active_streams[name] = handler
+        except RuntimeError:
+            if "handler" in locals():
+                del handler
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print("[STREAM_VIDEO]: Could not start stream. Try again...")
 
-    curr_keys = list(app.state.active_streams.keys())
+    curr_keys = list(request.app.state.active_streams.keys())
     if RUN_CONFIG.DEBUG_FLAG:
         print(
             f"stream DEBUG VIEW | PID: {os.getpid()} | Looking for: {name} | Found Keys: {curr_keys}"
@@ -174,24 +205,51 @@ async def view_stream(name: str, request: Request):
         Yields frames only when the background worker signals a new frame is ready.
         Ensures strict chronological order using frame IDs.
         """
-        shm_names = streamer.shared_details["shm_names"]
-        reader_shms = [mp.shared_memory.SharedMemory(name=n) for n in shm_names]
+        reader_shms = []
         last_sent_id = -1
         try:
+            shm_names = streamer.shared_details.get("shm_names", [])
+            reader_shms = [mp.shared_memory.SharedMemory(name=n) for n in shm_names]
             while streamer.active:
                 # Stop the generator immediately if the browser tab is closed
                 if await request.is_disconnected():
                     main_app_logger.info(f"Client disconnected from {name}")
                     break
 
-                # Wait for the background thread to signal that AI processing is complete
-                await streamer.frame_ready_event.wait()
+                if getattr(streamer, "_is_stopped", False) or not streamer.active:
+                    main_app_logger.info(
+                        f"Video execution finished naturally for {name}. Closing stream."
+                    )
+                    async with request.app.state.stream_lock:
+                        app.state.active_streams.pop(name, None)
+                    # active_streams.pop(name, None)
+                    break
+
+                try:
+                    # Wait for the background thread to signal that AI processing is complete
+                    await asyncio.wait_for(
+                        streamer.frame_ready_event.wait(), timeout=2.0
+                    )
+                except asyncio.TimeoutError:
+                    # Check if stream died or reader stopped
+                    if not streamer.active or getattr(streamer, "_is_stopped", False):
+                        async with request.app.state.stream_lock:
+                            app.state.active_streams.pop(name, None)
+                        break
+                    continue
                 # streamer.frame_ready_event.clear()  # Reset for the next frame
 
                 # streamer.reader_busy.value = True
                 # target_idx = streamer.ready_buffer_idx.value
 
                 # streamer.reader_active_idx.value = target_idx
+                # if not streamer.active:
+                if getattr(streamer, "_is_stopped", False) or not streamer.active:
+                    active_streams.pop(name, None)
+                    streamer.stop_threads(["process_thread"])
+                    async with request.app.state.stream_lock:
+                        app.state.active_streams.pop(name, None)
+                    break
 
                 # Frame Synchronization: ensure we don't send duplicate or out-of-order frames
                 current_id = streamer.shared_details.get("last_id", -1)
@@ -229,15 +287,32 @@ async def view_stream(name: str, request: Request):
                                 + b"\r\n"
                             )
                         last_sent_id = current_id
-                        streamer.last_heartbeat = time.time()
+                        streamer.last_heartbeat = time.perf_counter()
 
                 # Yield control to the event loop to prevent blocking
                 # streamer.frame_ready_event.clear()  # Reset for the next frame
                 await asyncio.sleep(0.001)
         except Exception as e:
-            main_app_logger.error(f"[EXCEPTION] Generator Error: {e}")
-        # finally:
-        #     streamer.reader_busy.value = False # Safety unlock
+            # Check for standard client disconnections (Broken pipe / Connection reset)
+            if isinstance(e, OSError) and e.errno in (32, 104):
+                # main_app_logger.info(f"Stream client disconnected gracefully from {name}")
+                pass
+            else:
+                main_app_logger.error(f" [EXCEPTION] Generator Error: {e}")
+        finally:
+            # streamer.reader_busy.value = False # Safety unlock
+            for shm in reader_shms:
+                try:
+                    shm.close()
+                    shm = None
+                except Exception:
+                    pass
+            reader_shms.clear()
+            # pass
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     return StreamingResponse(
         frame_generator(streamer, request),
@@ -283,7 +358,11 @@ async def dashboard_stats(request: Request):
 
         # Video Backlog: Frames waiting for Disk I/O
         video_backlog = (
-            streamer.write_queue.qsize() if streamer.config.ENABLE_QUERYING else 0
+            streamer.write_queue.qsize()
+            if streamer.config.ENABLE_QUERYING
+            and hasattr(streamer, "write_queue")
+            and hasattr(streamer.write_queue, "qsize")
+            else 0
         )
 
         # IO Backlog: Frames queued for disk storage (if enabled)
@@ -301,7 +380,7 @@ async def dashboard_stats(request: Request):
             "fps": round(streamer.stat_fps, 1),
             "inputfps": round(streamer.input_fps, 1),
             "targetfps": round(streamer.target_fps, 1),
-            "is_streaming": streamer.active,
+            "is_streaming": getattr(streamer, "active", False),
             "clipper_backlog": clipper_backlog,
             "ai_backlog": ai_backlog,
             "video_backlog": video_backlog,
@@ -323,6 +402,11 @@ async def get_status(request: Request):
     }
 
 
+import gc
+
+import torch
+
+
 @app.post("/stop_stream/{name}")
 async def stop_stream(name: str, request: Request):
     """
@@ -330,14 +414,24 @@ async def stop_stream(name: str, request: Request):
     The blocking cleanup logic is offloaded to a separate thread to prevent API hang.
     """
     # Immediately remove from the global state so polling/UI syncs instantly
-    streamer = request.app.state.active_streams.pop(name, None)
+    async with request.app.state.stream_lock:
+        streamer = request.app.state.active_streams.pop(name, None)
 
     if streamer:
         streamer.active = False
 
         # BACKGROUND CLEANUP: Fire-and-forget the heavy hardware teardown
         loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, streamer.stop)
+        await loop.run_in_executor(None, streamer.stop)
+        # streamer.stop_threads(["process_thread"])
+
+        # Force CUDA driver to flush all residual stream contexts
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+        gc.collect()
 
         if streamer.config.DEBUG_FLAG:
             print(f"--- CLEANUP | Stream '{name}' stopped and removed. ---")
@@ -366,6 +460,11 @@ async def stop_all_streams(request: Request):
                 # Offload to executor to keep the API responsive
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, streamer.stop)
+                streamer.stop_threads(["process_thread"])
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     return {
         "status": "success",
@@ -452,7 +551,7 @@ async def get_model_classes():
             return {"classes": classes}
 
     # Fallback structure matching your old format if no model is loaded
-    default_classes = ["class0"]
+    default_classes = ["drone"]
     return {"classes": default_classes}
 
 

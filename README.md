@@ -23,6 +23,11 @@ This sample is powered by the following software stacks:
 <br>
 
 
+## Datasets & Attributions
+This project utilizes third-party open datasets. Please see our [Data Attributions](docs/DATASETS.md) for full licensing, copyright details, and citation parameters.
+<br>
+
+
 ## Install Prerequisites:
 
 - **Time Zone**: Check that the timezone setting of your host machine is correctly configured. Timezone is used during build.

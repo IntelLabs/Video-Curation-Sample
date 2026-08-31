@@ -2,13 +2,10 @@
 // README at: https://github.com/devcontainers/templates/tree/main/src/debian
 {
 	"name": "Pipeline Dev",
-	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-	// "image": "mcr.microsoft.com/devcontainers/base:bullseye"
+
     "build": {
         // Path is relative to the devcontainer.json file.
 		"dockerfile" : "Dockerfile",
-        // "context" : "..",
-		// "dockerfile" : "../fastapi/Dockerfile",
         "context" : "../fastapi",
 		"args":{
 			"HTTP_PROXY" : "${localEnv:HTTP_PROXY}",
@@ -16,30 +13,47 @@
 			"HTTPS_PROXY" : "${localEnv:HTTPS_PROXY}",
 			"https_proxy" : "${localEnv:https_proxy}",
 			"NO_PROXY" : "${localEnv:NO_PROXY}",
-			"no_proxy" : "${localEnv:no_proxy}",
-		}
+			"no_proxy" : "${localEnv:no_proxy}"
+		},
+		// Forces the build phase to use the host network to fix any Ubuntu timeout
+        "options": [
+            "--network=host"
+        ]
     },
+
 	"containerEnv" : {
 		"HTTP_PROXY" : "${localEnv:HTTP_PROXY}",
 		"http_proxy" : "${localEnv:http_proxy}",
 		"HTTPS_PROXY" : "${localEnv:HTTPS_PROXY}",
 		"https_proxy" : "${localEnv:https_proxy}",
 		"NO_PROXY" : "${localEnv:NO_PROXY}",
-		"no_proxy" : "${localEnv:no_proxy}",
+		"no_proxy" : "${localEnv:no_proxy}"
 	},
 
+	// Native, modern way to pass GPUs to the Dev Container
+	// VS Code will automatically append the --gpus all flag if detected
+    "hostRequirements": {
+        "gpu": "optional"
+    },
+
 	"runArgs" : [
-		"--rm",
-		"--gpus", "all",
+		// "-p", "8011:8000",
+		// "--rm",
+		// "--gpus", "all",
 		"--ipc=host",
 		"--name", "pipeline_dev",
-		"-p", "8011:8000",
 		"--cap-add=SYS_NICE",
-		"--shm-size=8gb"
+		"--shm-size=8gb",
+		"--network=host" // Ensures runtime matches the host network
 	],
-	//, "--net=host", "--privileged", "--shm-size=2gb"],
+	//, "--privileged", "--shm-size=2gb"],
 
-	"postStartCommand": "apt-get update -o Acquire::Check-Date=false -y && apt-get install -y gdb sudo && cp -rp /workspace/app/*.md /app/ && cp -rp /workspace/app/.vscode /app/ && cp -rp /workspace/app/.gitignore /app/ && cp -rp /workspace/app/.github /app/",
+    // Forwarding ports cleanly via VS Code spec instead of raw "-p"
+    // "forwardPorts": [],
+    "overrideCommand": true,
+
+	"postStartCommand": "apt-get update -o Acquire::Check-Date=false -y && apt-get install -y gdb sudo",
+	// && cp -rp /workspace/app/*.md /home/ && cp -rp /workspace/app/.vscode /home/ && cp -rp /workspace/app/.gitignore /home/ && cp -rp /workspace/app/.github /home/",
 	// "postAttachCommand": "sudo chown -R ${localEnv:USER} /workspaces",
 
 	// Features to add to the dev container. More info: https://containers.dev/features.
@@ -71,8 +85,6 @@
 	"mounts": [
 		"source=${localWorkspaceFolder}/inputs,target=/watch_dir,type=bind",
 		"source=${localWorkspaceFolder}/fastapi,target=/home,type=bind"
-		// "source=./fastapi/resources,target=/home/resources,type=bind",
-		// "source=./fastapi/tests,target=/home/tests,type=bind"
 	],
 
 	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
