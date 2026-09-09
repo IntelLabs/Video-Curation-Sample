@@ -101,7 +101,4 @@ define(`PROFILE_GPU', `runtime: nvidia
         networks:
             - appnet
         restart: always
-        depends_on:
-            - udf-service
-            - vdms-service
         ifelse(ifdef(`GPU', `yes'), `yes', PROFILE_GPU, PROFILE_DEFAULT)

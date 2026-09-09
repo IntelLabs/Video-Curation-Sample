@@ -26,7 +26,7 @@ Feel free to modify these parameters based on your hardware limitations such as 
 ## Finetune Script
 The finetune script is used to run training, validation, and also test on a provided video (optional).
 To make deployment easy, we provide a Dockerfile which has the ideal environment and allow the script to run with deployment.
-The script has a few adjustible arguments, so feel free to modify the call in next section as needed.
+The script has a few adjustable arguments, so feel free to modify the call in next section as needed.
 ```bash
 # Runs default arguments
 python finetune.py

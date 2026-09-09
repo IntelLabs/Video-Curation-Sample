@@ -40,10 +40,13 @@
 		// "-p", "8011:8000",
 		// "--rm",
 		// "--gpus", "all",
+		"--restart", "unless-stopped",
 		"--ipc=host",
 		"--name", "pipeline_dev",
 		"--cap-add=SYS_NICE",
 		"--shm-size=8gb",
+		"--memory=16g",       // Limits container RAM consumption ceiling
+		"--memory-swap=16g",  // Prevents toxic swap disk compilation leaks
 		"--network=host" // Ensures runtime matches the host network
 	],
 	//, "--privileged", "--shm-size=2gb"],

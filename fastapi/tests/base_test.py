@@ -36,7 +36,6 @@ from include.utils import (
     scale_bbox_xywh,
 )
 
-gdown = install_and_load_pip_package("gdown", attribute_name=None)
 objgraph = install_and_load_pip_package("objgraph", attribute_name=None)
 target_width, target_height = 7680, 4320  # 8K
 # torch.set_grad_enabled(False)
@@ -64,6 +63,9 @@ main_app_logger = logging.getLogger(__name__)
 def download_eval_data(video_name_list, target_fps=TARGET_FPS):
     DATA_DIR = Path(__file__).parent / "eval_data"
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    if "gdown" not in sys.modules:
+        gdown = install_and_load_pip_package("gdown", attribute_name=None)
 
     # DOWNLOAD GT ZIP
     VIDEO_GROUND_TRUTH_URL = (
