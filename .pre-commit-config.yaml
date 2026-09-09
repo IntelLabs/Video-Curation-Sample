@@ -29,11 +29,3 @@ repos:
           "--style=Google",
           "-i"
         ]
-  - repo: https://github.com/codespell-project/codespell
-    rev: v2.4.1
-    hooks:
-      - id: codespell
-        args: [
-          --ignore-words=.codespell-ignore,
-          --skip="./build,./.git,./.devcontainer/Dockerfile"
-        ]
