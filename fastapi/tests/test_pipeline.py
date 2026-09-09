@@ -1128,13 +1128,13 @@ if __name__ == "__main__":
         dest="detection_type",
         help="Filter by detection type (object or motion)",
     )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="all",
-        choices=["cpu", "gpu", "all"],
-        help="Target hardware context selection filter.",
-    )
+    # parser.add_argument(
+    #     "--device",
+    #     type=str,
+    #     default="all",
+    #     choices=["cpu", "gpu", "all"],
+    #     help="Target hardware context selection filter.",
+    # )
     parser.add_argument(
         "--sf",
         action="store_true",
@@ -1165,6 +1165,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    args.device = "gpu"
 
     os.environ["VIDEO_FILENAME"] = args.source
     os.environ["TEST_DURATION_MINS"] = str(args.duration)

@@ -347,4 +347,3 @@ Or add the necessary flag to stop the application and prune containers:
 ./stop.sh –p
 ```
 
-

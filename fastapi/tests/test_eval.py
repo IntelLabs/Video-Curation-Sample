@@ -727,13 +727,13 @@ if __name__ == "__main__":
     )
 
     # Filter tests
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="all",
-        choices=["cpu", "gpu", "all"],
-        help="Filter by device (cpu or gpu)",
-    )
+    # parser.add_argument(
+    #     "--device",
+    #     type=str,
+    #     default="all",
+    #     choices=["cpu", "gpu", "all"],
+    #     help="Filter by device (cpu or gpu)",
+    # )
     parser.add_argument(
         "--type",
         type=str,
@@ -778,6 +778,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    args.device = "gpu"
 
     # UPDATE ENVIRONMENTAL VARIABLES
     os.environ["VIDEO_FILENAME"] = args.source

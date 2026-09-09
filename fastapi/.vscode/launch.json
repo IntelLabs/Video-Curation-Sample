@@ -5,7 +5,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      // Test the model for both CPU and GPU on provided RTSP URL or video file
+      // Test the model on provided RTSP URL or video file
       "name": "Eval Pipeline",
       "type": "debugpy",
       "request": "launch",
@@ -17,11 +17,10 @@
       "subProcess": false,
       "args": [
         "--type", "object",
-        "--device", "gpu"
       ]
     },
     {
-      // Test the model for both CPU and GPU on provided RTSP URL or video file
+      // Test the model on provided RTSP URL or video file
       "name": "Test Model",
       "type": "debugpy",
       "request": "launch",
@@ -35,11 +34,10 @@
         // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
         // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
         // "--source", "<TEST_VIDEO>.mp4",
-        "--device", "gpu"
       ]
     },
     {
-      // Independently test the stream readers for both CPU and GPU on provided RTSP URL or video file
+      // Independently test the stream readers on provided RTSP URL or video file
       "name": "Test Readers (Independent)",
       "type": "debugpy",
       "request": "launch",
@@ -53,7 +51,6 @@
         // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
         // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
         // "--source", "<TEST_VIDEO>.mp4"
-        "--device", "gpu"
       ]
     },
     {
@@ -73,8 +70,7 @@
       "args": [
         // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
         // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
-        // "--source", "<TEST_VIDEO>.mp4"
-        "--device", "gpu",
+        // "--source", "<TEST_VIDEO>.mp4",
         "--type", "object"
       ]
     },
@@ -96,11 +92,9 @@
 
         // AVAILABLE SCENARIO PARAMS
         // Use --scenario to specify tests by number (1 - 4)
-        // 1 - 3: --device (cpu or gpu)
-        // 4: --device, --sf, --type (object or motion)
+        // 4: --sf, --type (object or motion)
 
         "--duration", "1",
-        "--device", "gpu",
         "--type", "object"
       ]
     },
@@ -121,36 +115,12 @@
         // "--source", "<TEST_VIDEO>.mp4",
 
         // SF SCENARIO PARAMS
-        // 4: --device, --sf, --type (object or motion)
+        // 4: --sf, --type (object or motion)
         "--scenario", "4",
         "--sf",
         "--type", "object",
 
         "--duration", "1",
-        "--device", "gpu"
-      ]
-    },
-    {
-      // Test Smart Filtering within pipeline to display the ROIs
-      "name": "Test Pipeline: Scenario 3",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/tests/test_pipeline.py",
-      "cwd": "${workspaceFolder}/tests",
-      "python": "/opt/venv/bin/python",
-      "console": "integratedTerminal",
-      "subProcess": false,
-      "justMyCode": false,
-      "args": [
-        // VIDEOS EXPECTED TO BE rstp url OR IN inputs/ or /watch_dir
-        // "--source", "rtsp://<IP>:<PORT>/<STREAM NAME>",
-        // "--source", "<TEST_VIDEO>.mp4",
-
-        "--scenario", "3",
-        "--type", "object",
-
-        "--duration", "1",
-        "--device", "gpu"
       ]
     },
     {
@@ -159,6 +129,6 @@
       "request": "launch",
       "program": "${file}",
       "console": "integratedTerminal"
-    },
+    }
   ]
 }
