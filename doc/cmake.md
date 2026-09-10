@@ -27,10 +27,10 @@ cd inputs
 ```
 
 #### Deploy Service
-Then use the start script to deploy. An example for CPU is:
+Then use the start script to deploy. An example for GPU is:
 ```bash
 cd ..
-./start_app.sh -e CPU
+./start_app.sh -e GPU
 ```
 <br>
 
@@ -63,21 +63,6 @@ ffmpeg -re -stream_loop -1 -i ${TEST_VIDEO} ${GENERAL_OPTS} \
 #### Deploy Service
 Then use the start script to deploy. An example for GPU and resizing videos to lower resolution (640x640) is:
 ```bash
-./start_app.sh -e GPU -z
+./start_app.sh –m drone_detection
 ```
 <br>
-
-<!--
-## Make Commands:
-
-- **build**: Build the sample (docker) images.
-- **update**: Distribute the sample images to worker nodes.
-- **dist**: Create the sample distribution package.
-- **start/stop_docker_compose**: Start/stop the sample orchestrated by docker-compose.
-- **start/stop_docker_swarm**: Start/stop the sample orchestrated by docker swarm.
-- **start/stop_kubernetes**: Start/stop the sample orchestrated by Kubernetes.
-
-## See Also:
-
-- [Sample Distribution](dist.md)
- -->

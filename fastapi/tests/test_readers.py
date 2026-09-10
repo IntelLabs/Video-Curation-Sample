@@ -61,6 +61,7 @@ main_app_logger = logging.getLogger(__name__)
 import argparse
 import asyncio
 import csv
+import ctypes
 import faulthandler
 import gc
 import multiprocessing as mp
@@ -82,6 +83,7 @@ REPO_DIR = str(Path(__file__).parent.parent)
 sys.path.insert(1, REPO_DIR)
 from base_test import (
     BaseTest,
+    fps_comparison_chart,
 )
 from include.default_configs import (
     CUSTOM_MODEL_FLAG_DEFAULT,
@@ -89,12 +91,13 @@ from include.default_configs import (
     MODEL_NAME_DEFAULT,
     THRESHOLD_VALUE,
 )
-from include.detectors import GeneralObjectDetector
 from include.handlers import (
     get_test_handler,
 )
 from include.utils import (
     PipelineConfig,
+    ResourceTrackerFilter,
+    install_and_load_pip_package,
     str2bool,
 )
 
@@ -145,7 +148,7 @@ def isolated_detection_worker(init_args, test_args, res_queue):
     device = test_args["device"]
     detection_type = test_args["detection_type"]
     sf_enabled = test_args["sf_enabled"]
-    # gt_enabled = test_args["gt_enabled"]
+    gt_enabled = test_args["gt_enabled"]
 
     if device == "gpu" and torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -182,27 +185,22 @@ def isolated_detection_worker(init_args, test_args, res_queue):
             start_reserved = 0
 
     try:
-        instance, _ = get_test_handler(TestModel(), device)
+        instance, _ = get_test_handler(TestReader(), device)
 
         instance.source = init_args["source"]
         instance.name = init_args["name"]
         instance.result_dir = Path(init_args["result_dir"])
         instance.active_streams = init_args["active_streams"]
+        instance.read_frame_only = init_args["read_frame_only"]
         instance.__class__.benchmarks = init_args["benchmarks"]  # Sandbox the metrics
 
-        # vid_dir = instance.result_dir / device
-        # vid_dir.mkdir(parents=True, exist_ok=True)
-        # os.environ["TEST_SUITE_RENDER_DIR"] = str(vid_dir)
-
-        # if instance.source.startswith("rtsp"):
-        #     short_name = "rtsp"
-        # else:
-        #     short_name = Path(instance.source).stem
+        vid_dir = instance.result_dir / device
+        vid_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["TEST_SUITE_RENDER_DIR"] = str(vid_dir)
 
         # config definition
-        model_name = os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT)
         config = PipelineConfig(
-            SHARED_OUTPUT=str(instance.result_dir),  # defined in context
+            SHARED_OUTPUT=str(instance.result_dir),
             CUSTOM_MODEL_FLAG=os.getenv("CUSTOM_MODEL_FLAG", CUSTOM_MODEL_FLAG_DEFAULT),
             DEVICE=device.upper(),
             OMIT_DETECTIONS_FLAG=True,
@@ -210,7 +208,7 @@ def isolated_detection_worker(init_args, test_args, res_queue):
             DEBUG=os.getenv("DEBUG", DEBUG_DEFAULT),
             DEBUG_FRAME_LIMIT=int(os.getenv("DEBUG_FRAME_LIMIT", 100)),
             ENABLE_QUERYING=False,
-            MODEL_NAME=model_name,
+            MODEL_NAME=os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT),
             SMART_FILTERING_ENABLED=sf_enabled,
             THRESHOLD_VALUE=int(os.getenv("THRESHOLD_VALUE", THRESHOLD_VALUE)),
             DETECTION_TYPE=detection_type,
@@ -222,7 +220,7 @@ def isolated_detection_worker(init_args, test_args, res_queue):
         instance.config = config
 
         # kwarg definition
-        instance._testMethodName = f"{model_name}_{detection_type}_{device}"
+        instance._testMethodName = f"{device.upper()}Reader"
         # instance.video_output_name = (
         #     f"{instance._testMethodName}_{short_name}.mp4"
         # )
@@ -256,184 +254,132 @@ def isolated_detection_worker(init_args, test_args, res_queue):
             )
             instance.baseline_before_start = instance.capture_state_snapshot()
 
-        # def profiler_fn():
-        #     profiler = None
-        #     try:
-        #         if str2bool(os.getenv("ENABLE_PROFILING", "False")):
-        #             Profiler = install_and_load_pip_package(
-        #                 "pyinstrument", attribute_name="Profiler"
-        #             )
+        def orig_fn(profiler):
+            return instance.run_realtime_inference(
+                sf_enabled=instance.config.sf_enabled,
+                profiler=profiler,
+                read_frame_only=instance.read_frame_only
+                if hasattr(instance, "read_frame_only")
+                else False,
+                gt_enabled=gt_enabled,
+            )
 
-        #             profiler = Profiler(interval=0.005)  # 5ms sampling interval
+        def profiler_fn():
+            profiler = None
+            try:
+                if str2bool(os.getenv("ENABLE_PROFILING", "False")):
+                    Profiler = install_and_load_pip_package(
+                        "pyinstrument", attribute_name="Profiler"
+                    )
 
-        #             # Telling the statistical sampler to skip recording exception blocks completely
-        #             # stops stack_sampler.py from ballooning RAM over long production runs.
-        #             if hasattr(profiler, "_sampler") and profiler._sampler:
-        #                 profiler._sampler.trace_exceptions = False
+                    profiler = Profiler(interval=0.005)  # 5ms sampling interval
 
-        #             profiler.start()
+                    # Telling the statistical sampler to skip recording exception blocks completely
+                    # stops stack_sampler.py from ballooning RAM over long production runs.
+                    if hasattr(profiler, "_sampler") and profiler._sampler:
+                        profiler._sampler.trace_exceptions = False
 
-        #         # orig_fn(profiler)
-        #         instance.run_realtime_inference(
-        #             sf_enabled=instance.config.sf_enabled,
-        #             profiler=profiler,
-        #             gt_enabled=gt_enabled,
-        #         )
+                    profiler.start()
 
-        #         if str2bool(os.getenv("ENABLE_PROFILING", "False")):
-        #             # 2. Redirect standard error to the filter trap right before report compilation
-        #             original_stderr = sys.stderr
-        #             sys.stderr = ResourceTrackerFilter(original_stderr)
+                orig_fn(profiler)
 
-        #             try:
-        #                 # Force standard stdout to flush out any lingering teardown messages
-        #                 # BEFORE pyinstrument dumps its massive ASCII tree block.
-        #                 sys.stdout.flush()
+                if str2bool(os.getenv("ENABLE_PROFILING", "False")):
+                    # 2. Redirect standard error to the filter trap right before report compilation
+                    original_stderr = sys.stderr
+                    sys.stderr = ResourceTrackerFilter(original_stderr)
 
-        #                 # main_app_logger.info(profiler.output_text(color=True))
-        #                 # profiler.main_app_logger.info(color=True)
-        #                 # prof_output = profiler.output_text(color=True)
-        #                 # main_app_logger.info(
-        #                 #     f"\n=== LATENCY BREAKDOWN FOR {self.name} ({device}) ===\n{prof_output}\n",
-        #                 #
-        #                 # )
+                    try:
+                        # Force standard stdout to flush out any lingering teardown messages
+                        # BEFORE pyinstrument dumps its massive ASCII tree block.
+                        sys.stdout.flush()
 
-        #                 # Save a clean, interactive tree map for visual analysis
-        #                 output_html_path = instance.output_path.replace(
-        #                     ".mp4", "_profile.html"
-        #                 )
-        #                 # output_html_path = f"/tmp/profile_{video_name}_{device}.html"
-        #                 profiler.write_html(output_html_path)
-        #                 main_app_logger.info(
-        #                     f"[PROFILER] Performance tree map exported to {output_html_path}",
-        #                 )
+                        # main_app_logger.info(profiler.output_text(color=True))
+                        # profiler.main_app_logger.info(color=True)
+                        # prof_output = profiler.output_text(color=True)
+                        # main_app_logger.info(
+                        #     f"\n=== LATENCY BREAKDOWN FOR {self.name} ({device}) ===\n{prof_output}\n",
+                        #
+                        # )
 
-        #             finally:
-        #                 sys.stderr = original_stderr
-        #                 if "profiler" in locals():
-        #                     try:
-        #                         # Force the Python interpreter to detach pyinstrument's sampling hooks
-        #                         sys.setprofile(None)
+                        # Save a clean, interactive tree map for visual analysis
+                        output_html_path = instance.output_path.replace(
+                            ".mp4", "_profile.html"
+                        )
+                        # output_html_path = f"/tmp/profile_{video_name}_{device}.html"
+                        profiler.write_html(output_html_path)
+                        main_app_logger.info(
+                            f"[PROFILER] Performance tree map exported to {output_html_path}",
+                        )
 
-        #                         # Completely decouple internal statistical sessions to drop C-heap frames
-        #                         if hasattr(profiler, "_last_session"):
-        #                             profiler._last_session = None
-        #                         if hasattr(profiler, "last_session"):
-        #                             profiler.last_session = None
+                    finally:
+                        sys.stderr = original_stderr
+                        if "profiler" in locals():
+                            try:
+                                # Force the Python interpreter to detach pyinstrument's sampling hooks
+                                sys.setprofile(None)
 
-        #                         # Forcibly clear out internal memoryview strings caching tree metrics
-        #                         if (
-        #                             hasattr(profiler, "session")
-        #                             and profiler.session is not None
-        #                         ):
-        #                             if hasattr(profiler.session, "frame_groups"):
-        #                                 profiler.session.frame_groups = None
-        #                             if hasattr(profiler.session, "samples"):
-        #                                 profiler.session.samples = []
+                                # Completely decouple internal statistical sessions to drop C-heap frames
+                                if hasattr(profiler, "_last_session"):
+                                    profiler._last_session = None
+                                if hasattr(profiler, "last_session"):
+                                    profiler.last_session = None
 
-        #                             # Purge compiled tree metrics structures
-        #                             profiler.session = None
-        #                         del profiler
-        #                     except Exception:
-        #                         pass
+                                # Forcibly clear out internal memoryview strings caching tree metrics
+                                if (
+                                    hasattr(profiler, "session")
+                                    and profiler.session is not None
+                                ):
+                                    if hasattr(profiler.session, "frame_groups"):
+                                        profiler.session.frame_groups = None
+                                    if hasattr(profiler.session, "samples"):
+                                        profiler.session.samples = []
 
-        #                     # Trigger an immediate native Linux heap compression pass
-        #                     # This grabs the newly abandoned pyinstrument C-heap blocks and
-        #                     # flushes them to the OS before the fixture assessment snapshot fires!
-        #                     gc.collect()
-        #                     try:
-        #                         libc = ctypes.CDLL("libc.so.6")
-        #                         libc.malloc_trim(0)
-        #                     except Exception:
-        #                         pass
+                                    # Purge compiled tree metrics structures
+                                    profiler.session = None
+                                del profiler
+                            except Exception:
+                                pass
 
-        #     except Exception:
-        #         traceback.print_exc()
+                            # Trigger an immediate native Linux heap compression pass
+                            # This grabs the newly abandoned pyinstrument C-heap blocks and
+                            # flushes them to the OS before the fixture assessment snapshot fires!
+                            gc.collect()
+                            try:
+                                libc = ctypes.CDLL("libc.so.6")
+                                libc.malloc_trim(0)
+                            except Exception:
+                                pass
 
-        # if str2bool(os.getenv("ENABLE_PROFILING", "False")) and hasattr(
-        #     instance, "process_thread"
-        # ):
-        #     # Re-initialize the thread context using our safe profile wrapper proxy
-        #     instance.process_thread = threading.Thread(target=profiler_fn, daemon=True)
+            except Exception:
+                traceback.print_exc()
 
-        # instance.VIDEO_GT_DETAILS = None
-        # instance.duration_target = 30
+        if str2bool(os.getenv("ENABLE_PROFILING", "False")) and hasattr(
+            instance, "process_thread"
+        ):
+            # Re-initialize the thread context using our safe profile wrapper proxy
+            instance.process_thread = threading.Thread(target=profiler_fn, daemon=True)
 
-        # instance.start()
+        instance.VIDEO_GT_DETAILS = None
+        instance.duration_target = 30
 
-        # while instance.active or not instance._is_stopped:
-        #     time.sleep(0.25)
-        #     if getattr(instance, "status", None) == "DONE":
-        #         break
+        instance.start()
 
-        #     if hasattr(instance, "process_thread") and instance.process_thread is not None:
-        #         if not instance.process_thread.is_alive():
-        #             main_app_logger.info(
-        #                 "[TEST HARNESS] Background worker exited. Breaking loop.",
-        #             )
-        #             break
+        while instance.active or not instance._is_stopped:
+            time.sleep(0.25)
+            if getattr(instance, "status", None) == "DONE":
+                break
 
-        # instance.stop_threads(["process_thread"])
+            if (
+                hasattr(instance, "process_thread")
+                and instance.process_thread is not None
+            ):
+                if not instance.process_thread.is_alive():
+                    main_app_logger.info(
+                        "[TEST HARNESS] Background worker exited. Breaking loop.",
+                    )
+                    break
 
-        #  Run the actual model loader
-        instance.processor = GeneralObjectDetector(
-            instance.config,
-            device=instance.device_input,
-            timer_enabled=False,
-            resize_hw=(instance.resize_h, instance.resize_w),
-            frame_hw=(instance.frame_height, instance.frame_width),
-            target_fps=instance.target_fps,
-            result_dir=instance.result_dir,
-            run_name=instance._testMethodName,
-            debug_frame_limit=-1,
-        )
-
-        total_session_start = time.perf_counter()
-
-        print("Running model...", flush=True)
-        results = instance.processor.model.predict(
-            source=instance.source,
-            imgsz=(instance.frame_height, instance.frame_width),
-            batch=1,
-            device=instance.config.device_input,
-            stream=any(x in instance.source for x in [".mp4", "rtsp"]),
-            conf=instance.config.DETECTION_THRESHOLD,
-            iou=instance.config.IOU_THRESHOLD,
-            show=False,
-            save=True,
-            project=str(instance.config.SHARED_OUTPUT),
-            name="predict_results",
-            exist_ok=True,  # overwrite if folder exists
-            data={
-                "names": {
-                    i: name for i, name in enumerate(instance.processor.label_source)
-                }
-            },
-        )
-
-        frame_cnt = 0
-        total_model_preprocess = 0.0
-        total_model_inference = 0.0
-        total_model_postprocess = 0.0
-        for result in results:
-            frame_cnt += 1
-            # Each iteration computes and yields the next frame's latency
-            total_model_preprocess += result.speed.get("preprocess", 0.0)
-            total_model_inference += result.speed.get("inference", 0.0)
-            total_model_postprocess += result.speed.get("postprocess", 0.0)
-
-        # Capture the true real-world duration across all operational processing layers
-        real_world_latency_ms = (time.perf_counter() - total_session_start) * 1000
-
-        print("Summarizing run...", flush=True)
-        instance._finalize_benchmarks(
-            real_world_latency_ms,
-            frame_cnt,
-            total_model_preprocess,
-            total_model_inference,
-            total_model_postprocess,
-        )
-        instance.stop()
+        instance.stop_threads(["process_thread"])
 
         # Force early hardware driver sweep before unbinding threads
         if instance.device_input == "cuda" and torch.cuda.is_available():
@@ -503,12 +449,15 @@ def isolated_detection_worker(init_args, test_args, res_queue):
 @pytest.fixture(scope="class")
 def setup_context(request):
     """Replaces setUpClass: Runs once per test class."""
-    # Initialize shared paths/results
     current_test_filename = Path(__file__).stem
     test_dir = Path(__file__).parent
     main_path = test_dir.parent
     video_dir = main_path / "inputs"
 
+    request.cls.read_frame_only = True
+
+    # model_name = os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT)
+    # Handler.__init__ (main items)
     request.cls.source = os.getenv("VIDEO_FILENAME", "anduril_swarm_8K.mp4")
     is_rtsp = "rtsp://" in request.cls.source
     if not is_rtsp:
@@ -526,17 +475,20 @@ def setup_context(request):
     else:
         request.cls.name = "rtsp"
         request.cls.is_rtsp = True
+    # request.cls.test_duration_mins = float(os.getenv("TEST_DURATION_MINS", 0.25))
 
-    model_name = os.getenv("MODEL_NAME", MODEL_NAME_DEFAULT)
-    request.cls.result_dir = test_dir / f"{current_test_filename}_results/{model_name}"
+    request.cls.result_dir = (
+        test_dir
+        / f"{current_test_filename}_results"  # /{model_name}"
+        / request.cls.name
+    )
     request.cls.result_dir.mkdir(parents=True, exist_ok=True)
 
     # Benchmark statistics
     request.cls.benchmarks = []
-    request.cls.csv_filename = f"model_benchmarks_{request.cls.name}.csv"
+    request.cls.csv_filename = f"reader_benchmarks_{request.cls.name}.csv"
     request.cls.csv_path = request.cls.result_dir / request.cls.csv_filename
 
-    # Initialize class vars
     # request.cls.active = True
     request.cls.active_streams = {}
 
@@ -550,21 +502,59 @@ def setup_context(request):
             r for r in request.cls.benchmarks if r and "Test Name" in r
         ]
         results = request.cls.benchmarks
-        if results:
-            keys = results[0].keys()
+        for row in results:
+            if "GPU" in row["Test Name"]:
+                match_name = row["Test Name"].replace("GPU", "CPU")
+                cpu_row = next(
+                    (r for r in results if r["Test Name"] == match_name), None
+                )
+                if cpu_row:
+                    gpu_fps = float(row["Pipeline FPS (Target frames)"])
+                    cpu_fps = float(cpu_row["Pipeline FPS (Target frames)"])
+                    speedup = (gpu_fps / cpu_fps) if cpu_fps > 0 else 0
+                    row["Pipeline Speedup vs CPU"] = f"{speedup:.2f}x"
+                else:
+                    row["Pipeline Speedup vs CPU"] = "N/A"
+            else:
+                row["Pipeline Speedup vs CPU"] = "Baseline (CPU)"
 
-            with open(str(request.cls.csv_path), "w", newline="") as f:
-                dict_writer = csv.DictWriter(f, fieldnames=keys)
-                dict_writer.writeheader()
-                dict_writer.writerows(results)
+        keys = results[0].keys()
+        with open(str(request.cls.csv_path), "w", newline="") as f:
+            dict_writer = csv.DictWriter(f, fieldnames=keys)
+            dict_writer.writeheader()
+            dict_writer.writerows(results)
 
-            print(
-                f"\n[FINAL] Benchmarks saved to {request.cls.csv_filename}", flush=True
+        main_app_logger.info(f"[FINAL] Benchmarks saved to {request.cls.csv_path}")
+
+        main_app_logger.info("=" * 80)
+        main_app_logger.info(
+            f"{'Test Name':<25} | {'Pipeline FPS (Target)':<21} | {'Avg Frame Reading (ms)':<22} | {'Pipeline Speedup vs CPU':<15}",
+        )
+        main_app_logger.info("-" * 80)
+
+        for r in results:
+            main_app_logger.info(
+                f"{r['Test Name']:<25} | {r['Pipeline FPS (Target frames)']:<21} | {r['Avg Frame Reading (ms)']:<22} | {r.get('Pipeline Speedup vs CPU', 'N/A'):<10}",
             )
+        main_app_logger.info("=" * 125)
+
+        chart_path = (
+            request.cls.result_dir
+            / f"{request.cls.csv_filename.replace('.csv', '')}_pipelineFPS.png"
+        )
+        fps_comparison_chart(chart_path, results, fps_key="Pipeline FPS (Video frames)")
+
+        chart_path = (
+            request.cls.result_dir
+            / f"{request.cls.csv_filename.replace('.csv', '')}_pipelineFPS_target.png"
+        )
+        fps_comparison_chart(
+            chart_path, results, fps_key="Pipeline FPS (Target frames)"
+        )
 
 
 @pytest.mark.usefixtures("setup_context")
-class TestModel(BaseTest):
+class TestReader(BaseTest):
     """
     Pytest runner that spawns the isolated worker, waits for completion,
     and merges the returned metrics into the main class for CSV/Chart generation.
@@ -573,7 +563,7 @@ class TestModel(BaseTest):
     benchmarks = []  # Class-level attribute required by _finalize_benchmarks
 
     @pytest.mark.parametrize("device", ["gpu", "cpu"])
-    def test_model(self, device):
+    def test_device_reader(self, device):
         # Pull the values dynamically assigned by the setup_context fixture
         init_args = {
             "source": self.__class__.source,
@@ -581,9 +571,9 @@ class TestModel(BaseTest):
             "result_dir": str(self.__class__.result_dir),
             "active_streams": {},
             "benchmarks": self.__class__.benchmarks,
+            "read_frame_only": self.__class__.read_frame_only,
         }
 
-        os.environ["DEVICE"] = device
         detection_type = "object"  # request.node.callspec.params.get("detection_type")
         sf_enabled = False  # request.node.callspec.params.get("sf_enabled")
         gt_enabled = False
@@ -626,85 +616,61 @@ class TestModel(BaseTest):
                 self.__class__.benchmarks.append(metrics)
 
                 main_app_logger.info(
-                    f"[TEST HARNESS] Worker returned successfully. Model Est. FPS: {metrics.get('Model Est. FPS')}"
+                    f"[TEST HARNESS] Worker returned successfully. Display FPS: {metrics.get('Display FPS')}"
                 )
 
                 # Basic functionality assertions
                 assert metrics is not None, "Metrics dictionary should not be None."
-                assert int(metrics.get("Frames Processed", 0)) > 0, (
+                assert int(metrics.get("Output Frames", 0)) > 0, (
                     "No frames were written to output."
                 )
         else:
             pytest.fail("Worker process died unexpectedly without returning metrics.")
 
-    # HELPERS --------------------------------------------
-    def _finalize_benchmarks(
-        self,
-        real_world_latency_ms,
-        n_frames,
-        total_model_preprocess,
-        total_model_inference,
-        total_model_postprocess,
-    ):
-        """Aggregates metrics and adds them to the results list."""
-        total_model_ms = (
-            total_model_preprocess + total_model_inference + total_model_postprocess
-        )
-
-        duration_s = n_frames / self.input_fps if self.input_fps > 0 else 0
-
-        real_latency_s = real_world_latency_ms / 1000.0
-        real_est_fps = n_frames / real_latency_s if real_latency_s > 0 else 0
-        model_fps = n_frames / (total_model_ms / 1000.0) if total_model_ms > 0 else 0
-
-        # Construct dictionary block matching test_detections structure
-        stats = {
-            "Test Name": self._testMethodName,
-            "Detection Type": self.config.DETECTION_TYPE,
-            "Device": self.device,
-            "Smart Filtering": "Enabled" if self.config.sf_enabled else "Disabled",
-            "Video": self.name,
-            "Video Duration (s)": f"{duration_s:.4f}",
-            "Video FPS": f"{self.input_fps:.2f}",
-            "Pipeline Latency (s)": f"{real_latency_s:.2f}",
-            "Frames Processed": n_frames,
-            "Real Est. FPS": f"{real_est_fps:.2f}",
-            "Model Est. FPS": f"{model_fps:.2f}",
-            "Model Avg Pre-processing (ms)": f"{total_model_preprocess / n_frames:.2f}",
-            "Model Avg Inference (ms)": f"{total_model_inference / n_frames:.2f}",
-            "Model Avg Post-processing (ms)": f"{total_model_postprocess / n_frames:.2f}",
-        }
-        self.__class__.benchmarks.append(stats)
-        print(stats, flush=True)
-
-        print(f"\n[{self._testMethodName}] Latency: {real_latency_s:.2f} sec")
-        print(f"\n[{self._testMethodName}] Real Est. FPS: {real_est_fps:.2f}")
-        print(
-            f"\n[{self._testMethodName}] Model Est. FPS: {model_fps:.2f} ({n_frames} frames)"
-        )
-
-    def setup_threads(self):
-        """Overrides handlers.py to bind threads dynamically to the test instance."""
-        pass
-
-    def start(self):
-        """
-        Starts the decoupled ingestion and inference threads in the correct order.
-        """
-        # PRE-SYNC: Ensure GPU is idle before timing starts
-        if self.device_input == "cuda" and torch.cuda.is_available():
-            torch.cuda.synchronize()
-
-        # Start the hardware-decoupled reader first
-        # self.reader.start()
-
-        return self
-
 
 # =========================================================================
 # MAIN
 # =========================================================================
+def get_pytest_filter_expression(args):
+    main_app_logger.info("\n" + "=" * 50)
+    main_app_logger.info("TARGET SELECTION PREVIEW")
+    main_app_logger.info("=" * 50)
+
+    filter_expression = Path(__file__).stem
+    # applied_subs = []
+
+    if args.sf_enabled is not None:
+        # Target exact parameter tokens generated by pytest parametrization
+        sf_str = "-True-" if args.sf_enabled else "-False-"
+        filter_expression += f" and {sf_str}"
+        # applied_subs.append(f"sf_enabled={args.sf_enabled}")
+
+    if args.detection_type:
+        filter_expression += f" and {args.detection_type}"
+
+    # Target hardware context selection filter applies globally across all test cases
+    if args.device.lower() != "all":
+        main_app_logger.info(f"  💻 Hardware Context Constraint: {args.device.upper()}")
+        filter_expression = f"({filter_expression}) and {args.device.lower()}"
+    else:
+        main_app_logger.info("  💻 Hardware Context Constraint: ALL AVAILABLE")
+
+    main_app_logger.info("=" * 50)
+    main_app_logger.info(
+        f"COMPILED PYTEST KEYWORD EXPRESSION:\n   👉 {filter_expression}"
+    )
+    main_app_logger.info("=" * 50 + "\n")
+
+    return filter_expression
+
+
 if __name__ == "__main__":
+    # Force all PyTorch extension handles to compile and load BEFORE threads spawn
+    # if torch.cuda.is_available():
+    #     _ = torch.zeros(1).cuda()
+    #     import torch._ops
+    #     import torch.utils
+
     # TEST ARGUMENTS
     parser = argparse.ArgumentParser(description="Run Video Detection Pipeline Tests")
     parser.add_argument(
@@ -712,7 +678,7 @@ if __name__ == "__main__":
         "--source",
         type=str,
         default="anduril_swarm_8K.mp4",
-        help="Video filename (located in /inputs) or RTSP target stream endpoint",
+        help="Video filename (located in /inputs)",
     )
 
     # MODEL TO USE
@@ -732,12 +698,48 @@ if __name__ == "__main__":
     )
 
     # Filter tests
+    parser.add_argument(
+        "--type",
+        type=str,
+        choices=["object", "motion"],
+        dest="detection_type",
+        help="Filter by detection type (object or motion)",
+    )
     # parser.add_argument(
     #     "--device",
     #     type=str,
-    #     choices=["cpu", "gpu"],
+    #     default="all",
+    #     choices=["cpu", "gpu", "all"],
     #     help="Filter by device (cpu or gpu)",
     # )
+    parser.add_argument(
+        "--sf",
+        action="store_true",
+        default=None,
+        dest="sf_enabled",
+        help="Filter by Smart Filtering",
+    )
+
+    # DEBUGGING
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug message and save intermediate images for Smart Filtering tests",
+    )
+    parser.add_argument(
+        "-n",
+        type=int,
+        default=100,
+        dest="debug_frame_limit",
+        help="Number of frames used for debugging [Default: 100]",
+    )
+
+    # PROFILING
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable profiling",
+    )
 
     args = parser.parse_args()
     args.device = "gpu"
@@ -746,30 +748,28 @@ if __name__ == "__main__":
     os.environ["VIDEO_FILENAME"] = args.source
     os.environ["CUSTOM_MODEL_FLAG"] = "True" if args.custom_model_flag else "False"
     os.environ["MODEL_NAME"] = args.model_name
-    # os.environ["DEBUG"] = "1" if args.debug else "0"
-    # os.environ["DEBUG_FRAME_LIMIT"] = str(args.debug_frame_limit)
+    os.environ["DEBUG"] = "1" if args.debug else "0"
+    os.environ["DEBUG_FRAME_LIMIT"] = str(args.debug_frame_limit)
+    os.environ["ENABLE_PROFILING"] = "True" if args.profile else "False"
 
     # detection_type, device, sf_enabled
-    run_args = []
-    # if args.detection_type:
-    #     run_args.append(args.detection_type)
-    if args.device:
-        run_args.append(args.device)
-    # if args.sf_enabled:
-    #     run_args.append(str(args.sf_enabled))
+    filter_expression = get_pytest_filter_expression(args)
 
     # PYTEST COMMAND
     pytest_args = [
+        "-k",
+        filter_expression,
         "-s",
         "-v",
-        "--log-cli-level=DEBUG",
+        # "--log-cli-level=DEBUG",
         "-W",
-        "ignore::_pytest.warning_types.PytestAssertRewriteWarning",
+        "ignore:Exception ignored in.*SharedMemory.__del__:UserWarning",
+        # Target the exact module rewrite warning path inside the configuration framework
+        "-W",
+        "ignore:Module already imported so cannot be rewritten; anyio:_pytest.warning_types.PytestAssertRewriteWarning",
         __file__,
-    ]  # -s -v --log-cli-level=DEBUG
-    if run_args:
-        pytest_args.extend(["-k", " and ".join(run_args)])
+    ]
 
-    print(f"Launching tests for {args.source}")
+    # main_app_logger.info(f"Launching tests for {args.source}")
 
     sys.exit(pytest.main(pytest_args))
