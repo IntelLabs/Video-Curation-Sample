@@ -2,7 +2,7 @@
 
 This guide provides details on how to fine-tune a YOLO model using Ultralytics on GPU ONLY.
 For simplicity, the use-case for this guide is Drone Detection.
-Therefore, the goal is to finetune the YOLO11n model to detect only one class (`drone`).
+Therefore, the goal is to fine-tune the YOLO11n model to detect only one class (`drone`).
 
 
 ## Drone Detection Dataset
@@ -23,8 +23,8 @@ The configurations used for training on 2x NVIDIA A100 80GB PCIe are specified i
 Feel free to modify these parameters based on your hardware limitations such as VRAM of GPU.
 
 
-## Finetune Script
-The finetune script is used to run training, validation, and also test on a provided video (optional).
+## Fine-tune Script
+The fine-tune script is used to run training, validation, and also test on a provided video (optional).
 To make deployment easy, we provide a Dockerfile which has the ideal environment and allow the script to run with deployment.
 The script has a few adjustable arguments, so feel free to modify the call in next section as needed.
 ```bash
@@ -42,7 +42,7 @@ THe following arguments are available:
 | --dataset-name DATASET_NAME                     | `SynDroneVision`         | Name of dataset; A directory with this name should be in --data-dir (-d). |
 | -l LABELS_STR,<br>--labels LABELS_STR           | `drone`                  | A comma-separated list of labels (classes) for model. |
 | --yaml-name YAML_NAME                           | `drones`                 | Name of file (YAML_NAME.yaml) with data specifications. Be sure the `path` in this file correlates with `LOCAL_DATA_DIR` value. |
-| --no-train                                      |                          | Skip finetune stage |
+| --no-train                                      |                          | Skip fine-tune stage |
 | --test-video TEST_VIDEO                         |                          | Test video path for prediction. If not provided, inference is disabled |
 <br>
 
@@ -56,7 +56,7 @@ To avoid modifying your system for training, you can use the provided Dockerfile
 For easy access of host data, the `inputs` directory containing any input videos, the `finetune/app` directory containing this code, and the parent directory where datasets are stored (i.e. `/data1/datasets`) are mounted to the container.
 Please see below for instructions for deploying container via `docker` and `docker compose`.
 ***NOTE:*** `REPO_DIR` is the path of this repo's main directory. Also be sure to update values in `.env` if using docker compose.
-- **Docker:** For this option, be sure to build container first.  You can start the container and finetune script via run command.
+- **Docker:** For this option, be sure to build container first.  You can start the container and fine-tune script via run command.
   ```bash
   REPO_DIR=`pwd`
   LOCAL_DATA_DIR=/path/to/your/actual/data/directory
@@ -65,7 +65,7 @@ Please see below for instructions for deploying container via `docker` and `dock
   cd finetune
   docker build -f Dockerfile -t lcc_finetune:latest .
 
-  # Run finetune script default values
+  # Run fine-tune script default values
   docker run -it --ipc=host --gpus all \
   --name finetune_container \
   -v ${REPO_DIR}/inputs:/watch_dir \

@@ -6,8 +6,10 @@ The application can process high-resolution video in real-time using a Smart Fil
 
 Please see [High Resolution Object Detection Pipeline](./doc/pipeline.md) for more details.
 
-<center><IMG src="./doc/Pipeline.png" width="500px"></center>
-<center>High-level High Resolution Object Detection Pipeline</center>
+<div align="center">
+  <img src="./doc/Pipeline.png" width="600" alt="High-level High Resolution Object Detection Pipeline">
+  <p>High-level High Resolution Object Detection Pipeline</p>
+</div>
 
 
 ### License Obligations
@@ -55,8 +57,9 @@ To start the application, run the following:
 ### View Live Detections
 Launch your browser and browse to ```https://<hostname>:30077```. The sample UI is similar to the following:
 
-<center><IMG src="doc/sample-ui.gif" height="270px"></IMG></center>
-
+<div align="center">
+  <img src="sample-ui.gif" width="700">
+</div>
 
 ### Shutdown
 To shutdown this application, run the following:

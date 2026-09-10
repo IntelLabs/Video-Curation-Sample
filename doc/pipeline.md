@@ -7,9 +7,10 @@ HR video streams typically achieve higher accuracy in object detection, therefor
 
 To solve this issue, we created a Smart Filtering Pipeline to significantly reduce pixel processing (compute) by *automatically* identifying the regions of interest (ROIs) which is then forwarded to the detection model.
 
-<center><IMG src="Pipeline.png" width="600px"></center>
-<center>High-level High Resolution Object Detection Pipeline</center>
-<br>
+<div align="center">
+  <img src="Pipeline.png" width="600" alt="High-level High Resolution Object Detection Pipeline">
+  <p>High-level High Resolution Object Detection Pipeline</p>
+</div>
 
 
 ## Smart Filtering
@@ -18,8 +19,10 @@ This helps reduce the compute while maintaining detection accuracy.
 In smart filtering, we use motion to help identify ROIs, which is ideal for surveillance and applications such as the test use-case, drone detection, with stationary cameras.
 Keep in mind, if camera is NOT stationary, some background movement may be captured as foreground objects due to background subtraction algorithm.
 
-<center><IMG src="PipelineFlow.png" width="600px"></center>
-<center>Flow of Smart Filtering Pipeline</center>
+<div align="center">
+  <img src="PipelineFlow.png" width="600" alt="Flow of Smart Filtering Pipeline">
+  <p>Flow of Smart Filtering Pipeline</p>
+</div>
 <br>
 
 The current filtering pipeline includes the following steps:
@@ -35,6 +38,33 @@ The current filtering pipeline includes the following steps:
 1. **Detection:** Use identified ROIs in object detection
 
 ***NOTE:*** If the video resolution is less than 2K (1920x1080), Smart Filtering is disabled as most systems can support this resolution in real-time.
+
+
+### Configurable Parameters
+
+The following are parameters used to fine-tune the Smart Filtering pipeline.
+
+| Category               | Variable                             | Default     | Description |
+| ---------------------- | ------------------------------------ | ----------- |------------ |
+| Smart Filtering        | SMART_FILTERING_PIXEL_CONSTRAINT     | 1920 * 1080 | Smart filtering is enabled if video is larger than 2K. YOLO models typically can efficiently process lower resolution without overloading resources.  |
+| Smart Filtering        | SMART_FILTERING_WARMUP               | False       | Warmup all components of pipeline |
+| Background Subtraction | BKGD_SUB_INCLUDE_HISTORY             | False       | Include temporal history with mask generation. True: dilate masks in history and combine into single current mask via `method`. The final background model mask is generated using the union of combined mask (if true) and current background mask. |
+| Background Subtraction | BKGD_SUB_INCLUDE_HISTORY_DILATE_KERNEL_SIZE | 15   | Kernel used to dilate temporal masks if `BKGD_SUB_INCLUDE_HISTORY` is True. |
+| Background Subtraction | BKGD_SUB_INCLUDE_HISTORY_METHOD      | or          | Method used to combine mask history. Specify `and` or `or`. |
+| Background Subtraction | BKGD_SUB_INCLUDE_HISTORY_TEMPORAL_SIZE | 3         | Number of previous masks to maintain for temporal mask generation. |
+| Background Subtraction | BKGD_SUB_MOG2_DETECTSHADOWS          | False       | A boolean to enable/disable shadow detection.  |
+| Background Subtraction | BKGD_SUB_MOG2_HISTORY                | 2 * TARGET_FPS | The number of previous frames used to build the background model. Higher value: More stable background. It is less likely to be "fooled" by a tree swaying slightly, but it takes much longer for a newly stopped object (like a parked car) to become part of the background. Lower value: The model adapts very quickly. Useful for rapidly changing lighting, but may cause moving objects to "disappear" into the background if they move slowly. |
+| Background Subtraction | BKGD_SUB_MOG2_LR                     | 1 / BKGD_SUB_MOG2_HISTORY | Learning rate to use for background model |
+| Background Subtraction | BKGD_SUB_MOG2_VARTHRESHOLD           | 50          | The Mahalanobis distance threshold to decide whether a pixel is foreground or background. Higher value (Lower sensitivity): This reduces "salt and pepper" noise and ignores small fluctuations, but you might lose the edges of your actual objects (making bounding boxes smaller/fragmented). Lower value (Higher sensitivity): You’ll catch every tiny movement, but you’ll get a lot of noise from compression artifacts or camera sensor grain. |
+| Threshold              | THRESHOLD_VALUE                      | 127         | The threshold value used to classify pixel intensities. |
+| Clean Mask             | DILATE_KERNEL_SIZE                   | 5           | Kernel used to dilate mask AFTER threshold is applied. |
+| Identify ROIs          | ROI_BB_FULL_RES_PADDING              | MODEL_W * .02 | Padding to add to ROIs to make sure detection captures full box. |
+| Identify ROIs          | ROI_CONTAINMENT_THRESH               | 0.95         | Input argument to filter_contained_boxes used for removing smaller contained ROIs. Current value is 0.9 (90%). |
+| Identify ROIs          | ROI_DISTANCE_THRESH_RATIO            | 0.05        | Input argument to merge ROIs is distance less than this parameter. |
+| Identify ROIs          | ROI_MAX_RELATIVE_SIZE_RATIO          | 1.0         | Ratio of frame width/height to limit ROIs. Currently accepts ROI if width/height less than frame size. |
+| Identify ROIs          | ROI_MERGE_SIZE_LIMIT                 | MODEL_W * 1.25 | The max width/height of merged ROIs. Value is equivalent as MODEL_W (expected imgsz for model.predict) |
+| Identify ROIs          | ROI_MIN_AREA_RATIO                   | 0.01        | Minimum area ratio of pixels for objects/motion. This value is in terms of pixels in resized image.  Currently value is set to 41 pixels (1% of width x 1% of height). |
+<br>
 
 
 ### Testing
@@ -115,7 +145,7 @@ lcc_fastapi:stream tail -f /dev/null
 
 You can attach to the container to debug the filtering as needed.
 
-For testing other components, please see [Testing Pipeline Components](#testing-pipeline-components) section.
+For testing other components, please see [Test Pipeline Components](#test-pipeline-components) section.
 <br>
 
 
@@ -144,36 +174,6 @@ Edit the file as follows:
 ```
 <br>
 
-### Configurable Parameters
-
-The following are parameters used to fine-tune the Smart Filtering pipeline.
-
-| Category               | Variable                             | Default     | Description |
-| ---------------------- | ------------------------------------ | ----------- |------------ |
-| Smart Filtering        | SMART_FILTERING_PIXEL_CONSTRAINT     | 1920 * 1080 | Smart filtering is enabled if video is larger than 2K. YOLO models typically can efficiently process lower resolution without overloading resources.  |
-| Background Subtraction | BKGD_SUB_INCLUDE_HISTORY             | True        | Include temporal history with mask generation. True: dilate masks in history and combine into single current mask via `method`. The final background model mask is generated using the union of combined mask (if true) and current background mask. |
-| Background Subtraction | BKGD_SUB_INCLUDE_HISTORY_DILATE_KERNEL_SIZE | 15 x 15 | Kernel used to dilate temporal masks if `BKGD_SUB_INCLUDE_HISTORY` is True. |
-| Background Subtraction | BKGD_SUB_INCLUDE_HISTORY_METHOD      | or          | Method used to combine mask history. Specify `and` or `or`. |
-| Background Subtraction | BKGD_SUB_INCLUDE_HISTORY_TEMPORAL_SIZE | 3         | Number of previous masks to maintain for temporal mask generation. |
-| Background Subtraction | BKGD_SUB_MOG2_DETECTSHADOWS          | False       | A boolean to enable/disable shadow detection.  |
-| Background Subtraction | BKGD_SUB_MOG2_HISTORY                | 2 * TARGET_FPS | The number of previous frames used to build the background model. Higher value: More stable background. It is less likely to be "fooled" by a tree swaying slightly, but it takes much longer for a newly stopped object (like a parked car) to become part of the background. Lower value: The model adapts very quickly. Useful for rapidly changing lighting, but may cause moving objects to "disappear" into the background if they move slowly. |
-| Background Subtraction | BKGD_SUB_MOG2_LR                     | 1 / BKGD_SUB_MOG2_HISTORY | Learning rate to use for background model |
-| Background Subtraction | BKGD_SUB_MOG2_VARTHRESHOLD           | 10          | The Mahalanobis distance threshold to decide whether a pixel is foreground or background. Higher value (Lower sensitivity): This reduces "salt and pepper" noise and ignores small fluctuations, but you might lose the edges of your actual objects (making bounding boxes smaller/fragmented). Lower value (Higher sensitivity): You’ll catch every tiny movement, but you’ll get a lot of noise from compression artifacts or camera sensor grain. |
-| Threshold              | THRESHOLD_VALUE                      | 127         | The threshold value used to classify pixel intensities. |
-| Clean Mask             | DILATE_KERNEL_SIZE                   | 5 x 5       | Kernel used to dilate mask AFTER threshold is applied. |
-| Identify ROIs          | ROI_BB_FULL_RES_PADDING              | MODEL_W * .02 | Padding to add to ROIs to make sure detection captures full box. |
-| Identify ROIs          | ROI_CONTAINMENT_THRESH               | 0.95         | Input argument to filter_contained_boxes used for removing smaller contained ROIs. Current value is 0.9 (90%). |
-| Identify ROIs          | ROI_DISTANCE_THRESH_RATIO            | 0.05        | Input argument to merge ROIs is distance less than this parameter. |
-| Identify ROIs          | ROI_MAX_RELATIVE_SIZE_RATIO          | 1.0         | Ratio of frame width/height to limit ROIs. Currently accepts ROI if width/height less than frame size. |
-| Identify ROIs          | ROI_MERGE_SIZE_LIMIT                 | MODEL_W * 2 | The max width/height of merged ROIs. Value is equivalent as MODEL_W (expected imgsz for model.predict) |
-| Identify ROIs          | ROI_MIN_AREA_RATIO                   | 0.01        | Minimum area ratio of pixels for objects/motion. This value is in terms of pixels in resized image.  Currently value is set to 41 pixels (1% of width x 1% of height). |
-<br>
-
-Once satisfied with annotated results, you can proceed with running the full pipeline.
-***NOTE:*** If you modified any methods within the test script, be sure to update the predefined code to use your changes in the pipeline.
-<br>
-
-
 ## Detection Model
 
 This guide assumes a YOLO model or fine-tuned YOLO model is available for detection.
@@ -187,6 +187,42 @@ Place your model in the appropriate directory for the application.
 
 Please note the model labels are retrieved from the model directly, so the model must contain these details.
 <br>
+
+
+## Deploy Pipeline
+All components for this application are dockerize.
+Scripts are provided to make deployment easier.
+
+### Start
+[Optional] To make sure there aren't any running containers for this application, run the following which stops the application and prunes containers:
+```bash
+./stop.sh –p
+```
+
+To start the application, run the following:
+```bash
+./start_app.sh –m drone_detection
+```
+
+
+### View Live Detections
+Launch your browser and browse to ```https://<hostname>:30077```. The sample UI is similar to the following:
+
+<div align="center">
+  <img src="sample-ui.gif" width="700">
+</div>
+
+
+### Shutdown
+To shutdown this application, run the following:
+```bash
+./stop.sh
+```
+
+Or add the necessary flag to stop the application and prune containers:
+```bash
+./stop.sh –p
+```
 
 
 ## Test Pipeline Components
@@ -282,7 +318,6 @@ The arguments available are as follows:
 | --no-custom | - | Enable if using Ultralytics YOLO model |
 | -m MODEL_NAME,<br>--model MODEL_NAME | drone_detection | Name of model. Required if `--no-custom` is enabled. |
 | --type {object,motion} | None | Filter by detection type (object or motion). "motion" shows the ROI while "object" shows detection results. |
-<!-- | --device {cpu,gpu,all} | all | Filter by target hardware. | -->
 | --sf | None | Filter test by Smart Filtering pipeline |
 | --debug | False | Enable debug message |
 <!-- | -n DEBUG_FRAME_LIMIT | 100 | Number of frames used for debugging | -->
@@ -310,39 +345,4 @@ In the case of testing the Smart Filtering pipeline, to display the ROIs, you ca
 ```bash
 python test_pipeline.py --source "${SOURCE}" --scenario 4 --sf --type motion
 ```
-
-
-## Deploy Pipeline
-All components for this application are dockerize.
-Scripts are provided to make deployment easier.
-
-### Start
-[Optional] To make sure there aren't any running containers for this application, run the following which stops the application and prunes containers:
-```bash
-./stop.sh –p
-```
-
-To start the application, run the following:
-```bash
-./start_app.sh –m drone_detection
-```
-
-
-### View Live Detections
-Launch your browser and browse to ```https://<hostname>:30077```. The sample UI is similar to the following:
-
-<center><IMG src="doc/sample-ui.gif" height="270px"></IMG></center>
-
-
-### Shutdown
-To shutdown this application, run the following:
-```bash
-./stop.sh
-```
-
-Or add the necessary flag to stop the application and prune containers:
-```bash
-./stop.sh –p
-```
-
 
