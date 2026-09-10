@@ -14,7 +14,7 @@ services:
         network_mode: "host"
         # shm_size: '2gb'  # Give it plenty of space for video frames
         ipc: "host"
-        command: ["/bin/bash", "-c", "python /home/finetune.py --no-train"]
+        command: ["/bin/bash", "-c", "python /home/finetune.py"]
         environment:
             YOLO_CONFIG_DIR: "/tmp"
             DBHOST: "vdms-service"
@@ -50,20 +50,3 @@ services:
                           capabilities: [gpu]
                           count: all
 
-
-# secrets:
-#     self_key:
-#         file: ../certificate/self.key
-#     self_crt:
-#         file: ../certificate/self.crt
-
-
-# networks:
-#     appnet:
-#         driver: overlay
-#         attachable: true
-
-
-# volumes:
-#     app-content:
-#     vdms-content:
