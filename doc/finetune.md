@@ -56,7 +56,7 @@ To avoid modifying your system for training, you can use the provided Dockerfile
 For easy access of host data, the `inputs` directory containing any input videos, the `finetune/app` directory containing this code, and the parent directory where datasets are stored (i.e. `/data1/datasets`) are mounted to the container.
 Please see below for instructions for deploying container via `docker` and `docker compose`.
 ***NOTE:*** `REPO_DIR` is the path of this repo's main directory. Also be sure to update values in `.env` if using docker compose.
-- **Docker:** For this option, be sure to build container first.  You can start the container and fine-tune script via run command.
+- **Docker:** For this option, be sure to build container first.  You can start the container and fine-tune script via run command. If behind proxy, be sure to set them using `--build-arg` and `--env`.
   ```bash
   REPO_DIR=`pwd`
   LOCAL_DATA_DIR=/path/to/your/actual/data/directory
