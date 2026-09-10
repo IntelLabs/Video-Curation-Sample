@@ -1,4 +1,4 @@
-# High Resolution Object Detection Pipeline (WIP)
+# High Resolution Object Detection Pipeline
 
 This pipeline focuses on real-time processing of high-resolution (8K) video for object detection.
 Currently, real-time processing of high-resolution (HR) frames is not possible as large compute power is needed which are typically beyond any HW capabilities.
@@ -44,7 +44,7 @@ Drones are typically small in the video frames so if your use-case of interest h
 For this case, we provide [`test_detections.py`](/fastapi/tests/test_detections.py) which annotates ROIs identified by the Smart Filtering pipeline onto each frame of the video for visual inspection.
 
 For testing purposes, you can use VSCode DevContainer (easiest method) or manually deploy the fastapi dockerfile. Using VSCode is straight forward, so here, we will manually deploy the fastapi Dockerfile as it contains the same setup used in the application AND start the test script.
-Here we will build the container, if not available:
+Here we will build the container, if not available.  If behind proxy, be sure to set them using `--build-arg`.
 ```bash
 REPO_DIR=`pwd`
 
@@ -73,9 +73,11 @@ Since this work focuses on HR videos, we converted the test video to 8K using th
 
 
 To deploy this test, run the following command but modify the name of the test_video.
+If behind proxy, be sure to set them using `--env`.
 The results from the test will be saved in `fastapi/tests/test_detections_results/drone_detection/<test_video>`.
 ```bash
 docker run --rm --ipc=host \
+--user root \
 --gpus all --env NVIDIA_DRIVER_CAPABILITIES=all \
 --name test_detections \
 --env ENABLE_VDMS=False \
@@ -87,7 +89,7 @@ docker run --rm --ipc=host \
 -v ${REPO_DIR}/fastapi/resources:/home/resources \
 -v ${REPO_DIR}/fastapi/tests:/home/tests \
 -v ${REPO_DIR}/fastapi/tests/nginx.conf:/etc/nginx/nginx.conf \
-lcc_fastapi:stream /bin/bash -c "python /home/tests/test_detections.py --source <test_video>.mp4 --type motion"
+lcc_fastapi:stream /bin/bash -c "python /home/tests/test_detections.py --device gpu --source drone_dataset2_hvec.mp4 --type motion"
 ```
 
 
@@ -95,6 +97,7 @@ If you are not satisfied with the results, feel free to modify/optimize the pipe
 The following command starts the detached container.
 ```bash
 docker run -d --rm --ipc=host \
+--user root \
 --gpus all --env NVIDIA_DRIVER_CAPABILITIES=all \
 --name test_detections \
 --env ENABLE_VDMS=False \
@@ -194,8 +197,8 @@ Here we provide details on each available test.
 
 | Component | Test File | Description |
 | --------- | --------- | ----------- |
-| Model | [test_model.py](/fastapi/tests/test_model.py) | Test the model for both CPU and GPU on provided RTSP URL or video file |
-| Stream Readers | [test_readers.py](/fastapi/tests/test_readers.py) | Independently test the stream readers for both CPU and GPU on provided RTSP URL or video file |
+| Model | [test_model.py](/fastapi/tests/test_model.py) | Test the model for GPU on provided RTSP URL or video file |
+| Stream Readers | [test_readers.py](/fastapi/tests/test_readers.py) | Independently test the stream readers for GPU on provided RTSP URL or video file |
 | Smart Filtering | [test_detections.py](/fastapi/tests/test_detections.py) | Independently test the detection pipeline (with and without Smart Filtering) only. Test does not include video clip generation or sending metadata to database for querying. |
 | Stream Readers | [test_pipeline.py](/fastapi/tests/test_pipeline.py) | Scenario 1 tests the behavior of Readers when provided an invalid RTSP url.<br>Scenario 2 reads the RTSP url or video file for a specified duration or until it ends. |
 | Video Clip Generation | [test_pipeline.py](/fastapi/tests/test_pipeline.py) | Scenario 3 mimics the clip generation within the pipeline. |
@@ -203,7 +206,7 @@ Here we provide details on each available test.
 
 
 ### Test Model
-This test reads the `SOURCE` from `./inputs` (the local directory or `/watch_dir` if in container), or RTSP server, and creates a video with overlaid detection results for both GPU and CPU model.
+This test reads the `SOURCE` from `./inputs` (the local directory or `/watch_dir` if in container), or RTSP server, and creates a video with overlaid detection results for GPU model.
 Results are located in `test_model_results/{MODEL_NAME}`.
 ```bash
 python test_models.py -s "${SOURCE}"
@@ -220,12 +223,12 @@ The arguments available for this test are as follows:
 | -s SOURCE,<br>--source SOURCE | anduril_swarm_8K.mp4 | Video filename (located in /inputs) or RTSP target stream endpoint |
 | --no-custom | - | Enable if using Ultralytics YOLO model |
 | -m MODEL_NAME,<br>--model MODEL_NAME | drone_detection | Name of model. Required if `--no-custom` is enabled. |
-| --device {cpu,gpu} | None | Filter by device (cpu or gpu) |
+<!-- | --device {cpu,gpu} | None | Filter by device (cpu or gpu) | -->
 <br>
 
 
 ### Test Readers
-This test reads the `SOURCE` from `./inputs` (the local directory or `/watch_dir` if in container), or RTSP server, and creates a video with overlaid detection results for both GPU and CPU model.
+This test reads the `SOURCE` from `./inputs` (the local directory or `/watch_dir` if in container), or RTSP server, and creates a video with overlaid detection results for GPU model.
 Results are located in `test_readers_results/{SOURCE_NAME}`.
 ```bash
 python test_readers.py -s "${SOURCE}"
@@ -235,7 +238,7 @@ The arguments available for this test are as follows:
 | Argument | Default | Description |
 | -------- | ------- | ----------- |
 | -s SOURCE,<br>--source SOURCE | anduril_swarm_8K.mp4 | Video filename (located in ./inputs) |
-| --device {cpu,gpu,all} | all | Filter by target hardware. |
+<!-- | --device {cpu,gpu,all} | all | Filter by target hardware. | -->
 | --debug | False | Enable debug message |
 <br>
 
@@ -257,7 +260,7 @@ The arguments available are as follows:
 | --no-custom | - | Enable if using Ultralytics YOLO model |
 | -m MODEL_NAME,<br>--model MODEL_NAME | drone_detection | Name of model. Required if `--no-custom` is enabled. |
 | --type {object,motion} | None | Filter by detection type (object or motion). "motion" shows the ROI while "object" shows detection results. |
-| --device {cpu,gpu,all} | all | Filter by target hardware. |
+<!-- | --device {cpu,gpu,all} | all | Filter by target hardware. | -->
 | --sf | None | Filter test by Smart Filtering pipeline |
 | --debug | False | Enable debug message |
 | -n DEBUG_FRAME_LIMIT | 100 | Number of frames used for debugging |
@@ -283,7 +286,7 @@ The arguments available are as follows:
 | --no-custom | - | Enable if using Ultralytics YOLO model |
 | -m MODEL_NAME,<br>--model MODEL_NAME | drone_detection | Name of model. Required if `--no-custom` is enabled. |
 | --type {object,motion} | None | Filter by detection type (object or motion). "motion" shows the ROI while "object" shows detection results. |
-| --device {cpu,gpu,all} | all | Filter by target hardware. |
+<!-- | --device {cpu,gpu,all} | all | Filter by target hardware. | -->
 | --sf | None | Filter test by Smart Filtering pipeline |
 | --debug | False | Enable debug message |
 <!-- | -n DEBUG_FRAME_LIMIT | 100 | Number of frames used for debugging | -->
@@ -307,7 +310,7 @@ The resulting video clips generated from this test are located in `test_pipeline
 Scenario 4 mimics the entire pipeline excluding sending the generated metadata to VDMS.  By default, the test iterates over available devices ("cpu" and "gpu"), detection type ("object" or "motion"), and with and without SF.
 The resulting video clips and the detection results are located in `test_pipeline_results/{MODEL_NAME}/{SOURCE_NAME}/scenario4_{DEVICE}`.
 
-In the case of testing the Smart Filtering pipeline, to display the ROIs, you can use the following, which will test for both gpu and cpu.
+In the case of testing the Smart Filtering pipeline, to display the ROIs, you can use the following, which will test for GPU.
 ```bash
 python test_pipeline.py --source "${SOURCE}" --scenario 4 --sf --type motion
 ```

@@ -47,6 +47,7 @@ RUN apt-get update && \
 ARG CUDA_MAJOR_VERSION=12
 ARG CUDA_MINOR_VERSION=8
 
+# hadolint ignore=DL3008
 RUN apt-get update && \
     apt-get install -y -q --no-install-recommends \
         cuda-toolkit-${CUDA_MAJOR_VERSION}-${CUDA_MINOR_VERSION} \
@@ -55,7 +56,7 @@ RUN apt-get update && \
 
 RUN python3 -m venv ${VIRTUAL_ENV} && \
     ${VIRTUAL_ENV}/bin/pip install --no-cache-dir \
-    "pip==26.1.2" \
+    "pip==26.2.1" \
     "torch==2.10.0" \
     "torchvision==0.25.0" \
     "numpy==1.26.4"
@@ -81,6 +82,7 @@ WORKDIR ${DEPENDENCY_DIR}/opencv/build
 RUN ln -s /usr/include/x86_64-linux-gnu/cudnn*.h /usr/local/cuda/include/ && \
     ln -s /usr/lib/x86_64-linux-gnu/libcudnn*.so* /usr/local/cuda/lib64/
 
+# hadolint ignore=SC2046
 RUN cmake -D CMAKE_BUILD_TYPE=RELEASE \
     -D CMAKE_INSTALL_PREFIX="${VIRTUAL_ENV}" \
     -D OPENCV_EXTRA_MODULES_PATH="${DEPENDENCY_DIR}/opencv_contrib/modules" \
@@ -182,16 +184,11 @@ RUN ldconfig
 ARG DEVICE="CPU"
 ENV DEVICE="${DEVICE}"
 
+ARG DEBUG="0"
+ENV DEBUG="${DEBUG}"
+
 # Set the working directory in the container
 WORKDIR /home
 COPY requirements.txt /home/
-
-# RUN pip3 install --no-cache-dir "pytest>=9.0.3" && \
-#     pip3 install --no-cache-dir --require-hashes -r /home/requirements.CPU.txt --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple && \
-#     pip3 uninstall -y ultralytics opencv-python opencv-contrib-python opencv-python-headless && \
-#     pip3 install --no-cache-dir --require-hashes -r /home/requirements.GPU.txt && \
-#     pip3 uninstall -y opencv-python opencv-contrib-python opencv-python-headless
-
-
 RUN pip3 install --no-cache-dir --require-hashes -r /home/requirements.txt && \
     pip3 uninstall -y opencv-python opencv-contrib-python opencv-python-headless
