@@ -28,7 +28,7 @@ WORKDIR /home
 
 COPY requirements.* /home/
 
-ARG DEVICE="CPU"
+ARG DEVICE="GPU"
 ENV DEVICE="${DEVICE}"
 
 # RUN pip3 install --no-cache-dir -r /home/requirements.in
