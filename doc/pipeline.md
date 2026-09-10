@@ -1,7 +1,7 @@
-# High Resolution Object Detection Pipeline
+# High Resolution Object Detection using Smart Filtering
 
-This pipeline focuses on real-time processing of high-resolution (8K) video for object detection.
-Currently, real-time processing of high-resolution (HR) frames is not possible as large compute power is needed which are typically beyond any HW capabilities.
+This pipeline focuses on real-time processing of high-resolution (8K) video from stationary camera while preserving details to detect potentially small objects, i.e. drones.
+Currently, real-time processing of high-resolution (HR) frames on resource-constrained edge hardware requires scaling up to 2×–15× GPUs.
 There are techniques such as image tiling or resolution reduction, but these workarounds compromise detail integrity, diminish inference throughput, and can make rendering real-time processing of HR feeds infeasible within HW boundaries.
 HR video streams typically achieve higher accuracy in object detection, therefore, a technique to reduce compute on HR videos is needed.
 
@@ -12,13 +12,13 @@ To solve this issue, we created a Smart Filtering Pipeline to significantly redu
 <br>
 
 
-## Smart Filtering Pipeline
+## Smart Filtering
 The Smart Filtering (SF) is a portion of the pipeline which filters HR videos for ROIs which are used in the detection phase instead of processing the entire frame.
 This helps reduce the compute while maintaining detection accuracy.
 In smart filtering, we use motion to help identify ROIs, which is ideal for surveillance and applications such as the test use-case, drone detection, with stationary cameras.
 Keep in mind, if camera is NOT stationary, some background movement may be captured as foreground objects due to background subtraction algorithm.
 
-<center><IMG src="PipelineOptions.png" height="250px"></center>
+<center><IMG src="PipelineFlow.png"></center>
 <center>Flow of Smart Filtering Pipeline</center>
 <br>
 
@@ -89,7 +89,7 @@ docker run --rm --ipc=host \
 -v ${REPO_DIR}/fastapi/resources:/home/resources \
 -v ${REPO_DIR}/fastapi/tests:/home/tests \
 -v ${REPO_DIR}/fastapi/tests/nginx.conf:/etc/nginx/nginx.conf \
-lcc_fastapi:stream /bin/bash -c "python /home/tests/test_detections.py --device gpu --source drone_dataset2_hvec.mp4 --type motion"
+lcc_fastapi:stream /bin/bash -c "python /home/tests/test_detections.py --source <test_video> --type motion"
 ```
 
 
@@ -123,7 +123,6 @@ For testing other components, please see [Testing Pipeline Components](#testing-
 If using VSCode, the provided `.vscode` directory is already mounted in the above command which includes `launch.json` for debugging.
 You can use the provided DevContainer or use the docker extension to connect to the `lcc_fastapi:stream` container by clicking `Attach Visual Studio Code`.
 The DevContainer assumes GPU availability.
-If your system does NOT support GPU, check [devcontainer.json](/.devcontainer/devcontainer.json) and make sure within the `runArgs` section, `"--gpus", "all"` is commented out.
 Once connected, it will install VSCode in the container.
 If you receive an error regarding permissions during installation, you must modify the remote user.
 To allow permission for the installation, open the `Command Pallette` and select `Dev Containers: Open Attached Container Configuration File`.
@@ -145,9 +144,9 @@ Edit the file as follows:
 ```
 <br>
 
-### Optimization Areas
+### Configurable Parameters
 
-For the Smart Filtering pipeline, the following are potential areas for optimizations.
+The following are parameters used to fine-tune the Smart Filtering pipeline.
 
 | Category               | Variable                             | Default     | Description |
 | ---------------------- | ------------------------------------ | ----------- |------------ |
@@ -175,7 +174,7 @@ Once satisfied with annotated results, you can proceed with running the full pip
 <br>
 
 
-## Detections using SF and Fine-Tuned YOLO Model
+## Detection Model
 
 This guide assumes a YOLO model or fine-tuned YOLO model is available for detection.
 
@@ -190,7 +189,7 @@ Please note the model labels are retrieved from the model directly, so the model
 <br>
 
 
-## Testing Pipeline Components
+## Test Pipeline Components
 We provided multiple test scripts to test different components of the pipeline.
 Each of the tests can be run as specified in the [Smart Filtering Pipeline: Testing](#testing) section using the same video `anduril_swarm_8K.mp4` as `SOURCE`.
 Here we provide details on each available test.
@@ -223,7 +222,6 @@ The arguments available for this test are as follows:
 | -s SOURCE,<br>--source SOURCE | anduril_swarm_8K.mp4 | Video filename (located in /inputs) or RTSP target stream endpoint |
 | --no-custom | - | Enable if using Ultralytics YOLO model |
 | -m MODEL_NAME,<br>--model MODEL_NAME | drone_detection | Name of model. Required if `--no-custom` is enabled. |
-<!-- | --device {cpu,gpu} | None | Filter by device (cpu or gpu) | -->
 <br>
 
 
@@ -238,7 +236,6 @@ The arguments available for this test are as follows:
 | Argument | Default | Description |
 | -------- | ------- | ----------- |
 | -s SOURCE,<br>--source SOURCE | anduril_swarm_8K.mp4 | Video filename (located in ./inputs) |
-<!-- | --device {cpu,gpu,all} | all | Filter by target hardware. | -->
 | --debug | False | Enable debug message |
 <br>
 
@@ -260,7 +257,6 @@ The arguments available are as follows:
 | --no-custom | - | Enable if using Ultralytics YOLO model |
 | -m MODEL_NAME,<br>--model MODEL_NAME | drone_detection | Name of model. Required if `--no-custom` is enabled. |
 | --type {object,motion} | None | Filter by detection type (object or motion). "motion" shows the ROI while "object" shows detection results. |
-<!-- | --device {cpu,gpu,all} | all | Filter by target hardware. | -->
 | --sf | None | Filter test by Smart Filtering pipeline |
 | --debug | False | Enable debug message |
 | -n DEBUG_FRAME_LIMIT | 100 | Number of frames used for debugging |
@@ -316,27 +312,28 @@ python test_pipeline.py --source "${SOURCE}" --scenario 4 --sf --type motion
 ```
 
 
-## Pipeline Deployment
+## Deploy Pipeline
 All components for this application are dockerize.
-Scripts are also provided to make deployment easier.
+Scripts are provided to make deployment easier.
 
-### Deployment
+### Start
 [Optional] To make sure there aren't any running containers for this application, run the following which stops the application and prunes containers:
 ```bash
 ./stop.sh –p
 ```
 
-To start the application, run the following for GPU:
+To start the application, run the following:
 ```bash
-./start_app.sh –e GPU –o –m drone_detection
+./start_app.sh –m drone_detection
 ```
 
 
-### Visualization: View live detection
-To view the live detections, open a browser for host system and goto `http://<HOST_IP>:30077`
+### View Live Detections
+Launch your browser and browse to ```https://<hostname>:30077```. The sample UI is similar to the following:
 
-### Query: View Page to Query Videos
-To query videos, open a browser for host system and goto `http://<HOST_IP>:30007`.
+<center><IMG src="doc/sample-ui.gif" height="270px"></IMG></center>
+
+***NOTE:*** If you see a browser warning of self-signed certificate, please accept it to proceed to the sample UI.
 
 
 ### Shutdown
@@ -349,4 +346,5 @@ Or add the necessary flag to stop the application and prune containers:
 ```bash
 ./stop.sh –p
 ```
+
 

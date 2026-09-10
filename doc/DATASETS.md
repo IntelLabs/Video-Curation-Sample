@@ -18,8 +18,8 @@ This repository utilizes external datasets and media for training/demo purposes,
 
 ---
 
-## 3. DUT Anti-UAV Dataset
+## 3. [Optional] DUT Anti-UAV Dataset
 * **Source:** [wangdongdut/DUT-Anti-UAV](https://github.com/wangdongdut/DUT-Anti-UAV)
 * **License:** [Apache License 2.0](https://github.com/wangdongdut/DUT-Anti-UAV/blob/master/LICENSE)
 * **Citation:** See DOI [10.48550/arXiv.2205.10851](https://doi.org/10.48550/arXiv.2205.10851) (Zhao et al., IEEE T-ITS 2022).
-* **Usage:** External sample video dataset for pipeline validation/demonstration.
+* **Usage:** External sample video dataset ONLY used for pipeline evaluation via command: `python tests/test_eval.py --type object`. Test script ([test_eval.py](../fastapi/tests/test_eval.py)) evaluates videos 9-20 of the dataset since the camera seems stationary.

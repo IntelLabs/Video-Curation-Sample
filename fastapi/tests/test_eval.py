@@ -455,10 +455,7 @@ def pytest_generate_tests(metafunc):
     ):
         # Define video targets explicitly during collection
         video_names = [f"video{i:02d}" for i in range(9, 21)]
-        # video_names = ["video16", "video17", "video12"]  # , "video18"]
-        # video_names = ["video17"]  # DEBUG: worst perf
-        # video_names = ["video12"]  # DEBUG: worst perf
-        # video_names = ["video09"]
+        # video_names = ["video12"]
 
         # Read device target filters passed from your CLI parser args block
         # Falls back to both types if running globally via '--device all'
@@ -594,9 +591,6 @@ class TestEvalSmartFilteringDetections(BaseTest):
 
     benchmarks = []  # Class-level attribute required by _finalize_benchmarks
 
-    # @pytest.mark.parametrize("device", ["gpu", "cpu"])
-    # @pytest.mark.parametrize("sf_enabled", [True, False])
-    # @pytest.mark.parametrize("detection_type", ["object", "motion"])
     def test_eval(
         self, device, detection_type, sf_enabled, video_name, gt_enabled=True
     ):
