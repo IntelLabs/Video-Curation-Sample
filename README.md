@@ -54,8 +54,6 @@ Launch your browser and browse to ```https://<hostname>:30077```. The sample UI 
 
 <center><IMG src="doc/sample-ui.gif" height="270px"></IMG></center>
 
-***NOTE:*** If you see a browser warning of self-signed certificate, please accept it to proceed to the sample UI.
-
 
 ### Shutdown
 To shutdown this application, run the following:
