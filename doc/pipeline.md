@@ -7,7 +7,7 @@ HR video streams typically achieve higher accuracy in object detection, therefor
 
 To solve this issue, we created a Smart Filtering Pipeline to significantly reduce pixel processing (compute) by *automatically* identifying the regions of interest (ROIs) which is then forwarded to the detection model.
 
-<center><IMG src="Pipeline.png" height="250px"></center>
+<center><IMG src="Pipeline.png" width="600px"></center>
 <center>High-level High Resolution Object Detection Pipeline</center>
 <br>
 
@@ -18,7 +18,7 @@ This helps reduce the compute while maintaining detection accuracy.
 In smart filtering, we use motion to help identify ROIs, which is ideal for surveillance and applications such as the test use-case, drone detection, with stationary cameras.
 Keep in mind, if camera is NOT stationary, some background movement may be captured as foreground objects due to background subtraction algorithm.
 
-<center><IMG src="PipelineFlow.png"></center>
+<center><IMG src="PipelineFlow.png" width="600px"></center>
 <center>Flow of Smart Filtering Pipeline</center>
 <br>
 

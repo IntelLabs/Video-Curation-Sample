@@ -6,6 +6,9 @@ The application can process high-resolution video in real-time using a Smart Fil
 
 Please see [High Resolution Object Detection Pipeline](./doc/pipeline.md) for more details.
 
+<center><IMG src="./doc/Pipeline.png" width="500px"></center>
+<center>High-level High Resolution Object Detection Pipeline</center>
+
 
 ### License Obligations
 - FFmpeg is an open source project licensed under LGPL and GPL. See https://www.ffmpeg.org/legal.html. You are solely responsible for determining if your use of FFmpeg requires any additional licenses. Intel is not responsible for obtaining any such licenses, nor liable for any licensing fees due, in connection with your use of FFmpeg.
