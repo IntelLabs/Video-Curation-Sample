@@ -34,7 +34,6 @@ script_usage()
 
     Options:
         -h                  optional    Print this help message
-        -t or --type        optional    Deployment method (compose) [Default: compose]
         -p or --prune       optional    Flag to prune docker builder
 
 EOF
@@ -43,7 +42,6 @@ EOF
 while true; do
     case "$1" in
         -h) script_usage; exit 0 ;;
-        -t | --type) shift; EXP_TYPE="$1"; shift ;;
         -p | --prune) shift; DOCKER_PRUNE="1" ;;
         --) shift; break ;;
         *) script_usage; exit 0 ;;
