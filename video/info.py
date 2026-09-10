@@ -34,6 +34,7 @@ class InfoHandler(web.RequestHandler):
             "-count_frames",
             "-show_streams",
             "-i",
+            "--",
             input_path,
         ]
         with Popen(
