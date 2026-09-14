@@ -16,8 +16,8 @@ Please see [High Resolution Object Detection Pipeline](./doc/pipeline.md) for mo
 - FFmpeg is an open source project licensed under LGPL and GPL. See https://www.ffmpeg.org/legal.html. You are solely responsible for determining if your use of FFmpeg requires any additional licenses. Intel is not responsible for obtaining any such licenses, nor liable for any licensing fees due, in connection with your use of FFmpeg.
 
 
-### Datasets & Attributions
-- This project utilizes third-party open datasets. Please see our [Data Attributions](docs/DATASETS.md) for full licensing, copyright details, and citation parameters.
+### Attributions
+- This project utilizes third-party open datasets and a sample fine-tuned model. Please see our [Attributions](./doc/ATTRIBUTES.md) for full licensing, copyright details, and citation parameters.
 
 
 ## Install Prerequisites:
@@ -39,8 +39,13 @@ Please see [High Resolution Object Detection Pipeline](./doc/pipeline.md) for mo
 
 
 ## Deploy High Resolution Drone Detection using Smart Filtering
-All components for this application are dockerize.
+All components for this application are dockerized.
 Scripts are provided to make deployment easier.
+
+
+### Model Preparation
+If using our sample fine-tuned model for Drone Detection, please download `drone_detection.pt` from [Video Curation Sample Models repo](https://github.com/IntelLabs/video-curation-sample-models.git) and save it as `fastapi/resources/models/ultralytics/custom_models/drone_detection.pt`.
+
 
 ### Start
 [Optional] To make sure there aren't any running containers for this application, run the following which stops the application and prunes containers:

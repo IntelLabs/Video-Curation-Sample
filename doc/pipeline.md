@@ -186,6 +186,8 @@ Place your model in the appropriate directory for the application.
 | `fastapi/resources/models/ultralytics/${MODEL_NAME}/FP16` | Ultralytics YOLO models are typically placed in this directory where MODEL_NAME is the short name for the model (i.e. `yolo11n`). The PT model (`${MODEL_NAME}.pt`) is exported to OpenVINO (`${MODEL_NAME}_openvino_model/`) or TensorRT (`${MODEL_NAME}.engine`), dependent on device used. |
 
 Please note the model labels are retrieved from the model directly, so the model must contain these details.
+
+A sample model is available in [Video Curation Sample Models: Drone Detection](https://github.com/IntelLabs/video-curation-sample-models/tree/model_updates/Drone_Detection).  If using this model, download and save model as `fastapi/resources/models/ultralytics/custom_models/drone_detection.pt`.
 <br>
 
 
