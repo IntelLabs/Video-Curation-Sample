@@ -44,7 +44,7 @@ Scripts are provided to make deployment easier.
 
 
 ### Model Preparation
-If using our sample fine-tuned model for Drone Detection, please download `drone_detection.pt` from [Video Curation Sample Models repo](https://github.com/IntelLabs/video-curation-sample-models.git) and save it as `fastapi/resources/models/ultralytics/custom_models/drone_detection.pt`.
+If using our sample fine-tuned model for Drone Detection, please download `drone_detection.pt` from [Video Curation Sample Models: Drone Detection](https://github.com/IntelLabs/video-curation-sample-models.git) and save it as `fastapi/resources/models/ultralytics/custom_models/drone_detection.pt`.
 
 
 ### Start
