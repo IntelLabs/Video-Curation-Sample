@@ -71,7 +71,7 @@ The following are parameters used to fine-tune the Smart Filtering pipeline.
 The current implementation of the Smart Filtering pipeline is optimized for the test use-case, drone detection.
 Drones are typically small in the video frames so if your use-case of interest has different objects, it may be beneficial to test the pipeline results on an existing test video for your use-case.
 
-For this case, we provide [`test_detections.py`](/fastapi/tests/test_detections.py) which annotates ROIs identified by the Smart Filtering pipeline onto each frame of the video for visual inspection.
+For this case, we provide [`test_detections.py`](../fastapi/tests/test_detections.py) which annotates ROIs identified by the Smart Filtering pipeline onto each frame of the video for visual inspection.
 
 For testing purposes, you can use VSCode DevContainer (easiest method) or manually deploy the fastapi dockerfile. Using VSCode is straight forward, so here, we will manually deploy the fastapi Dockerfile as it contains the same setup used in the application AND start the test script.
 Here we will build the container, if not available.  If behind proxy, be sure to set them using `--build-arg`.
@@ -186,6 +186,8 @@ Place your model in the appropriate directory for the application.
 | `fastapi/resources/models/ultralytics/${MODEL_NAME}/FP16` | Ultralytics YOLO models are typically placed in this directory where MODEL_NAME is the short name for the model (i.e. `yolo11n`). The PT model (`${MODEL_NAME}.pt`) is exported to OpenVINO (`${MODEL_NAME}_openvino_model/`) or TensorRT (`${MODEL_NAME}.engine`), dependent on device used. |
 
 Please note the model labels are retrieved from the model directly, so the model must contain these details.
+
+A sample model is available in [Video Curation Sample Models: Drone Detection](https://github.com/IntelLabs/video-curation-sample-models/tree/main/Drone_Detection).  If using this model, download and save model as `fastapi/resources/models/ultralytics/custom_models/drone_detection.pt`.
 <br>
 
 
@@ -232,12 +234,12 @@ Here we provide details on each available test.
 
 | Component | Test File | Description |
 | --------- | --------- | ----------- |
-| Model | [test_model.py](/fastapi/tests/test_model.py) | Test the model for GPU on provided RTSP URL or video file |
-| Stream Readers | [test_readers.py](/fastapi/tests/test_readers.py) | Independently test the stream readers for GPU on provided RTSP URL or video file |
-| Smart Filtering | [test_detections.py](/fastapi/tests/test_detections.py) | Independently test the detection pipeline (with and without Smart Filtering) only. Test does not include video clip generation or sending metadata to database for querying. |
-| Stream Readers | [test_pipeline.py](/fastapi/tests/test_pipeline.py) | Scenario 1 tests the behavior of Readers when provided an invalid RTSP url.<br>Scenario 2 reads the RTSP url or video file for a specified duration or until it ends. |
-| Video Clip Generation | [test_pipeline.py](/fastapi/tests/test_pipeline.py) | Scenario 3 mimics the clip generation within the pipeline. |
-| Smart Filtering | [test_pipeline.py](/fastapi/tests/test_pipeline.py) | Scenario 4 tests the entire pipeline and saves output video of results. |
+| Model | [test_model.py](../fastapi/tests/test_model.py) | Test the model for GPU on provided RTSP URL or video file |
+| Stream Readers | [test_readers.py](../fastapi/tests/test_readers.py) | Independently test the stream readers for GPU on provided RTSP URL or video file |
+| Smart Filtering | [test_detections.py](../fastapi/tests/test_detections.py) | Independently test the detection pipeline (with and without Smart Filtering) only. Test does not include video clip generation or sending metadata to database for querying. |
+| Stream Readers | [test_pipeline.py](../fastapi/tests/test_pipeline.py) | Scenario 1 tests the behavior of Readers when provided an invalid RTSP url.<br>Scenario 2 reads the RTSP url or video file for a specified duration or until it ends. |
+| Video Clip Generation | [test_pipeline.py](../fastapi/tests/test_pipeline.py) | Scenario 3 mimics the clip generation within the pipeline. |
+| Smart Filtering | [test_pipeline.py](../fastapi/tests/test_pipeline.py) | Scenario 4 tests the entire pipeline and saves output video of results. |
 
 
 ### Test Model

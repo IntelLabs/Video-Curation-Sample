@@ -11,7 +11,7 @@ If detecting only one class, be sure the dataset contains negative images (witho
 For a well rounded dataset, be sure it contains train, validation, AND test sets to follow the expected [Ultralytics YOLO Format](https://docs.ultralytics.com/datasets/detect/).
 The provided script checks if the original dataset contains `train`, `validation`, AND `test` directories.
 If it does not, it proceeds with converting the dataset into this format assuming the original dataset has `images` and `labels` directory with sub-directories `train`, `validation`, AND `test`.
-If your dataset does not follow this format, please modify `prepare_dataset` in `finetune.py`.
+If your dataset does not follow this format, please modify `prepare_dataset` in [`finetune.py`](../finetune/app/finetune.py).
 
 In this guide, the [SynDroneVision dataset](https://zenodo.org/records/13360116) is used.
 Please see their [paper](https://ieeexplore.ieee.org/document/10943801) for more details.
@@ -19,7 +19,7 @@ The original dataset is saved in `SynDroneVision` directory and since it is not 
 
 
 ## Training Configurations
-The configurations used for training on 2x NVIDIA A100 80GB PCIe are specified in `include/train_args.py`.
+The configurations used for training on 2x NVIDIA A100 80GB PCIe are specified in [`include/train_args.py`](../finetune/app/include/train_args.py).
 Feel free to modify these parameters based on your hardware limitations such as VRAM of GPU.
 
 
@@ -49,7 +49,7 @@ THe following arguments are available:
 
 ## Deployment
 Python 3.10.12 on Ubuntu 22 was used for testing.
-To manually setup your environment, use the provided `requirements.txt` and `requirements.GPU.txt` files.
+To manually setup your environment, use the provided [`requirements.txt`](../finetune/requirements.txt) file.
 Be sure your system contains the required NVIDIA packages to use GPUs for training.
 
 To avoid modifying your system for training, you can use the provided Dockerfile to deploy a container.
@@ -82,6 +82,7 @@ Please see below for instructions for deploying container via `docker` and `dock
   ```
 
 Once all stages are completed, stop and/or remove running container.
-<!-- docker compose down --remove-orphans -->
-Keep note of the latest model, as this model will be copied to different location for inclusion in full application.
 
+Keep note of the latest model, as this model will be copied to a different location for the detection application.
+
+A sample model, generated using these instructions, is available in [Video Curation Sample Models: Drone Detection](https://github.com/IntelLabs/video-curation-sample-models/tree/main/Drone_Detection).
