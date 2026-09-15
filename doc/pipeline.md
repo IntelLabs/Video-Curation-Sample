@@ -187,7 +187,7 @@ Place your model in the appropriate directory for the application.
 
 Please note the model labels are retrieved from the model directly, so the model must contain these details.
 
-A sample model is available in [Video Curation Sample Models: Drone Detection](https://github.com/IntelLabs/video-curation-sample-models/tree/model_updates/Drone_Detection).  If using this model, download and save model as `fastapi/resources/models/ultralytics/custom_models/drone_detection.pt`.
+A sample model is available in [Video Curation Sample Models: Drone Detection](https://github.com/IntelLabs/video-curation-sample-models/tree/main/Drone_Detection).  If using this model, download and save model as `fastapi/resources/models/ultralytics/custom_models/drone_detection.pt`.
 <br>
 
 
