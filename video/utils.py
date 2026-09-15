@@ -1,5 +1,5 @@
 import os
-
+import re
 
 def safely_join_path(base_dir, add_path):
     safe_base = os.path.abspath(base_dir)
@@ -34,5 +34,14 @@ def validate_video_name(name):
         raise ValueError("Video name cannot be empty")
     # Disallow path separators to ensure this is just a file name.
     if os.sep in cleaned or "/" in cleaned or "\\" in cleaned:
+        raise ValueError(f"Invalid video name: {cleaned}")
+    # Restrict the video name to a safe subset of characters to avoid
+    # passing arbitrary strings to external commands.
+    # Allow letters, digits, underscore, hyphen and dot, and disallow
+    # leading dot and leading hyphen to avoid hidden/special files and
+    # command option injection.
+    if cleaned.startswith(".") or cleaned.startswith("-"):
+        raise ValueError(f"Invalid video name: {cleaned}")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", cleaned):
         raise ValueError(f"Invalid video name: {cleaned}")
     return cleaned
